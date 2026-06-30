@@ -24,6 +24,7 @@ import (
 	"github.com/sean1588/herdr-orchestrator/internal/config"
 	"github.com/sean1588/herdr-orchestrator/internal/exec"
 	"github.com/sean1588/herdr-orchestrator/internal/github"
+	"github.com/sean1588/herdr-orchestrator/internal/notify"
 	"github.com/sean1588/herdr-orchestrator/internal/store"
 )
 
@@ -52,6 +53,8 @@ type Config struct {
 	// for CI/reviews/mergeability; default 15s.
 	StatusPollInterval time.Duration
 	Logger             *slog.Logger
+	// Notifier forwards escalation/alert events out-of-band; default notify.Nop.
+	Notifier notify.Notifier
 }
 
 // Engine drives tasks through the workflow.
@@ -68,6 +71,7 @@ type Engine struct {
 	parseDur            func(string) (time.Duration, error)
 	statusPoll          time.Duration
 	log                 *slog.Logger
+	notifier            notify.Notifier
 }
 
 // New builds an Engine, applying defaults.
@@ -87,6 +91,7 @@ func New(c Config) *Engine {
 		parseDur:   c.DurationFunc,
 		statusPoll: c.StatusPollInterval,
 		log:        c.Logger,
+		notifier:   c.Notifier,
 	}
 	if e.taskDir == "" {
 		e.taskDir = os.TempDir()
@@ -105,6 +110,9 @@ func New(c Config) *Engine {
 	}
 	if e.log == nil {
 		e.log = slog.New(slog.NewTextHandler(os.Stderr, nil))
+	}
+	if e.notifier == nil {
+		e.notifier = notify.Nop{}
 	}
 	return e
 }
@@ -177,8 +185,15 @@ func (e *Engine) ensureTask(ctx context.Context, issue int) (*store.Task, bool, 
 
 // drive runs the interpreter loop until a halt state (goal or terminal).
 func (e *Engine) drive(ctx context.Context, task *store.Task) (string, error) {
+	// transitioned guards the escalated notification: fire only when this drive
+	// actually moved the task into the alert terminal state, not when it was
+	// re-entered already there (a re-run of an escalated issue must stay quiet).
+	transitioned := false
 	for {
 		if e.isHalt(task.CurrentState) {
+			if transitioned {
+				e.notifyTerminalAlert(ctx, task)
+			}
 			e.log.Info("halt", "task", task.ID, "state", task.CurrentState, "pr", prNum(task))
 			return task.CurrentState, nil
 		}
@@ -202,6 +217,7 @@ func (e *Engine) drive(ctx context.Context, task *store.Task) (string, error) {
 		if err := e.advance(ctx, task, next, trigger, result); err != nil {
 			return task.CurrentState, err
 		}
+		transitioned = true
 	}
 }
 
@@ -621,6 +637,36 @@ func (e *Engine) alert(ctx context.Context, task *store.Task, msg string) {
 	}); err != nil {
 		e.log.Warn("failed to record alert", "task", task.ID, "err", err)
 	}
+	e.notify(ctx, notify.Event{
+		TaskID: task.ID,
+		Issue:  task.Issue,
+		State:  task.CurrentState,
+		Kind:   "alert",
+		Detail: msg,
+	})
+}
+
+// notify forwards an out-of-band event, swallowing any delivery error: a
+// notifier must never fail or block the drive loop.
+func (e *Engine) notify(ctx context.Context, ev notify.Event) {
+	if err := e.notifier.Notify(ctx, ev); err != nil {
+		e.log.Warn("notify failed", "task", ev.TaskID, "kind", ev.Kind, "err", err)
+	}
+}
+
+// notifyTerminalAlert fires an "escalated" event when a task halts at a terminal
+// state flagged alert (the escalated state); other halts (goal, plain terminals)
+// are silent.
+func (e *Engine) notifyTerminalAlert(ctx context.Context, task *store.Task) {
+	if !e.wf.States[task.CurrentState].Alert {
+		return
+	}
+	e.notify(ctx, notify.Event{
+		TaskID: task.ID,
+		Issue:  task.Issue,
+		State:  task.CurrentState,
+		Kind:   "escalated",
+	})
 }
 
 // checkRetryCap enforces a state's retry cap on entry: it increments the

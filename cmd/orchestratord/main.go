@@ -26,6 +26,7 @@ import (
 	"github.com/sean1588/herdr-orchestrator/internal/engine"
 	"github.com/sean1588/herdr-orchestrator/internal/exec"
 	"github.com/sean1588/herdr-orchestrator/internal/github"
+	"github.com/sean1588/herdr-orchestrator/internal/notify"
 	"github.com/sean1588/herdr-orchestrator/internal/proc"
 	"github.com/sean1588/herdr-orchestrator/internal/store"
 )
@@ -70,6 +71,7 @@ run/recover flags:
   --db PATH              sqlite store path (default "orchestrator.db")
   --worktrees-dir PATH   parent dir for worktrees (default: sibling of repo)
   --task-dir PATH        dir for task context files (default: temp dir)
+  --notify-webhook URL   POST escalation/alert events as JSON (default: none)
 `)
 }
 
@@ -103,6 +105,7 @@ func cmdValidate(args []string) int {
 // commonFlags are shared by run and recover.
 type commonFlags struct {
 	config, repo, base, db, worktreesDir, taskDir string
+	notifyWebhook                                 string
 }
 
 func registerCommon(fs *flag.FlagSet, cf *commonFlags) {
@@ -112,6 +115,7 @@ func registerCommon(fs *flag.FlagSet, cf *commonFlags) {
 	fs.StringVar(&cf.db, "db", "orchestrator.db", "sqlite store path")
 	fs.StringVar(&cf.worktreesDir, "worktrees-dir", "", "parent dir for worktrees (default: sibling of repo)")
 	fs.StringVar(&cf.taskDir, "task-dir", "", "dir for task context files (default: temp dir)")
+	fs.StringVar(&cf.notifyWebhook, "notify-webhook", "", "POST escalation/alert events as JSON to this URL (default: none)")
 }
 
 // wire loads+validates the config and builds the engine with real backends.
@@ -140,6 +144,12 @@ func (cf commonFlags) wire(ctx context.Context) (*engine.Engine, *store.Store, e
 		backend.WorktreesDir = cf.worktreesDir
 	}
 
+	// nil notifier => engine.New defaults to notify.Nop (no out-of-band delivery).
+	var notifier notify.Notifier
+	if cf.notifyWebhook != "" {
+		notifier = notify.Webhook{URL: cf.notifyWebhook}
+	}
+
 	eng := engine.New(engine.Config{
 		Workflow:  wf,
 		Backend:   backend,
@@ -150,6 +160,7 @@ func (cf commonFlags) wire(ctx context.Context) (*engine.Engine, *store.Store, e
 		Repo:      repoSlug(wf),
 		ConfigDir: filepath.Dir(cf.config),
 		TaskDir:   cf.taskDir,
+		Notifier:  notifier,
 	})
 	return eng, st, nil
 }

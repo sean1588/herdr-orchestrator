@@ -61,6 +61,16 @@ func (f *fakeBackend) Close(ctx context.Context, h exec.Handle) error { return n
 type fakeGH struct {
 	pr    *github.PR
 	issue *github.Issue
+
+	// merge-gate inputs (M9/M10): a single status, or a sequence consumed one per
+	// PRStatus call to simulate a PR whose state changes across polls.
+	status    *github.PRStatus
+	statusSeq []*github.PRStatus
+	statusIdx int
+
+	merged   bool
+	mergeErr error
+	merges   int
 }
 
 func (g *fakeGH) FindPR(ctx context.Context, repoDir, branch string) (*github.PR, error) {
@@ -71,6 +81,25 @@ func (g *fakeGH) Issue(ctx context.Context, repoDir string, n int) (*github.Issu
 		return g.issue, nil
 	}
 	return &github.Issue{Number: n, Title: "Test", Body: "Body"}, nil
+}
+func (g *fakeGH) PRStatus(ctx context.Context, repoDir string, pr int) (*github.PRStatus, error) {
+	if len(g.statusSeq) > 0 {
+		i := min(g.statusIdx, len(g.statusSeq)-1)
+		g.statusIdx++
+		return g.statusSeq[i], nil
+	}
+	if g.status != nil {
+		return g.status, nil
+	}
+	return &github.PRStatus{State: "OPEN"}, nil
+}
+func (g *fakeGH) Merge(ctx context.Context, repoDir string, pr int) error {
+	g.merges++
+	if g.mergeErr != nil {
+		return g.mergeErr
+	}
+	g.merged = true
+	return nil
 }
 
 func newEngine(t *testing.T, st *store.Store, b exec.ExecutionBackend, gh github.Client, timeout time.Duration) *Engine {

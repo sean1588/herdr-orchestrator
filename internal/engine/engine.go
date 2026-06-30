@@ -48,7 +48,10 @@ type Config struct {
 	Goal         string                              // halt-on-enter success state; default "pr_open"
 	StartState   string                              // where Phase 1 enqueues issues; default "queued"
 	DurationFunc func(string) (time.Duration, error) // default time.ParseDuration
-	Logger       *slog.Logger
+	// StatusPollInterval is how often the merge gate is re-evaluated while waiting
+	// for CI/reviews/mergeability; default 15s.
+	StatusPollInterval time.Duration
+	Logger             *slog.Logger
 }
 
 // Engine drives tasks through the workflow.
@@ -63,6 +66,7 @@ type Engine struct {
 	taskDir             string
 	goal, startState    string
 	parseDur            func(string) (time.Duration, error)
+	statusPoll          time.Duration
 	log                 *slog.Logger
 }
 
@@ -81,6 +85,7 @@ func New(c Config) *Engine {
 		goal:       c.Goal,
 		startState: c.StartState,
 		parseDur:   c.DurationFunc,
+		statusPoll: c.StatusPollInterval,
 		log:        c.Logger,
 	}
 	if e.taskDir == "" {
@@ -94,6 +99,9 @@ func New(c Config) *Engine {
 	}
 	if e.parseDur == nil {
 		e.parseDur = time.ParseDuration
+	}
+	if e.statusPoll == 0 {
+		e.statusPoll = 15 * time.Second
 	}
 	if e.log == nil {
 		e.log = slog.New(slog.NewTextHandler(os.Stderr, nil))
@@ -226,7 +234,53 @@ func (e *Engine) runState(ctx context.Context, task *store.Task) (next, trigger,
 		return e.awaitAgentState(ctx, task, st)
 	}
 
-	return "", "", "", fmt.Errorf("state %q: no Phase 1-supported trigger (decisions and other events are out of scope)", name)
+	// Merge-gate wait: status.changed re-evaluates the merge gate. A state with a
+	// timeout (blocked_on_gate) polls until the gate passes or it gives up; one
+	// without (approved) checks once on entry and branches.
+	if sct := findEventTransition(st, "status.changed"); sct != nil {
+		if timeoutT := findTimeoutTransition(st); timeoutT != nil {
+			return e.awaitStatusGate(ctx, task, sct, timeoutT)
+		}
+		verdict, err := e.evaluateGate(ctx, task, sct)
+		if err != nil {
+			return "", "", "", err
+		}
+		return sct.Branch[verdict], "status.changed", verdict, nil
+	}
+
+	return "", "", "", fmt.Errorf("state %q: no supported trigger (no agent.done or status.changed transition)", name)
+}
+
+// awaitStatusGate polls the merge gate on an interval until it passes (taking the
+// transition's pass branch, e.g. merging) or the state's timeout elapses (the
+// timeout target, e.g. escalated). status changes have no push source in Phase
+// 2a, so the engine polls the authoritative GitHub status.
+func (e *Engine) awaitStatusGate(ctx context.Context, task *store.Task, gateT, timeoutT *config.Transition) (next, trigger, result string, err error) {
+	d, perr := e.parseDur(timeoutT.When.Timeout)
+	if perr != nil {
+		return "", "", "", fmt.Errorf("parse timeout %q: %w", timeoutT.When.Timeout, perr)
+	}
+	deadline := time.NewTimer(d)
+	defer deadline.Stop()
+
+	for {
+		verdict, gerr := e.evaluateGate(ctx, task, gateT)
+		if gerr != nil {
+			return "", "", "", gerr
+		}
+		if verdict == "pass" {
+			return gateT.Branch["pass"], "status.changed", "pass", nil
+		}
+		select {
+		case <-ctx.Done():
+			return "", "", "", ctx.Err()
+		case <-deadline.C:
+			e.log.Warn("merge gate timeout", "task", task.ID, "state", task.CurrentState)
+			return timeoutT.To, "timeout", "", nil
+		case <-time.After(e.statusPoll):
+			// re-poll
+		}
+	}
 }
 
 // awaitAgentState implements the implementing-state wait: react to agent.done
@@ -302,14 +356,28 @@ func (e *Engine) evaluateDone(ctx context.Context, task *store.Task, t *config.T
 }
 
 // evaluateGate evaluates all gates referenced by a transition over authoritative
-// sources, returning "pass" iff every gate passes, else "fail".
+// sources, returning "pass" iff every gate passes, else "fail". The PR-status
+// gates (checks/reviews/mergeable) share one PRStatus read so a single evaluation
+// sees a consistent snapshot.
 func (e *Engine) evaluateGate(ctx context.Context, task *store.Task, t *config.Transition) (string, error) {
+	var status *github.PRStatus
 	for _, gname := range t.GateRefs() {
 		g, ok := e.wf.Gates[gname]
 		if !ok {
 			return "", fmt.Errorf("gate %q not declared", gname)
 		}
-		pass, err := e.evalGate(ctx, task, gname, g)
+		// The merge gates read PR status; fetch it once, lazily.
+		if g.Type != "github_pr" && status == nil {
+			if task.PRNumber == nil {
+				return "fail", nil // no PR yet => merge gates cannot pass
+			}
+			s, err := e.gh.PRStatus(ctx, e.repoDir, *task.PRNumber)
+			if err != nil {
+				return "", fmt.Errorf("gate %q: read PR status: %w", gname, err)
+			}
+			status = s
+		}
+		pass, err := e.gatePass(ctx, task, gname, g, status)
 		if err != nil {
 			return "", err
 		}
@@ -320,7 +388,9 @@ func (e *Engine) evaluateGate(ctx context.Context, task *store.Task, t *config.T
 	return "pass", nil
 }
 
-func (e *Engine) evalGate(ctx context.Context, task *store.Task, name string, g config.Gate) (bool, error) {
+// gatePass evaluates one gate against the authoritative source: github_pr via a
+// fresh PR lookup, the merge gates against the shared PRStatus snapshot.
+func (e *Engine) gatePass(ctx context.Context, task *store.Task, name string, g config.Gate, status *github.PRStatus) (bool, error) {
 	switch g.Type {
 	case "github_pr":
 		pr, err := e.gh.FindPR(ctx, e.repoDir, task.Branch)
@@ -334,9 +404,14 @@ func (e *Engine) evalGate(ctx context.Context, task *store.Task, name string, g 
 		task.PRNumber = &n
 		e.log.Info("gate pass: PR detected", "task", task.ID, "gate", name, "pr", n)
 		return true, nil
+	case "github_checks":
+		return status.ChecksGreen(), nil
+	case "github_reviews":
+		return status.ApprovedReviews >= g.MinApproved, nil
+	case "github_mergeable":
+		return status.Mergeable == "MERGEABLE", nil
 	default:
-		// ci_green / approvals / no_conflicts are part of the merge gate (out of Phase 1).
-		return false, fmt.Errorf("gate %q: type %q not implemented in Phase 1", name, g.Type)
+		return false, fmt.Errorf("gate %q: type %q not supported", name, g.Type)
 	}
 }
 

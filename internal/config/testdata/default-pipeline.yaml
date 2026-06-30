@@ -110,4 +110,11 @@ states:
   merged: { terminal: success }
   closed: { terminal: rejected }
   escalated: { terminal: needs_human, alert: true }
-  blocked_on_gate: { wait_for: status.changed }
+
+  blocked_on_gate:
+    transitions:
+      - when: { event: status.changed }
+        evaluate: { gate: [ci_green, approvals, no_conflicts] }
+        branch: { pass: merging, fail: blocked_on_gate }
+      - when: { timeout: 30m }
+        to: escalated

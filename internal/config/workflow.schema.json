@@ -1,0 +1,162 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://herdr-orchestrator/workflow.schema.json",
+  "title": "Herdr Orchestrator workflow",
+  "type": "object",
+  "required": ["version", "name", "states"],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "type": "integer", "minimum": 0 },
+    "name": { "type": "string", "minLength": 1 },
+    "entry_state": { "type": "string" },
+    "policies": { "$ref": "#/$defs/policies" },
+    "sources": { "type": "array", "items": { "$ref": "#/$defs/source" } },
+    "roles": { "type": "object", "additionalProperties": { "$ref": "#/$defs/role" } },
+    "gates": { "type": "object", "additionalProperties": { "$ref": "#/$defs/gate" } },
+    "decisions": { "type": "object", "additionalProperties": { "$ref": "#/$defs/decision" } },
+    "states": { "type": "object", "minProperties": 1, "additionalProperties": { "$ref": "#/$defs/state" } }
+  },
+  "$defs": {
+    "duration": { "type": "string", "pattern": "^[0-9]+(s|m|h)$" },
+    "ref": { "type": "string", "minLength": 1 },
+    "gateRef": {
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 }
+      ]
+    },
+    "policies": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_concurrent_tasks": { "type": "integer", "minimum": 1 },
+        "dry_run": { "type": "boolean" },
+        "circuit_breaker": { "type": "boolean" },
+        "retry_caps": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
+        "execution": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "backend": { "type": "string", "enum": ["herdr", "local", "container"] },
+            "run_as": { "type": "string", "enum": ["root", "non_root"] },
+            "sandbox": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "required": ["id", "type"],
+      "additionalProperties": true,
+      "properties": {
+        "id": { "type": "string" },
+        "type": { "type": "string", "enum": ["github_issues"] },
+        "repo": { "type": "string" },
+        "select": { "type": "object" },
+        "emits_to": { "type": "string" }
+      }
+    },
+    "role": {
+      "type": "object",
+      "required": ["launch"],
+      "additionalProperties": false,
+      "properties": {
+        "launch": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+        "task_delivery": { "type": "string", "enum": ["context_file", "inline"] },
+        "workspace": { "type": "string", "enum": ["per_task", "shared"] },
+        "kickoff": { "type": "string" }
+      }
+    },
+    "gate": {
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": true,
+      "properties": {
+        "type": { "type": "string", "enum": ["github_pr", "github_checks", "github_reviews", "github_mergeable"] }
+      }
+    },
+    "decision": {
+      "type": "object",
+      "required": ["impl", "verdicts"],
+      "additionalProperties": false,
+      "properties": {
+        "impl": {
+          "type": "object",
+          "required": ["type"],
+          "additionalProperties": true,
+          "properties": {
+            "type": { "type": "string", "enum": ["llm", "exec"] },
+            "rubric": { "type": "string" },
+            "command": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "verdicts": { "type": "array", "items": { "type": "string" }, "minItems": 1, "uniqueItems": true }
+      }
+    },
+    "trigger": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "maxProperties": 1,
+      "properties": {
+        "event": { "type": "string", "minLength": 1 },
+        "timeout": { "$ref": "#/$defs/duration" },
+        "decision": { "$ref": "#/$defs/ref" },
+        "gate": { "$ref": "#/$defs/gateRef" }
+      }
+    },
+    "evaluate": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "maxProperties": 1,
+      "properties": {
+        "decision": { "$ref": "#/$defs/ref" },
+        "gate": { "$ref": "#/$defs/gateRef" }
+      }
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": { "alert": { "type": "string" } }
+    },
+    "transition": {
+      "type": "object",
+      "required": ["when"],
+      "additionalProperties": false,
+      "properties": {
+        "when": { "$ref": "#/$defs/trigger" },
+        "evaluate": { "$ref": "#/$defs/evaluate" },
+        "to": { "type": "string" },
+        "branch": { "type": "object", "minProperties": 1, "additionalProperties": { "type": "string" } },
+        "action": { "$ref": "#/$defs/action" }
+      },
+      "oneOf": [
+        { "required": ["to"] },
+        { "required": ["branch"] },
+        { "required": ["action"] }
+      ]
+    },
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "spawn": { "$ref": "#/$defs/ref" },
+        "resume": { "$ref": "#/$defs/ref" },
+        "with": { "type": "string" },
+        "action": { "type": "string", "enum": ["merge_pr"] }
+      }
+    },
+    "state": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "entry": { "$ref": "#/$defs/entry" },
+        "transitions": { "type": "array", "items": { "$ref": "#/$defs/transition" } },
+        "terminal": { "type": "string", "enum": ["success", "rejected", "needs_human"] },
+        "wait_for": { "type": "string" },
+        "alert": { "type": "boolean" }
+      }
+    }
+  }
+}

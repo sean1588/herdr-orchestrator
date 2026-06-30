@@ -1,0 +1,30 @@
+# Deliberately broken: structurally valid YAML, but violates the safety invariants.
+version: 0
+name: broken-pipeline
+entry_state: start
+
+gates:
+  pr_exists:
+    type: github_pr
+    head: "{branch}"
+
+decisions:
+  review:
+    impl:
+      type: llm
+      rubric: prompts/review.md
+    verdicts: [approve, request_changes, escalate]
+
+states:
+  start:
+    entry: { spawn: implementer }
+    transitions:
+      - when: { event: agent.done }
+        evaluate: { decision: review }
+        branch: { approve: merging }
+
+  merging:
+    entry: { action: merge_pr }
+    transitions:
+      - when: { event: pr.merged }
+        to: start

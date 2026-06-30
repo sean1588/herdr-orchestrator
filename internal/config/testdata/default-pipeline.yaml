@@ -1,0 +1,113 @@
+version: 0
+name: default-pipeline
+entry_state: intake
+
+policies:
+  max_concurrent_tasks: 4
+  dry_run: true
+  circuit_breaker: false
+  retry_caps:
+    changes_requested: 3
+  execution:
+    backend: herdr
+    run_as: non_root
+    sandbox: true
+
+sources:
+  - id: gh_issues
+    type: github_issues
+    repo: sean1588/minicode
+    select:
+      label: agent-ready
+    emits_to: intake
+
+roles:
+  implementer:
+    launch: ["claude"]
+    task_delivery: context_file
+    workspace: per_task
+  reviewer:
+    launch: ["claude"]
+    task_delivery: context_file
+    workspace: per_task
+
+gates:
+  pr_exists:
+    type: github_pr
+    head: "{branch}"
+  ci_green:
+    type: github_checks
+    all_passing: true
+  approvals:
+    type: github_reviews
+    min_approved: 1
+  no_conflicts:
+    type: github_mergeable
+    require: clean
+
+decisions:
+  triage:
+    impl:
+      type: llm
+      rubric: prompts/triage.md
+    verdicts: [accept, reject, needs_human]
+  review:
+    impl:
+      type: llm
+      rubric: prompts/review.md
+    verdicts: [approve, request_changes, escalate]
+
+states:
+  intake:
+    transitions:
+      - when: { decision: triage }
+        branch: { accept: queued, reject: closed, needs_human: escalated }
+
+  queued:
+    transitions:
+      - when: { event: scheduled }
+        to: implementing
+
+  implementing:
+    entry: { spawn: implementer }
+    transitions:
+      - when: { event: agent.done }
+        evaluate: { gate: pr_exists }
+        branch: { pass: pr_open, fail: escalated }
+      - when: { event: agent.blocked }
+        action: { alert: needs_input }
+      - when: { timeout: 45m }
+        to: escalated
+
+  pr_open:
+    entry: { spawn: reviewer }
+    transitions:
+      - when: { event: agent.done }
+        evaluate: { decision: review }
+        branch: { approve: approved, request_changes: changes_requested, escalate: escalated }
+
+  changes_requested:
+    entry: { resume: implementer, with: review_feedback }
+    transitions:
+      - when: { event: agent.done }
+        evaluate: { gate: pr_exists }
+        branch: { pass: pr_open, fail: escalated }
+      - when: { event: retry_exhausted }
+        to: escalated
+
+  approved:
+    transitions:
+      - when: { event: status.changed }
+        evaluate: { gate: [ci_green, approvals, no_conflicts] }
+        branch: { pass: merging, fail: blocked_on_gate }
+
+  merging:
+    entry: { action: merge_pr }
+    transitions:
+      - when: { event: pr.merged }
+        to: merged
+
+  merged: { terminal: success }
+  closed: { terminal: rejected }
+  escalated: { terminal: needs_human, alert: true }
+  blocked_on_gate: { wait_for: status.changed }

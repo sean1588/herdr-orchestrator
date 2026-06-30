@@ -1,0 +1,14 @@
+# Build artifacts
+/orchestratord
+/bin/
+*.test
+*.out
+
+# Runtime state
+*.db
+*.db-wal
+*.db-shm
+orchestrator.db*
+
+# Editor / OS
+.DS_Store

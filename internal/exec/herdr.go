@@ -25,6 +25,10 @@ type Herdr struct {
 	ReadyTimeout time.Duration // bound on the readiness wait; default 20s
 	WaitTimeout  time.Duration // WaitState bound when ctx has no sooner deadline; default 45m
 	PollInterval time.Duration // Events poll cadence; default 2s
+	// SubmitDelay is how long to wait after typing the kickoff before sending the
+	// submitting Enter. Claude Code's Ink TUI swallows a too-early Enter, so the
+	// text + Enter must be separated; default 1s (0 in tests).
+	SubmitDelay time.Duration
 }
 
 var _ ExecutionBackend = (*Herdr)(nil)
@@ -39,6 +43,7 @@ func NewHerdr(r proc.Runner) *Herdr {
 		ReadyTimeout: 20 * time.Second,
 		WaitTimeout:  45 * time.Minute,
 		PollInterval: 2 * time.Second,
+		SubmitDelay:  1 * time.Second,
 	}
 }
 
@@ -48,9 +53,13 @@ func NewHerdr(r proc.Runner) *Herdr {
 func (h *Herdr) Spawn(ctx context.Context, s Spawn) (Handle, error) {
 	wt := h.worktreePath(s)
 
-	// Best-effort cleanup of any prior attempt for this branch (ignore errors).
+	// Best-effort cleanup of any prior attempt's worktree (ignore errors).
 	_, _ = h.r.Run(ctx, "", h.GitBin, "-C", s.RepoDir, "worktree", "remove", wt, "--force")
-	_, _ = h.r.Run(ctx, "", h.GitBin, "-C", s.RepoDir, "branch", "-D", s.Branch)
+	if !s.PreserveBranch {
+		// Fresh task: discard any stale branch so we recreate a clean slate. A
+		// re-spawn (PreserveBranch) must keep the branch — it carries the PR.
+		_, _ = h.r.Run(ctx, "", h.GitBin, "-C", s.RepoDir, "branch", "-D", s.Branch)
+	}
 	// Symmetric herdr-side cleanup: close any prior workspace with this label so a
 	// re-spawn doesn't create a duplicate label (which would break Resolve, since
 	// it matches workspaces by label).
@@ -58,8 +67,8 @@ func (h *Herdr) Spawn(ctx context.Context, s Spawn) (Handle, error) {
 		_, _ = h.r.Run(ctx, "", h.HerdrBin, "workspace", "close", wsID)
 	}
 
-	if _, err := h.r.Run(ctx, "", h.GitBin, "-C", s.RepoDir, "worktree", "add", "-b", s.Branch, wt, s.Base); err != nil {
-		return Handle{}, fmt.Errorf("create worktree %s: %w", wt, err)
+	if err := h.addWorktree(ctx, s, wt); err != nil {
+		return Handle{}, err
 	}
 
 	out, err := h.r.Run(ctx, "", h.HerdrBin, "workspace", "create", "--cwd", wt, "--label", s.TaskID, "--no-focus")
@@ -82,10 +91,37 @@ func (h *Herdr) Spawn(ctx context.Context, s Spawn) (Handle, error) {
 	// fixed sleep (Spike 0). A timeout here is non-fatal — proceed to the kickoff.
 	_, _ = h.r.Run(ctx, "", h.HerdrBin, "wait", "output", pane, "--match", h.ReadyMatch, "--timeout", msString(h.ReadyTimeout))
 
-	if _, err := h.r.Run(ctx, "", h.HerdrBin, "pane", "run", pane, s.Kickoff); err != nil {
-		return hd, fmt.Errorf("send kickoff on %s: %w", pane, err)
+	// Deliver the kickoff in two steps: type the text, let the TUI settle, then
+	// submit with a separate Enter. A single text+Enter (`pane run`) raced Claude
+	// Code's Ink renderer, which swallowed the Enter and left the kickoff unsent.
+	if _, err := h.r.Run(ctx, "", h.HerdrBin, "pane", "send-text", pane, s.Kickoff); err != nil {
+		return hd, fmt.Errorf("send kickoff text on %s: %w", pane, err)
+	}
+	if h.SubmitDelay > 0 {
+		time.Sleep(h.SubmitDelay)
+	}
+	if _, err := h.r.Run(ctx, "", h.HerdrBin, "pane", "send-keys", pane, "Enter"); err != nil {
+		return hd, fmt.Errorf("submit kickoff on %s: %w", pane, err)
 	}
 	return hd, nil
+}
+
+// addWorktree creates the isolated worktree for a spawn. A fresh task branches
+// from base; a re-spawn for a task with an existing PR (PreserveBranch) checks
+// out the existing branch after fetching it, so the PR's commits are preserved
+// rather than discarded by a recreate-from-base.
+func (h *Herdr) addWorktree(ctx context.Context, s Spawn, wt string) error {
+	if s.PreserveBranch {
+		_, _ = h.r.Run(ctx, "", h.GitBin, "-C", s.RepoDir, "fetch", "origin", s.Branch)
+		if _, err := h.r.Run(ctx, "", h.GitBin, "-C", s.RepoDir, "worktree", "add", wt, s.Branch); err != nil {
+			return fmt.Errorf("create worktree %s on existing branch %s: %w", wt, s.Branch, err)
+		}
+		return nil
+	}
+	if _, err := h.r.Run(ctx, "", h.GitBin, "-C", s.RepoDir, "worktree", "add", "-b", s.Branch, wt, s.Base); err != nil {
+		return fmt.Errorf("create worktree %s: %w", wt, err)
+	}
+	return nil
 }
 
 // WaitState blocks until the pane's agent status reaches target, bounded by the

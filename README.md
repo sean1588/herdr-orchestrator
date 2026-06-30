@@ -1,5 +1,7 @@
 # Herdr Orchestrator
 
+[![CI](https://github.com/sean1588/herdr-orchestrator/actions/workflows/ci.yml/badge.svg)](https://github.com/sean1588/herdr-orchestrator/actions/workflows/ci.yml)
+
 A control-plane daemon that turns GitHub issues into pull requests by driving
 [herdr](https://herdr.dev) (the execution substrate) through a deterministic
 **state-graph engine** that reads a declarative YAML workflow.
@@ -94,7 +96,9 @@ orchestratord run \
 
 Exit code is `0` when the task reaches `pr_open`, non-zero otherwise (e.g.
 `escalated`). Task state and a per-transition audit log persist in the `--db`
-SQLite file.
+SQLite file. Two more optional flags are accepted: `--worktrees-dir` (parent dir
+for the per-task git worktrees; defaults to the repo's sibling) and `--task-dir`
+(where task context files are written; defaults to the system temp dir).
 
 Reconcile and resume in-flight tasks after a restart (crash recovery) — keys on
 the deterministic `agent/issue-<n>` branch and the durable task id, never the
@@ -106,9 +110,77 @@ orchestratord recover --config <c> --repo /abs/path/to/checkout
 
 ## The workflow config
 
-A workflow is a versioned YAML document validated in two stages: a JSON Schema
-(`internal/config/workflow.schema.json`, embedded in the binary) for shape, then
-seven semantic **safety invariants**:
+A workflow is a versioned YAML document — the *policy* the fixed engine
+interprets. It is validated in **two stages** before anything runs: a JSON Schema
+for shape, then seven semantic **safety invariants**. `validate` reports both;
+`run` and `recover` refuse to start on any error.
+
+### Schema & reference files
+
+| File | Role |
+| --- | --- |
+| `internal/config/workflow.schema.json` | JSON Schema (Draft 2020-12) for the config **shape**; embedded in the binary via `go:embed` and applied first. The authoritative shape contract. |
+| `internal/config/validate.go` | The runtime validator: applies the schema, then the seven invariants, returning errors + warnings. |
+| `validate_workflow.py` (repo root) | Reference spec for the invariants, kept behaviorally equivalent to `validate.go`. Runs standalone: `python3 validate_workflow.py <config> [--schema workflow.schema.json]`. |
+| `internal/config/testdata/default-pipeline.yaml` | The canonical **valid** example — copy this when authoring your own. |
+| `internal/config/testdata/broken-pipeline.yaml` | A structurally-valid config that **violates** the invariants (merge reachable without a gate; an unbounded loop) — used to prove the validator bites. |
+| `spike0.sh` (repo root) | The proven herdr + `gh` command sequence the herdr backend wraps. |
+
+### Structure
+
+Top-level keys (`version`, `name`, and `states` are required; unknown keys are
+rejected):
+
+| Key | Meaning |
+| --- | --- |
+| `version` | Schema version (integer ≥ 0). |
+| `name` | Workflow name (non-empty). |
+| `entry_state` | The state a new task starts in (used for reachability checks). |
+| `policies` | Workflow-wide knobs (below). |
+| `sources` | Where work originates — Phase 1: `github_issues` (validated, not yet polled). |
+| `roles` | Agent profiles a state can `spawn`/`resume`. |
+| `gates` | Deterministic predicates over **authoritative** sources (GitHub). |
+| `decisions` | Constrained judgment hooks with a closed set of `verdicts`. |
+| `states` | The nodes of the state graph (below). |
+
+**`policies`** — `max_concurrent_tasks`, `dry_run`, `circuit_breaker`,
+`retry_caps` (a per-state cap map, `state_name: N`), and `execution`
+(`backend: herdr|local|container`, `run_as: root|non_root`, `sandbox: bool`).
+Phase 1 reads these but only `retry_caps` affects validation; the rest gate
+merge/scheduler/concurrency machinery that is out of scope.
+
+**`roles`** — each has `launch` (argv, required, e.g. `["claude"]`),
+`task_delivery` (`context_file` | `inline`), `workspace` (`per_task` | `shared`),
+and an optional `kickoff` string.
+
+**`gates`** — `type` is one of `github_pr`, `github_checks`, `github_reviews`,
+`github_mergeable` (the only authoritative sources accepted). Type-specific
+fields (`head`, `all_passing`, `min_approved`, `require`) are allowed alongside.
+
+**`decisions`** — `impl.type` is `llm` (with a `rubric` path) or `exec` (with a
+`command` argv); `verdicts` is the closed, unique set of outcomes it may return.
+
+**`states`** — each state may declare:
+
+- `entry` — an action on arrival: `spawn` / `resume` a role (optionally `with` a
+  named input), or `action: merge_pr` (the only side-effecting entry action).
+- `transitions` — outgoing edges (below).
+- `terminal` — `success` | `rejected` | `needs_human` (a leaf; takes no transitions).
+- `wait_for` — an event the state parks on (e.g. `status.changed`).
+- `alert` — surface the state to a human.
+
+A **transition** carries a `when` **trigger** (exactly one of `event`, `timeout`
+— matching `^[0-9]+(s|m|h)$`, `decision`, or `gate`), an optional secondary
+`evaluate` (`decision` or `gate`, run after an event), and exactly one outcome:
+
+- `to: <state>` — unconditional move;
+- `branch: { <key>: <state>, … }` — keys are the decision's **verdicts**, or
+  exactly `{pass, fail}` for a gate;
+- `action: { alert: <name> }` — a side action that does not change state.
+
+A `gate` reference is a single name or a list (every gate must pass).
+
+### The seven safety invariants
 
 1. **Refs resolve** — every `spawn`/`resume` role, `decision`/`gate`, and
    `to`/`branch` target names a declared entity.
@@ -122,10 +194,16 @@ seven semantic **safety invariants**:
 6. **Loops terminate** — every cycle has a retry cap or a timeout.
 7. **Every non-terminal state has an exit**.
 
-The reference implementation of these checks is `validate_workflow.py` at the
-repo root; the Go validator in `internal/config/validate.go` is kept
-behaviorally equivalent. `spike0.sh` is the proven herdr + `gh` command sequence
-the herdr backend wraps.
+### Authoring & validating
+
+Copy `default-pipeline.yaml`, edit it, and check it — no external services
+needed, so it is safe in CI or a pre-commit hook:
+
+```sh
+orchestratord validate path/to/your-workflow.yaml
+#   OK: "your-workflow" valid (N warning(s))    -> exit 0
+#   FAIL: K error(s), N warning(s)              -> exit 1   (warnings alone pass)
+```
 
 > The trigger key is **`when`**, never `on` — a bare `on:` is coerced to the YAML
 > boolean `true` and would silently drop the trigger. The schema rejects it.

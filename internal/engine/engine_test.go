@@ -85,6 +85,9 @@ func (g *fakeGH) Issue(ctx context.Context, repoDir string, n int) (*github.Issu
 	return &github.Issue{Number: n, Title: "Test", Body: "Body"}, nil
 }
 func (g *fakeGH) PRStatus(ctx context.Context, repoDir string, pr int) (*github.PRStatus, error) {
+	if g.merged {
+		return &github.PRStatus{State: "MERGED"}, nil
+	}
 	if len(g.statusSeq) > 0 {
 		i := min(g.statusIdx, len(g.statusSeq)-1)
 		g.statusIdx++
@@ -162,6 +165,7 @@ func TestRun_DoneWithPR_ReachesPROpen(t *testing.T) {
 		{PaneID: "w1:p1", State: exec.StateDone},
 	}}
 	e := newEngine(t, st, b, &fakeGH{pr: &github.PR{Number: 42, State: "OPEN"}}, 5*time.Second)
+	e.goal = "pr_open" // this test exercises only the implementing -> pr_open slice
 
 	final, err := e.Run(context.Background(), 7)
 	if err != nil {
@@ -218,6 +222,7 @@ func TestRun_BlockedThenDone_AlertsAndContinues(t *testing.T) {
 		{PaneID: "w1:p1", State: exec.StateDone},
 	}}
 	e := newEngine(t, st, b, &fakeGH{pr: &github.PR{Number: 5}}, 5*time.Second)
+	e.goal = "pr_open" // exercises the implementing slice (blocked alert + done)
 
 	final, err := e.Run(context.Background(), 11)
 	if err != nil {
@@ -312,6 +317,7 @@ func TestRecover_ImplementingWithPR_ReconcilesToPROpen(t *testing.T) {
 	// The agent finished while we were down: a PR now exists; pane re-resolves.
 	b := &fakeBackend{pane: "fresh:p1", resolve: true}
 	e := newEngine(t, st, b, &fakeGH{pr: &github.PR{Number: 99}}, 5*time.Second)
+	e.goal = "pr_open" // recovery reconciles to pr_open; halt there for this test
 
 	if err := e.Recover(ctx); err != nil {
 		t.Fatalf("recover: %v", err)

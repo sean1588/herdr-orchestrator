@@ -92,7 +92,7 @@ func New(c Config) *Engine {
 		e.taskDir = os.TempDir()
 	}
 	if e.goal == "" {
-		e.goal = "pr_open"
+		e.goal = "merged"
 	}
 	if e.startState == "" {
 		e.startState = "queued"
@@ -186,6 +186,19 @@ func (e *Engine) drive(ctx context.Context, task *store.Task) (string, error) {
 		if err != nil {
 			return task.CurrentState, err
 		}
+		if next == "" {
+			// A state action chose to halt without a transition (a dry-run merge:
+			// the side effect is withheld, so pr.merged never fires). Record it and
+			// stop. Every real transition returns a non-empty next.
+			if aerr := e.store.AppendAudit(ctx, store.AuditEntry{
+				TaskID: task.ID, FromState: task.CurrentState, ToState: task.CurrentState,
+				Trigger: trigger, Result: result,
+			}); aerr != nil {
+				return task.CurrentState, fmt.Errorf("audit halt: %w", aerr)
+			}
+			e.log.Info("halt (action)", "task", task.ID, "state", task.CurrentState, "trigger", trigger, "result", result)
+			return task.CurrentState, nil
+		}
 		if err := e.advance(ctx, task, next, trigger, result); err != nil {
 			return task.CurrentState, err
 		}
@@ -217,7 +230,7 @@ func (e *Engine) runState(ctx context.Context, task *store.Task) (next, trigger,
 				return "", "", "", err
 			}
 		case st.Entry.Action != "":
-			return "", "", "", fmt.Errorf("state %q: entry.action %q is out of Phase 1 scope", name, st.Entry.Action)
+			return e.runMergeAction(ctx, task, st)
 		}
 	}
 
@@ -536,10 +549,30 @@ func (e *Engine) reconcile(ctx context.Context, task *store.Task) error {
 		if pr != nil {
 			n := pr.Number
 			task.PRNumber = &n
-			return e.advance(ctx, task, e.goal, "reconcile", "pass")
+			// The implementing agent.done gate already passed; advance as if it
+			// fired (to pr_open), derived from the config rather than the goal.
+			target := e.doneBranchTarget("implementing", "pass")
+			if target == "" {
+				return fmt.Errorf("reconcile: implementing has no agent.done pass branch")
+			}
+			return e.advance(ctx, task, target, "reconcile", "pass")
 		}
 	}
 	return e.store.UpdateTask(ctx, task)
+}
+
+// doneBranchTarget returns the state a named state's agent.done transition
+// branches to for a given verdict (empty if absent).
+func (e *Engine) doneBranchTarget(stateName, verdict string) string {
+	st, ok := e.wf.States[stateName]
+	if !ok {
+		return ""
+	}
+	t := findEventTransition(st, "agent.done")
+	if t == nil {
+		return ""
+	}
+	return t.Branch[verdict]
 }
 
 // advance records the transition (audit + state change) and persists the task.

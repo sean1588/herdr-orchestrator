@@ -31,6 +31,11 @@ type Policies struct {
 	Execution          Execution      `yaml:"execution"`
 }
 
+// DryRunEnabled reports whether auto-merge should be withheld. dry_run is
+// default-on: a nil (absent) or true value gates the merge; only an explicit
+// false performs it.
+func (p Policies) DryRunEnabled() bool { return p.DryRun == nil || *p.DryRun }
+
 // Execution describes how agents are run.
 type Execution struct {
 	Backend string `yaml:"backend"` // herdr | local | container

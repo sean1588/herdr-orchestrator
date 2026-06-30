@@ -31,6 +31,11 @@ type Policies struct {
 	Execution          Execution      `yaml:"execution"`
 }
 
+// DryRunEnabled reports whether auto-merge should be withheld. dry_run is
+// default-on: a nil (absent) or true value gates the merge; only an explicit
+// false performs it.
+func (p Policies) DryRunEnabled() bool { return p.DryRun == nil || *p.DryRun }
+
 // Execution describes how agents are run.
 type Execution struct {
 	Backend string `yaml:"backend"` // herdr | local | container
@@ -55,11 +60,15 @@ type Role struct {
 	Kickoff      string   `yaml:"kickoff"`
 }
 
-// Gate is a deterministic predicate over an authoritative source. Only Type and
-// Head are modeled; the remaining authoritative-gate fields are unused in Phase 1.
+// Gate is a deterministic predicate over an authoritative source. The
+// type-specific fields select the threshold the engine checks the PR status
+// against (the JSON schema permits these via additionalProperties).
 type Gate struct {
-	Type string `yaml:"type"`
-	Head string `yaml:"head"`
+	Type        string `yaml:"type"`
+	Head        string `yaml:"head"`         // github_pr
+	AllPassing  bool   `yaml:"all_passing"`  // github_checks
+	MinApproved int    `yaml:"min_approved"` // github_reviews
+	Require     string `yaml:"require"`      // github_mergeable, e.g. "clean"
 }
 
 // Decision is a constrained LLM/exec judgment hook with declared verdicts.

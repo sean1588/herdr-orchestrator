@@ -38,16 +38,20 @@ type Config struct {
 	GitHub   github.Client
 	Store    *store.Store
 
-	RepoDir string // local checkout (absolute) where git/gh run
-	Base    string // base branch, e.g. "main"
-	Repo    string // owner/name slug recorded on the task
+	RepoDir   string // local checkout (absolute) where git/gh run
+	Base      string // base branch, e.g. "main"
+	Repo      string // owner/name slug recorded on the task
+	ConfigDir string // dir of the workflow config; decision rubric paths resolve against it
 
 	// Optional; sensible defaults applied by New.
 	TaskDir      string                              // where task files are written; default os.TempDir()
 	Goal         string                              // halt-on-enter success state; default "pr_open"
 	StartState   string                              // where Phase 1 enqueues issues; default "queued"
 	DurationFunc func(string) (time.Duration, error) // default time.ParseDuration
-	Logger       *slog.Logger
+	// StatusPollInterval is how often the merge gate is re-evaluated while waiting
+	// for CI/reviews/mergeability; default 15s.
+	StatusPollInterval time.Duration
+	Logger             *slog.Logger
 }
 
 // Engine drives tasks through the workflow.
@@ -58,9 +62,11 @@ type Engine struct {
 	store   *store.Store
 
 	repoDir, base, repo string
+	configDir           string
 	taskDir             string
 	goal, startState    string
 	parseDur            func(string) (time.Duration, error)
+	statusPoll          time.Duration
 	log                 *slog.Logger
 }
 
@@ -74,23 +80,28 @@ func New(c Config) *Engine {
 		repoDir:    c.RepoDir,
 		base:       c.Base,
 		repo:       c.Repo,
+		configDir:  c.ConfigDir,
 		taskDir:    c.TaskDir,
 		goal:       c.Goal,
 		startState: c.StartState,
 		parseDur:   c.DurationFunc,
+		statusPoll: c.StatusPollInterval,
 		log:        c.Logger,
 	}
 	if e.taskDir == "" {
 		e.taskDir = os.TempDir()
 	}
 	if e.goal == "" {
-		e.goal = "pr_open"
+		e.goal = "merged"
 	}
 	if e.startState == "" {
 		e.startState = "queued"
 	}
 	if e.parseDur == nil {
 		e.parseDur = time.ParseDuration
+	}
+	if e.statusPoll == 0 {
+		e.statusPoll = 15 * time.Second
 	}
 	if e.log == nil {
 		e.log = slog.New(slog.NewTextHandler(os.Stderr, nil))
@@ -175,6 +186,19 @@ func (e *Engine) drive(ctx context.Context, task *store.Task) (string, error) {
 		if err != nil {
 			return task.CurrentState, err
 		}
+		if next == "" {
+			// A state action chose to halt without a transition (a dry-run merge:
+			// the side effect is withheld, so pr.merged never fires). Record it and
+			// stop. Every real transition returns a non-empty next.
+			if aerr := e.store.AppendAudit(ctx, store.AuditEntry{
+				TaskID: task.ID, FromState: task.CurrentState, ToState: task.CurrentState,
+				Trigger: trigger, Result: result,
+			}); aerr != nil {
+				return task.CurrentState, fmt.Errorf("audit halt: %w", aerr)
+			}
+			e.log.Info("halt (action)", "task", task.ID, "state", task.CurrentState, "trigger", trigger, "result", result)
+			return task.CurrentState, nil
+		}
 		if err := e.advance(ctx, task, next, trigger, result); err != nil {
 			return task.CurrentState, err
 		}
@@ -190,13 +214,30 @@ func (e *Engine) runState(ctx context.Context, task *store.Task) (next, trigger,
 	if st.Entry != nil {
 		switch {
 		case st.Entry.Spawn != "":
-			if err := e.spawn(ctx, task, st.Entry.Spawn); err != nil {
+			if err := e.spawn(ctx, task, st.Entry.Spawn, st); err != nil {
 				return "", "", "", err
 			}
 		case st.Entry.Resume != "":
-			return "", "", "", fmt.Errorf("state %q: entry.resume is out of Phase 1 scope", name)
+			// Count a retry only for a genuinely new round. A crash + Recover
+			// re-enters the same state with its agent already spawned for it
+			// (PaneSpawnState == state); re-counting there would burn a retry the
+			// reviewer never asked for. PaneSpawnState != state means this is the
+			// first entry since the last transition in, i.e. a fresh round.
+			if task.PaneSpawnState != task.CurrentState {
+				target, exhausted, err := e.checkRetryCap(task, st)
+				if err != nil {
+					return "", "", "", err
+				}
+				if exhausted {
+					e.log.Info("retry cap exhausted", "task", task.ID, "state", name)
+					return target, "retry_exhausted", "", nil
+				}
+			}
+			if err := e.spawn(ctx, task, st.Entry.Resume, st); err != nil {
+				return "", "", "", err
+			}
 		case st.Entry.Action != "":
-			return "", "", "", fmt.Errorf("state %q: entry.action %q is out of Phase 1 scope", name, st.Entry.Action)
+			return e.runMergeAction(ctx, task, st)
 		}
 	}
 
@@ -213,7 +254,53 @@ func (e *Engine) runState(ctx context.Context, task *store.Task) (next, trigger,
 		return e.awaitAgentState(ctx, task, st)
 	}
 
-	return "", "", "", fmt.Errorf("state %q: no Phase 1-supported trigger (decisions and other events are out of scope)", name)
+	// Merge-gate wait: status.changed re-evaluates the merge gate. A state with a
+	// timeout (blocked_on_gate) polls until the gate passes or it gives up; one
+	// without (approved) checks once on entry and branches.
+	if sct := findEventTransition(st, "status.changed"); sct != nil {
+		if timeoutT := findTimeoutTransition(st); timeoutT != nil {
+			return e.awaitStatusGate(ctx, task, sct, timeoutT)
+		}
+		verdict, err := e.evaluateGate(ctx, task, sct)
+		if err != nil {
+			return "", "", "", err
+		}
+		return sct.Branch[verdict], "status.changed", verdict, nil
+	}
+
+	return "", "", "", fmt.Errorf("state %q: no supported trigger (no agent.done or status.changed transition)", name)
+}
+
+// awaitStatusGate polls the merge gate on an interval until it passes (taking the
+// transition's pass branch, e.g. merging) or the state's timeout elapses (the
+// timeout target, e.g. escalated). status changes have no push source in Phase
+// 2a, so the engine polls the authoritative GitHub status.
+func (e *Engine) awaitStatusGate(ctx context.Context, task *store.Task, gateT, timeoutT *config.Transition) (next, trigger, result string, err error) {
+	d, perr := e.parseDur(timeoutT.When.Timeout)
+	if perr != nil {
+		return "", "", "", fmt.Errorf("parse timeout %q: %w", timeoutT.When.Timeout, perr)
+	}
+	deadline := time.NewTimer(d)
+	defer deadline.Stop()
+
+	for {
+		verdict, gerr := e.evaluateGate(ctx, task, gateT)
+		if gerr != nil {
+			return "", "", "", gerr
+		}
+		if verdict == "pass" {
+			return gateT.Branch["pass"], "status.changed", "pass", nil
+		}
+		select {
+		case <-ctx.Done():
+			return "", "", "", ctx.Err()
+		case <-deadline.C:
+			e.log.Warn("merge gate timeout", "task", task.ID, "state", task.CurrentState)
+			return timeoutT.To, "timeout", "", nil
+		case <-time.After(e.statusPoll):
+			// re-poll
+		}
+	}
 }
 
 // awaitAgentState implements the implementing-state wait: react to agent.done
@@ -259,9 +346,9 @@ func (e *Engine) awaitAgentState(ctx context.Context, task *store.Task, st confi
 			}
 			switch ev.State {
 			case exec.StateDone:
-				verdict, gerr := e.evaluateGate(ctx, task, doneT)
-				if gerr != nil {
-					return "", "", "", gerr
+				verdict, derr := e.evaluateDone(ctx, task, doneT)
+				if derr != nil {
+					return "", "", "", derr
 				}
 				return doneT.Branch[verdict], "agent.done", verdict, nil
 			case exec.StateBlocked:
@@ -276,15 +363,41 @@ func (e *Engine) awaitAgentState(ctx context.Context, task *store.Task, st confi
 	}
 }
 
+// evaluateDone resolves the outcome of an agent.done transition: a decision
+// verdict (judgment, read from the reviewer) or a gate result (authoritative).
+func (e *Engine) evaluateDone(ctx context.Context, task *store.Task, t *config.Transition) (string, error) {
+	if dec := t.DecisionRef(); dec != "" {
+		return e.evaluateDecision(task, dec)
+	}
+	if len(t.GateRefs()) > 0 {
+		return e.evaluateGate(ctx, task, t)
+	}
+	return "", fmt.Errorf("state %q: agent.done transition has neither a decision nor a gate to evaluate", task.CurrentState)
+}
+
 // evaluateGate evaluates all gates referenced by a transition over authoritative
-// sources, returning "pass" iff every gate passes, else "fail".
+// sources, returning "pass" iff every gate passes, else "fail". The PR-status
+// gates (checks/reviews/mergeable) share one PRStatus read so a single evaluation
+// sees a consistent snapshot.
 func (e *Engine) evaluateGate(ctx context.Context, task *store.Task, t *config.Transition) (string, error) {
+	var status *github.PRStatus
 	for _, gname := range t.GateRefs() {
 		g, ok := e.wf.Gates[gname]
 		if !ok {
 			return "", fmt.Errorf("gate %q not declared", gname)
 		}
-		pass, err := e.evalGate(ctx, task, gname, g)
+		// The merge gates read PR status; fetch it once, lazily.
+		if g.Type != "github_pr" && status == nil {
+			if task.PRNumber == nil {
+				return "fail", nil // no PR yet => merge gates cannot pass
+			}
+			s, err := e.gh.PRStatus(ctx, e.repoDir, *task.PRNumber)
+			if err != nil {
+				return "", fmt.Errorf("gate %q: read PR status: %w", gname, err)
+			}
+			status = s
+		}
+		pass, err := e.gatePass(ctx, task, gname, g, status)
 		if err != nil {
 			return "", err
 		}
@@ -295,7 +408,9 @@ func (e *Engine) evaluateGate(ctx context.Context, task *store.Task, t *config.T
 	return "pass", nil
 }
 
-func (e *Engine) evalGate(ctx context.Context, task *store.Task, name string, g config.Gate) (bool, error) {
+// gatePass evaluates one gate against the authoritative source: github_pr via a
+// fresh PR lookup, the merge gates against the shared PRStatus snapshot.
+func (e *Engine) gatePass(ctx context.Context, task *store.Task, name string, g config.Gate, status *github.PRStatus) (bool, error) {
 	switch g.Type {
 	case "github_pr":
 		pr, err := e.gh.FindPR(ctx, e.repoDir, task.Branch)
@@ -309,18 +424,30 @@ func (e *Engine) evalGate(ctx context.Context, task *store.Task, name string, g 
 		task.PRNumber = &n
 		e.log.Info("gate pass: PR detected", "task", task.ID, "gate", name, "pr", n)
 		return true, nil
+	case "github_checks":
+		return status.ChecksGreen(), nil
+	case "github_reviews":
+		return status.ApprovedReviews >= g.MinApproved, nil
+	case "github_mergeable":
+		// `require: clean` demands GitHub's CLEAN mergeStateStatus (no conflicts
+		// AND up to date AND not blocked), which is stricter than mere
+		// conflict-freeness. Without it, fall back to the conflict check.
+		if g.Require == "clean" {
+			return status.MergeStateStatus == "CLEAN", nil
+		}
+		return status.Mergeable == "MERGEABLE", nil
 	default:
-		// ci_green / approvals / no_conflicts are part of the merge gate (out of Phase 1).
-		return false, fmt.Errorf("gate %q: type %q not implemented in Phase 1", name, g.Type)
+		return false, fmt.Errorf("gate %q: type %q not supported", name, g.Type)
 	}
 }
 
-// spawn runs the implementer entry action: write the task file, build a
-// single-line kickoff, and launch the agent. It is idempotent — if the task
-// already has a live agent (resume), it re-resolves the pane instead of
-// launching a second one.
-func (e *Engine) spawn(ctx context.Context, task *store.Task, role string) error {
-	if task.PaneID != "" {
+// spawn launches the agent for a state's entry: build the role-specific task file
+// + single-line kickoff and start the agent. It reuses an existing pane ONLY when
+// re-entering the same state its agent was spawned for (crash recovery) — entering
+// a new state always spawns a fresh agent for that state's role, so the reviewer
+// at pr_open is not mistaken for the still-labelled implementer workspace.
+func (e *Engine) spawn(ctx context.Context, task *store.Task, role string, st config.State) error {
+	if task.PaneID != "" && task.PaneSpawnState == task.CurrentState {
 		h, ok, err := e.backend.Resolve(ctx, task.ID)
 		if err != nil {
 			// A transient Resolve failure must NOT fall through to a fresh spawn:
@@ -330,7 +457,7 @@ func (e *Engine) spawn(ctx context.Context, task *store.Task, role string) error
 		}
 		if ok {
 			task.PaneID = h.PaneID
-			e.log.Info("reusing live agent", "task", task.ID, "pane", h.PaneID)
+			e.log.Info("reusing live agent", "task", task.ID, "pane", h.PaneID, "state", task.CurrentState)
 			return nil
 		}
 		// err == nil && !ok: the prior agent is genuinely gone — safe to spawn fresh.
@@ -341,7 +468,7 @@ func (e *Engine) spawn(ctx context.Context, task *store.Task, role string) error
 		return fmt.Errorf("role %q not declared", role)
 	}
 
-	taskFile, err := e.writeTaskFile(ctx, task)
+	taskFile, kickoff, err := e.agentTask(ctx, task, st, r)
 	if err != nil {
 		return err
 	}
@@ -354,18 +481,37 @@ func (e *Engine) spawn(ctx context.Context, task *store.Task, role string) error
 		Base:     e.base,
 		TaskFile: taskFile,
 		Launch:   r.Launch,
-		Kickoff:  e.kickoff(r, task, taskFile),
+		Kickoff:  kickoff,
 	}
 	h, err := e.backend.Spawn(ctx, sp)
 	if err != nil {
 		return fmt.Errorf("spawn %s: %w", role, err)
 	}
 	task.PaneID = h.PaneID
+	task.PaneSpawnState = task.CurrentState
 	if err := e.store.UpdateTask(ctx, task); err != nil {
 		return fmt.Errorf("persist pane id: %w", err)
 	}
-	e.log.Info("agent spawned", "task", task.ID, "role", role, "pane", h.PaneID)
+	e.log.Info("agent spawned", "task", task.ID, "role", role, "pane", h.PaneID, "state", task.CurrentState)
 	return nil
+}
+
+// agentTask builds the context file + single-line kickoff for a spawned agent. A
+// state whose agent.done transition evaluates a decision gets a reviewer task (the
+// rubric + a PR pointer, producing a verdict file); otherwise the agent is an
+// implementer and gets the issue.
+func (e *Engine) agentTask(ctx context.Context, task *store.Task, st config.State, r config.Role) (taskFile, kickoff string, err error) {
+	if dec := decisionForState(st); dec != "" {
+		return e.reviewerTask(task, dec)
+	}
+	if st.Entry != nil && st.Entry.Resume != "" {
+		return e.feedbackTask(task, st.Entry.With)
+	}
+	taskFile, err = e.writeTaskFile(ctx, task)
+	if err != nil {
+		return "", "", err
+	}
+	return taskFile, e.kickoff(r, task, taskFile), nil
 }
 
 // writeTaskFile fetches the issue and writes its title+body to a context file.
@@ -416,10 +562,30 @@ func (e *Engine) reconcile(ctx context.Context, task *store.Task) error {
 		if pr != nil {
 			n := pr.Number
 			task.PRNumber = &n
-			return e.advance(ctx, task, e.goal, "reconcile", "pass")
+			// The implementing agent.done gate already passed; advance as if it
+			// fired (to pr_open), derived from the config rather than the goal.
+			target := e.doneBranchTarget("implementing", "pass")
+			if target == "" {
+				return fmt.Errorf("reconcile: implementing has no agent.done pass branch")
+			}
+			return e.advance(ctx, task, target, "reconcile", "pass")
 		}
 	}
 	return e.store.UpdateTask(ctx, task)
+}
+
+// doneBranchTarget returns the state a named state's agent.done transition
+// branches to for a given verdict (empty if absent).
+func (e *Engine) doneBranchTarget(stateName, verdict string) string {
+	st, ok := e.wf.States[stateName]
+	if !ok {
+		return ""
+	}
+	t := findEventTransition(st, "agent.done")
+	if t == nil {
+		return ""
+	}
+	return t.Branch[verdict]
 }
 
 // advance records the transition (audit + state change) and persists the task.
@@ -455,6 +621,30 @@ func (e *Engine) alert(ctx context.Context, task *store.Task, msg string) {
 	}); err != nil {
 		e.log.Warn("failed to record alert", "task", task.ID, "err", err)
 	}
+}
+
+// checkRetryCap enforces a state's retry cap on entry: it increments the
+// per-state counter and, once the cap is exceeded, returns the state's
+// retry_exhausted target. A capped state with no retry_exhausted transition is a
+// config error. The incremented count is persisted by the spawn/advance that
+// follows.
+func (e *Engine) checkRetryCap(task *store.Task, st config.State) (target string, exhausted bool, err error) {
+	limit, ok := e.wf.Policies.RetryCaps[task.CurrentState]
+	if !ok {
+		return "", false, nil
+	}
+	if task.RetryCounts == nil {
+		task.RetryCounts = map[string]int{}
+	}
+	task.RetryCounts[task.CurrentState]++
+	if task.RetryCounts[task.CurrentState] <= limit {
+		return "", false, nil
+	}
+	rt := findEventTransition(st, "retry_exhausted")
+	if rt == nil {
+		return "", true, fmt.Errorf("state %q exceeded retry cap %d but declares no retry_exhausted transition", task.CurrentState, limit)
+	}
+	return rt.To, true, nil
 }
 
 func (e *Engine) isHalt(state string) bool {

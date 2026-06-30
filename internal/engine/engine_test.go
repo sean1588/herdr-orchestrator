@@ -23,10 +23,12 @@ type fakeBackend struct {
 	resolve    bool
 	resolveErr error
 	spawns     int
+	spawnLog   []exec.Spawn
 }
 
 func (f *fakeBackend) Spawn(ctx context.Context, s exec.Spawn) (exec.Handle, error) {
 	f.spawns++
+	f.spawnLog = append(f.spawnLog, s)
 	return exec.Handle{PaneID: f.pane, Workdir: "/wt"}, nil
 }
 func (f *fakeBackend) WaitState(ctx context.Context, h exec.Handle, target exec.AgentState) (exec.AgentState, error) {
@@ -61,6 +63,20 @@ func (f *fakeBackend) Close(ctx context.Context, h exec.Handle) error { return n
 type fakeGH struct {
 	pr    *github.PR
 	issue *github.Issue
+
+	// merge-gate inputs (M9/M10): a single status, or a sequence consumed one per
+	// PRStatus call to simulate a PR whose state changes across polls.
+	status    *github.PRStatus
+	statusSeq []*github.PRStatus
+	statusIdx int
+
+	merged   bool
+	mergeErr error
+	merges   int
+	// mergeResultState is the PR State reported by PRStatus after a successful
+	// Merge (default "MERGED"). Set to e.g. "OPEN" to simulate `gh pr merge`
+	// exiting 0 while the PR is not actually merged (a merge queue).
+	mergeResultState string
 }
 
 func (g *fakeGH) FindPR(ctx context.Context, repoDir, branch string) (*github.PR, error) {
@@ -71,6 +87,32 @@ func (g *fakeGH) Issue(ctx context.Context, repoDir string, n int) (*github.Issu
 		return g.issue, nil
 	}
 	return &github.Issue{Number: n, Title: "Test", Body: "Body"}, nil
+}
+func (g *fakeGH) PRStatus(ctx context.Context, repoDir string, pr int) (*github.PRStatus, error) {
+	if g.merged {
+		state := g.mergeResultState
+		if state == "" {
+			state = "MERGED"
+		}
+		return &github.PRStatus{State: state}, nil
+	}
+	if len(g.statusSeq) > 0 {
+		i := min(g.statusIdx, len(g.statusSeq)-1)
+		g.statusIdx++
+		return g.statusSeq[i], nil
+	}
+	if g.status != nil {
+		return g.status, nil
+	}
+	return &github.PRStatus{State: "OPEN"}, nil
+}
+func (g *fakeGH) Merge(ctx context.Context, repoDir string, pr int) error {
+	g.merges++
+	if g.mergeErr != nil {
+		return g.mergeErr
+	}
+	g.merged = true
+	return nil
 }
 
 func newEngine(t *testing.T, st *store.Store, b exec.ExecutionBackend, gh github.Client, timeout time.Duration) *Engine {
@@ -87,6 +129,7 @@ func newEngine(t *testing.T, st *store.Store, b exec.ExecutionBackend, gh github
 		RepoDir:      "/repo",
 		Base:         "main",
 		Repo:         "owner/repo",
+		ConfigDir:    "../config/testdata",
 		TaskDir:      t.TempDir(),
 		DurationFunc: func(string) (time.Duration, error) { return timeout, nil },
 		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -130,6 +173,7 @@ func TestRun_DoneWithPR_ReachesPROpen(t *testing.T) {
 		{PaneID: "w1:p1", State: exec.StateDone},
 	}}
 	e := newEngine(t, st, b, &fakeGH{pr: &github.PR{Number: 42, State: "OPEN"}}, 5*time.Second)
+	e.goal = "pr_open" // this test exercises only the implementing -> pr_open slice
 
 	final, err := e.Run(context.Background(), 7)
 	if err != nil {
@@ -186,6 +230,7 @@ func TestRun_BlockedThenDone_AlertsAndContinues(t *testing.T) {
 		{PaneID: "w1:p1", State: exec.StateDone},
 	}}
 	e := newEngine(t, st, b, &fakeGH{pr: &github.PR{Number: 5}}, 5*time.Second)
+	e.goal = "pr_open" // exercises the implementing slice (blocked alert + done)
 
 	final, err := e.Run(context.Background(), 11)
 	if err != nil {
@@ -229,7 +274,7 @@ func TestSpawn_ResolveErrorDoesNotDestructivelyRespawn(t *testing.T) {
 	ctx := context.Background()
 	if err := st.CreateTask(ctx, &store.Task{
 		ID: "issue-5", Issue: 5, Branch: "agent/issue-5",
-		CurrentState: "implementing", PaneID: "live:p1",
+		CurrentState: "implementing", PaneID: "live:p1", PaneSpawnState: "implementing",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +282,7 @@ func TestSpawn_ResolveErrorDoesNotDestructivelyRespawn(t *testing.T) {
 	b := &fakeBackend{pane: "x:p1", resolveErr: errors.New("herdr momentarily unavailable")}
 	e := newEngine(t, st, b, &fakeGH{}, 5*time.Second)
 
-	err := e.spawn(ctx, task, "implementer")
+	err := e.spawn(ctx, task, "implementer", e.wf.States["implementing"])
 	if err == nil {
 		t.Fatal("spawn should error when Resolve fails for an existing agent, not re-spawn")
 	}
@@ -280,6 +325,7 @@ func TestRecover_ImplementingWithPR_ReconcilesToPROpen(t *testing.T) {
 	// The agent finished while we were down: a PR now exists; pane re-resolves.
 	b := &fakeBackend{pane: "fresh:p1", resolve: true}
 	e := newEngine(t, st, b, &fakeGH{pr: &github.PR{Number: 99}}, 5*time.Second)
+	e.goal = "pr_open" // recovery reconciles to pr_open; halt there for this test
 
 	if err := e.Recover(ctx); err != nil {
 		t.Fatalf("recover: %v", err)

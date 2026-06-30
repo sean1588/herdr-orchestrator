@@ -6,12 +6,16 @@ A control-plane daemon that turns GitHub issues into pull requests by driving
 [herdr](https://herdr.dev) (the execution substrate) through a deterministic
 **state-graph engine** that reads a declarative YAML workflow.
 
-> **Phase 1 — the validated slice.** This build drives one loop end to end:
-> one issue → the engine spawns an implementer agent in an isolated git worktree
-> via herdr → the agent opens a PR → the engine detects the PR via GitHub → the
-> task reaches `pr_open`. Review, auto-merge, triage, the scheduler, the MCP
-> surface, and cross-task memory are **out of scope** — the engine parses and
-> validates the full pipeline but only executes this slice.
+> **Phase 1 + 2a — issue to merged.** The engine drives the loop end to end:
+> one issue → spawn an implementer in an isolated git worktree via herdr → the
+> agent opens a PR → spawn a reviewer → the `review` decision branches
+> (approve / request_changes / escalate) → on approve, the merge gate
+> (CI + approvals + mergeable) is polled over GitHub → `merge_pr` squash-merges
+> → `merged`. The real merge is gated on `policies.dry_run` (default-on), so the
+> shipped config halts at `merging` and logs the intended merge until you set
+> `dry_run: false`. Triage/intake, the scheduler (concurrency > 1), the MCP
+> surface, and cross-task memory remain **out of scope** — the engine parses and
+> validates the full pipeline but does not yet execute those.
 
 ## Design in one paragraph
 
@@ -38,6 +42,31 @@ internal/proc/          mockable os/exec runner (the seam under herdr + gh)
 The engine depends only on small interfaces (`exec.ExecutionBackend`,
 `github.Client`, `*store.Store`), never on herdr or `gh` concretely — so the
 backend can later be swapped for a headless/container implementation.
+
+## The review → merge loop
+
+Past `pr_open` the engine runs the rest of the pipeline:
+
+- **Review (a `decision`).** Entering `pr_open` spawns the `reviewer` role with a
+  task file built from the decision's **rubric** (e.g. `prompts/review.md`,
+  resolved relative to the config file) plus a pointer to the PR. The reviewer
+  writes a **verdict file** — `{"verdict": "...", "feedback": "..."}` — and on
+  `agent.done` the engine reads it, validates the verdict against the decision's
+  declared `verdicts`, and branches. The engine reads a verdict; it never judges.
+- **Changes requested.** `changes_requested` resumes the implementer carrying the
+  reviewer's `feedback`, loops back to `pr_open` on a new push, and gives up to
+  `escalated` once `policies.retry_caps.changes_requested` is exceeded.
+- **Merge gate.** `approved` evaluates the merge gate
+  (`github_checks` + `github_reviews` + `github_mergeable`) over one authoritative
+  `PRStatus` read. If not yet green it parks in `blocked_on_gate`, which **polls**
+  GitHub every `StatusPollInterval` until the gate passes (`status.changed` has no
+  push source) or the state timeout escalates.
+- **Merge.** `merging` runs the `merge_pr` action — **gated on `policies.dry_run`
+  (default-on)**. A dry run logs the intended merge and halts at `merging`; with
+  `dry_run: false` it `gh pr merge --squash --delete-branch`, verifies the PR is
+  `MERGED` (authoritative), and reaches `merged`. Merge is reachable only through
+  a gate (a safety invariant) and the side effect itself is gated again by
+  `dry_run`.
 
 ## Build, test
 
@@ -83,7 +112,8 @@ orchestratord validate internal/config/testdata/default-pipeline.yaml
   in `sean1588/minicode` (Phase 1 enqueues the `--issue` number directly; the
   source `select:` label is not yet polled).
 
-Drive one issue through the slice to `pr_open`:
+Drive one issue through the pipeline (to `merged`, or `merging` under the shipped
+`dry_run: true`):
 
 ```sh
 orchestratord run \
@@ -94,9 +124,12 @@ orchestratord run \
   --db ./orchestrator.db          # optional; defaults to ./orchestrator.db
 ```
 
-Exit code is `0` when the task reaches `pr_open`, non-zero otherwise (e.g.
-`escalated`). Task state and a per-transition audit log persist in the `--db`
-SQLite file. Two more optional flags are accepted: `--worktrees-dir` (parent dir
+Exit code is `0` when the task reaches `merged` (a real merge) or halts at
+`merging` (a dry run withheld the merge), non-zero otherwise (e.g. `escalated`).
+Task state and a per-transition audit log persist in the `--db` SQLite file. Two
+more optional flags are accepted: `--worktrees-dir` (parent dir for the per-task
+git worktrees; defaults to the repo's sibling) and `--task-dir` (where task
+context files are written; defaults to the system temp dir). Two more optional flags are accepted: `--worktrees-dir` (parent dir
 for the per-task git worktrees; defaults to the repo's sibling) and `--task-dir`
 (where task context files are written; defaults to the system temp dir).
 

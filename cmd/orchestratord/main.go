@@ -6,7 +6,7 @@
 //	    Validate a workflow config (JSON Schema + safety invariants).
 //
 //	orchestratord run --config <c> --repo <dir> --issue <n> [--base main] [--db path]
-//	    Drive one issue through the slice to pr_open (or a terminal state).
+//	    Drive one issue through the pipeline to merged (or a terminal state).
 //
 //	orchestratord recover --config <c> --repo <dir> [--base main] [--db path]
 //	    Reconcile and resume in-flight tasks against herdr panes and GitHub PRs.
@@ -59,7 +59,7 @@ func usage(w *os.File) {
 
 commands:
   validate <config.yaml>                         validate a workflow config
-  run --config <c> --repo <dir> --issue <n>      drive one issue to pr_open
+  run --config <c> --repo <dir> --issue <n>      drive one issue to merged
   recover --config <c> --repo <dir>              reconcile/resume in-flight tasks
 
 run/recover flags:
@@ -141,14 +141,15 @@ func (cf commonFlags) wire(ctx context.Context) (*engine.Engine, *store.Store, e
 	}
 
 	eng := engine.New(engine.Config{
-		Workflow: wf,
-		Backend:  backend,
-		GitHub:   github.New(runner),
-		Store:    st,
-		RepoDir:  absRepo,
-		Base:     cf.base,
-		Repo:     repoSlug(wf),
-		TaskDir:  cf.taskDir,
+		Workflow:  wf,
+		Backend:   backend,
+		GitHub:    github.New(runner),
+		Store:     st,
+		RepoDir:   absRepo,
+		Base:      cf.base,
+		Repo:      repoSlug(wf),
+		ConfigDir: filepath.Dir(cf.config),
+		TaskDir:   cf.taskDir,
 	})
 	return eng, st, nil
 }
@@ -181,10 +182,13 @@ func cmdRun(args []string) int {
 		return 1
 	}
 	fmt.Printf("issue %d -> %s\n", *issue, final)
-	if final != "pr_open" {
+	// merged = real merge; merging = dry-run halt (policies.dry_run withheld it).
+	switch final {
+	case "merged", "merging":
+		return 0
+	default:
 		return 1
 	}
-	return 0
 }
 
 func cmdRecover(args []string) int {

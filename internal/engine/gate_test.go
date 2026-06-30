@@ -34,6 +34,28 @@ func TestApproved_GateGreen_ReachesMerging(t *testing.T) {
 	}
 }
 
+// A PR with no conflicts (MERGEABLE) but not up to date (BEHIND) must fail the
+// no_conflicts gate, which is configured `require: clean` -> mergeStateStatus
+// must be CLEAN, not merely conflict-free.
+func TestApproved_MergeableButNotClean_GoesToBlockedOnGate(t *testing.T) {
+	st := newStore(t)
+	gh := &fakeGH{status: &github.PRStatus{
+		State: "OPEN", ChecksTotal: 1, ApprovedReviews: 1,
+		Mergeable: "MERGEABLE", MergeStateStatus: "BEHIND",
+	}}
+	e := newEngine(t, st, &fakeBackend{}, gh, 5*time.Second)
+	e.goal = "blocked_on_gate"
+	task := seedAt(t, st, "approved", 42, nil)
+
+	final, err := e.drive(context.Background(), task)
+	if err != nil {
+		t.Fatalf("drive: %v", err)
+	}
+	if final != "blocked_on_gate" {
+		t.Fatalf("final = %q, want blocked_on_gate (require: clean must fail on BEHIND)", final)
+	}
+}
+
 func TestApproved_GateFails_GoesToBlockedOnGate(t *testing.T) {
 	cases := map[string]*github.PRStatus{
 		"failing check":     {State: "OPEN", ChecksTotal: 1, ChecksFailed: 1, ApprovedReviews: 1, Mergeable: "MERGEABLE"},

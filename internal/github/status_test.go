@@ -67,6 +67,25 @@ func TestPRStatus(t *testing.T) {
 			want: PRStatus{State: "OPEN", ApprovedReviews: 1},
 		},
 		{
+			// A plain Comment review never revokes a standing approval (matches how
+			// GitHub derives reviewDecision), so the approval must survive.
+			name: "approve then comment keeps the approval => 1",
+			stdout: `{"state":"OPEN","reviews":[
+			  {"author":{"login":"dave"},"state":"APPROVED","submittedAt":"2026-06-01T00:00:00Z"},
+			  {"author":{"login":"dave"},"state":"COMMENTED","submittedAt":"2026-06-04T00:00:00Z"}
+			]}`,
+			want: PRStatus{State: "OPEN", ApprovedReviews: 1},
+		},
+		{
+			// DISMISSED *is* decisive: it revokes the prior approval.
+			name: "approve then dismissed => 0",
+			stdout: `{"state":"OPEN","reviews":[
+			  {"author":{"login":"erin"},"state":"APPROVED","submittedAt":"2026-06-01T00:00:00Z"},
+			  {"author":{"login":"erin"},"state":"DISMISSED","submittedAt":"2026-06-04T00:00:00Z"}
+			]}`,
+			want: PRStatus{State: "OPEN", ApprovedReviews: 0},
+		},
+		{
 			name: "two distinct approvers => 2",
 			stdout: `{"state":"OPEN","reviews":[
 			  {"author":{"login":"alice"},"state":"APPROVED","submittedAt":"2026-06-01T00:00:00Z"},

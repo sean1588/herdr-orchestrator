@@ -30,16 +30,26 @@ func (e *Engine) runMergeAction(ctx context.Context, task *store.Task, st config
 		return "", "dry_run", "would_merge", nil // halt at merging
 	}
 
-	if err := e.gh.Merge(ctx, e.repoDir, pr); err != nil {
-		return "", "", "", fmt.Errorf("merge PR %d: %w", pr, err)
-	}
-	// Confirm the merge against the authoritative source before declaring success.
+	// Idempotent across crash recovery: if a prior run already merged this PR but
+	// died before persisting `merged`, the PR is MERGED — skip the merge and just
+	// fire the transition. Only merge a PR that is still open.
 	status, err := e.gh.PRStatus(ctx, e.repoDir, pr)
 	if err != nil {
-		return "", "", "", fmt.Errorf("verify merge of PR %d: %w", pr, err)
+		return "", "", "", fmt.Errorf("check PR %d before merge: %w", pr, err)
 	}
 	if status.State != "MERGED" {
-		return "", "", "", fmt.Errorf("merge of PR %d not confirmed (PR state %q)", pr, status.State)
+		if err := e.gh.Merge(ctx, e.repoDir, pr); err != nil {
+			return "", "", "", fmt.Errorf("merge PR %d: %w", pr, err)
+		}
+		// Confirm the merge against the authoritative source before declaring
+		// success: `gh pr merge` can exit 0 while the PR is only queued.
+		status, err = e.gh.PRStatus(ctx, e.repoDir, pr)
+		if err != nil {
+			return "", "", "", fmt.Errorf("verify merge of PR %d: %w", pr, err)
+		}
+		if status.State != "MERGED" {
+			return "", "", "", fmt.Errorf("merge of PR %d not confirmed (PR state %q)", pr, status.State)
+		}
 	}
 	mt := findEventTransition(st, "pr.merged")
 	if mt == nil {

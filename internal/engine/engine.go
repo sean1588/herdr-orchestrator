@@ -218,13 +218,20 @@ func (e *Engine) runState(ctx context.Context, task *store.Task) (next, trigger,
 				return "", "", "", err
 			}
 		case st.Entry.Resume != "":
-			target, exhausted, err := e.checkRetryCap(task, st)
-			if err != nil {
-				return "", "", "", err
-			}
-			if exhausted {
-				e.log.Info("retry cap exhausted", "task", task.ID, "state", name)
-				return target, "retry_exhausted", "", nil
+			// Count a retry only for a genuinely new round. A crash + Recover
+			// re-enters the same state with its agent already spawned for it
+			// (PaneSpawnState == state); re-counting there would burn a retry the
+			// reviewer never asked for. PaneSpawnState != state means this is the
+			// first entry since the last transition in, i.e. a fresh round.
+			if task.PaneSpawnState != task.CurrentState {
+				target, exhausted, err := e.checkRetryCap(task, st)
+				if err != nil {
+					return "", "", "", err
+				}
+				if exhausted {
+					e.log.Info("retry cap exhausted", "task", task.ID, "state", name)
+					return target, "retry_exhausted", "", nil
+				}
 			}
 			if err := e.spawn(ctx, task, st.Entry.Resume, st); err != nil {
 				return "", "", "", err
@@ -422,6 +429,12 @@ func (e *Engine) gatePass(ctx context.Context, task *store.Task, name string, g 
 	case "github_reviews":
 		return status.ApprovedReviews >= g.MinApproved, nil
 	case "github_mergeable":
+		// `require: clean` demands GitHub's CLEAN mergeStateStatus (no conflicts
+		// AND up to date AND not blocked), which is stricter than mere
+		// conflict-freeness. Without it, fall back to the conflict check.
+		if g.Require == "clean" {
+			return status.MergeStateStatus == "CLEAN", nil
+		}
 		return status.Mergeable == "MERGEABLE", nil
 	default:
 		return false, fmt.Errorf("gate %q: type %q not supported", name, g.Type)

@@ -61,11 +61,14 @@ func (g *GH) PRStatus(ctx context.Context, repoDir string, pr int) (*PRStatus, e
 		}
 	}
 
-	// Count distinct authors whose *latest* review is an approval.
+	// Count distinct authors whose latest *decisive* review is an approval. Only
+	// decisive reviews set a reviewer's standing; a later COMMENTED (or PENDING)
+	// review is advisory and does not revoke a prior approval — mirroring how
+	// GitHub derives reviewDecision.
 	latest := map[string]struct{ state, at string }{}
 	for _, r := range v.Reviews {
 		login := r.Author.Login
-		if login == "" {
+		if login == "" || !decisiveReview(r.State) {
 			continue
 		}
 		if cur, ok := latest[login]; !ok || r.SubmittedAt >= cur.at {
@@ -78,6 +81,18 @@ func (g *GH) PRStatus(ctx context.Context, repoDir string, pr int) (*PRStatus, e
 		}
 	}
 	return s, nil
+}
+
+// decisiveReview reports whether a review state changes the reviewer's standing.
+// APPROVED, CHANGES_REQUESTED, and DISMISSED are decisive; COMMENTED and PENDING
+// are advisory and never supersede a prior decisive review.
+func decisiveReview(state string) bool {
+	switch state {
+	case "APPROVED", "CHANGES_REQUESTED", "DISMISSED":
+		return true
+	default:
+		return false
+	}
 }
 
 type checkClass int

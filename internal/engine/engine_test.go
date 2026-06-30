@@ -73,6 +73,10 @@ type fakeGH struct {
 	merged   bool
 	mergeErr error
 	merges   int
+	// mergeResultState is the PR State reported by PRStatus after a successful
+	// Merge (default "MERGED"). Set to e.g. "OPEN" to simulate `gh pr merge`
+	// exiting 0 while the PR is not actually merged (a merge queue).
+	mergeResultState string
 }
 
 func (g *fakeGH) FindPR(ctx context.Context, repoDir, branch string) (*github.PR, error) {
@@ -86,7 +90,11 @@ func (g *fakeGH) Issue(ctx context.Context, repoDir string, n int) (*github.Issu
 }
 func (g *fakeGH) PRStatus(ctx context.Context, repoDir string, pr int) (*github.PRStatus, error) {
 	if g.merged {
-		return &github.PRStatus{State: "MERGED"}, nil
+		state := g.mergeResultState
+		if state == "" {
+			state = "MERGED"
+		}
+		return &github.PRStatus{State: state}, nil
 	}
 	if len(g.statusSeq) > 0 {
 		i := min(g.statusIdx, len(g.statusSeq)-1)

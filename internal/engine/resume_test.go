@@ -63,6 +63,40 @@ func TestChangesRequested_ResumeThenPRExists_LoopsToPROpen(t *testing.T) {
 	}
 }
 
+// A crash + Recover re-enters changes_requested with the resume agent already
+// spawned for it (PaneSpawnState == state, pane still live). Re-entry must reuse
+// the pane and must NOT burn a retry — the retry counter tracks review rounds,
+// not state entries.
+func TestChangesRequested_CrashReentry_DoesNotBurnRetry(t *testing.T) {
+	st := newStore(t)
+	b := &fakeBackend{pane: "w1:p1", resolve: true, events: []exec.Event{
+		{PaneID: "w1:p1", State: exec.StateDone},
+	}}
+	gh := &fakeGH{pr: &github.PR{Number: 42, State: "OPEN"}}
+	e := newEngine(t, st, b, gh, 5*time.Second)
+	e.goal = "pr_open"
+	task := seedAt(t, st, "changes_requested", 42, map[string]int{"changes_requested": 1})
+	task.PaneID = "w1:p1"
+	task.PaneSpawnState = "changes_requested" // already spawned for this state
+	if err := st.UpdateTask(context.Background(), task); err != nil {
+		t.Fatal(err)
+	}
+
+	final, err := e.drive(context.Background(), task)
+	if err != nil {
+		t.Fatalf("drive: %v", err)
+	}
+	if final != "pr_open" {
+		t.Fatalf("final = %q, want pr_open", final)
+	}
+	if b.spawns != 0 {
+		t.Errorf("crash re-entry must reuse the live pane, not spawn (spawns=%d)", b.spawns)
+	}
+	if task.RetryCounts["changes_requested"] != 1 {
+		t.Errorf("retry count = %d, want 1 (crash re-entry must not burn a retry)", task.RetryCounts["changes_requested"])
+	}
+}
+
 func TestChangesRequested_RetryExhausted_Escalates(t *testing.T) {
 	st := newStore(t)
 	b := &fakeBackend{pane: "w1:p1"} // no events: we exhaust at entry, before any wait

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/sean1588/herdr-orchestrator/internal/github"
 )
 
 func TestMerging_DryRun_HaltsWithoutMerging(t *testing.T) {
@@ -48,6 +50,48 @@ func TestMerging_RealMerge_ReachesMerged(t *testing.T) {
 	}
 	if !hasAudit(auditFor(t, st, task.ID), "merging", "merged", "pr.merged", "") {
 		t.Error("missing audit merging->merged pr.merged")
+	}
+}
+
+// Crash recovery: a prior run already merged the PR but died before persisting
+// `merged`. Re-driving merging must NOT call Merge again (idempotent); it just
+// fires pr.merged.
+func TestMerging_AlreadyMerged_IsIdempotent(t *testing.T) {
+	st := newStore(t)
+	gh := &fakeGH{status: &github.PRStatus{State: "MERGED"}}
+	e := newEngine(t, st, &fakeBackend{}, gh, 5*time.Second)
+	dryRunOff := false
+	e.wf.Policies.DryRun = &dryRunOff
+	task := seedAt(t, st, "merging", 42, nil)
+
+	final, err := e.drive(context.Background(), task)
+	if err != nil {
+		t.Fatalf("drive: %v", err)
+	}
+	if final != "merged" {
+		t.Fatalf("final = %q, want merged", final)
+	}
+	if gh.merges != 0 {
+		t.Errorf("already-merged PR must not be re-merged, got %d Merge calls", gh.merges)
+	}
+}
+
+// `gh pr merge` can exit 0 while the PR is still OPEN (queued behind a merge
+// queue). The post-merge confirmation must reject that rather than declare
+// success.
+func TestMerging_MergeNotConfirmed_FailsDrive(t *testing.T) {
+	st := newStore(t)
+	gh := &fakeGH{mergeResultState: "OPEN"}
+	e := newEngine(t, st, &fakeBackend{}, gh, 5*time.Second)
+	dryRunOff := false
+	e.wf.Policies.DryRun = &dryRunOff
+	task := seedAt(t, st, "merging", 42, nil)
+
+	if _, err := e.drive(context.Background(), task); err == nil {
+		t.Fatal("drive should error when the PR is not MERGED after merge")
+	}
+	if gh.merges != 1 {
+		t.Errorf("Merge should have been attempted once, got %d", gh.merges)
 	}
 }
 

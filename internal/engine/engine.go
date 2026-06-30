@@ -498,6 +498,9 @@ func (e *Engine) spawn(ctx context.Context, task *store.Task, role string, st co
 		TaskFile: taskFile,
 		Launch:   r.Launch,
 		Kickoff:  kickoff,
+		// A task with a detected PR is being re-spawned (reviewer/resume): keep
+		// its branch so the PR's commits survive (see exec.Spawn.PreserveBranch).
+		PreserveBranch: task.PRNumber != nil,
 	}
 	h, err := e.backend.Spawn(ctx, sp)
 	if err != nil {

@@ -41,6 +41,16 @@ func paneRunCalls(calls []proc.Call) []proc.Call {
 	return out
 }
 
+// idxOfArg returns the index of the first call whose args contain arg, or -1.
+func idxOfArg(calls []proc.Call, arg string) int {
+	for i, c := range calls {
+		if slices.Contains(c.Args, arg) {
+			return i
+		}
+	}
+	return -1
+}
+
 func testSpawn() Spawn {
 	return Spawn{
 		TaskID:   "issue-5",
@@ -62,6 +72,7 @@ func TestSpawn_ConstructsCommandsAndParsesPane(t *testing.T) {
 		return nil, nil
 	}}
 	h := NewHerdr(f)
+	h.SubmitDelay = 0 // no real sleep in tests
 	s := testSpawn()
 
 	hd, err := h.Spawn(context.Background(), s)
@@ -76,21 +87,26 @@ func TestSpawn_ConstructsCommandsAndParsesPane(t *testing.T) {
 	}
 
 	calls := f.Snapshot()
-	// Isolated worktree on the deterministic branch.
+	// Fresh task: clean slate — delete any stale branch and branch from base.
+	hasExactCall(t, calls, "git", "-C", "/home/u/repo", "branch", "-D", "agent/issue-5")
 	hasExactCall(t, calls, "git", "-C", "/home/u/repo", "worktree", "add", "-b", "agent/issue-5", "/home/u/wt-issue-5", "main")
 	// herdr workspace labeled with the durable task id.
 	hasExactCall(t, calls, "herdr", "workspace", "create", "--cwd", "/home/u/wt-issue-5", "--label", "issue-5", "--no-focus")
 
-	// Exactly two pane-run calls: launch (verbatim) then the single-line kickoff, in that order.
+	// One pane-run launches the agent verbatim; the kickoff is delivered as a
+	// separate send-text + send-keys Enter — a single text+Enter raced Claude
+	// Code's Ink TUI and left the kickoff unsent (dogfood finding).
 	runs := paneRunCalls(calls)
-	if len(runs) != 2 {
-		t.Fatalf("want 2 pane run calls (launch + kickoff), got %d:\n%s", len(runs), formatCalls(runs))
+	if len(runs) != 1 {
+		t.Fatalf("want 1 pane run call (launch only), got %d:\n%s", len(runs), formatCalls(runs))
 	}
 	if last := runs[0].Args[len(runs[0].Args)-1]; last != "claude" {
-		t.Errorf("first pane run should launch the agent verbatim, got %q", last)
+		t.Errorf("pane run should launch the agent verbatim, got %q", last)
 	}
-	if last := runs[1].Args[len(runs[1].Args)-1]; last != s.Kickoff {
-		t.Errorf("second pane run should be the kickoff, got %q", last)
+	hasExactCall(t, calls, "herdr", "pane", "send-text", "w7:p1", s.Kickoff)
+	hasExactCall(t, calls, "herdr", "pane", "send-keys", "w7:p1", "Enter")
+	if st, sk := idxOfArg(calls, "send-text"), idxOfArg(calls, "send-keys"); st < 0 || sk < 0 || st > sk {
+		t.Errorf("kickoff text (send-text @%d) must precede the submitting Enter (send-keys @%d)", st, sk)
 	}
 	// Kickoff is a single line referencing the task file (never the inline body).
 	if strings.Contains(s.Kickoff, "\n") || !strings.Contains(s.Kickoff, s.TaskFile) {
@@ -119,6 +135,7 @@ func TestSpawn_ClosesPreexistingSameLabelWorkspace(t *testing.T) {
 		return nil, nil
 	}}
 	h := NewHerdr(f)
+	h.SubmitDelay = 0
 
 	hd, err := h.Spawn(context.Background(), testSpawn()) // TaskID == "issue-5"
 	if err != nil {
@@ -128,6 +145,37 @@ func TestSpawn_ClosesPreexistingSameLabelWorkspace(t *testing.T) {
 		t.Errorf("pane = %q, want wNew:p1", hd.PaneID)
 	}
 	hasExactCall(t, f.Snapshot(), "herdr", "workspace", "close", "wOld")
+}
+
+// A re-spawn for a task that already has a PR (PreserveBranch) must NOT delete
+// the branch — it carries the PR's commits. Instead it fetches and checks out the
+// existing branch into a fresh worktree, so a reviewer/resume agent works on the
+// PR's state, not an empty branch off base.
+func TestSpawn_PreserveBranch_KeepsExistingBranch(t *testing.T) {
+	f := &proc.Fake{Responder: func(c proc.Call) ([]byte, error) {
+		if c.Name == "herdr" && len(c.Args) >= 2 && c.Args[0] == "workspace" && c.Args[1] == "create" {
+			return []byte(`{"result":{"root_pane":{"pane_id":"w9:p1"}}}`), nil
+		}
+		return nil, nil
+	}}
+	h := NewHerdr(f)
+	h.SubmitDelay = 0
+	s := testSpawn()
+	s.PreserveBranch = true
+
+	if _, err := h.Spawn(context.Background(), s); err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	calls := f.Snapshot()
+	// Must NOT delete the branch.
+	for _, c := range calls {
+		if c.Name == "git" && slices.Contains(c.Args, "branch") && slices.Contains(c.Args, "-D") {
+			t.Errorf("PreserveBranch must not run git branch -D: %v", c.Args)
+		}
+	}
+	// Fetch the branch, then check it out (no -b, no base) into the worktree.
+	hasExactCall(t, calls, "git", "-C", "/home/u/repo", "fetch", "origin", "agent/issue-5")
+	hasExactCall(t, calls, "git", "-C", "/home/u/repo", "worktree", "add", "/home/u/wt-issue-5", "agent/issue-5")
 }
 
 func TestSpawn_PropagatesWorktreeFailure(t *testing.T) {

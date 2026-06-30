@@ -28,6 +28,10 @@ type Spawn struct {
 	TaskFile string   // absolute path to the task context file (NEVER inline the body)
 	Launch   []string // e.g. ["claude"]
 	Kickoff  string   // single-line kickoff referencing TaskFile
+	// PreserveBranch keeps the existing branch on (re)spawn instead of recreating
+	// it from base. Set when the task already has a PR (a reviewer/resume spawn):
+	// recreating from base would discard the PR's commits.
+	PreserveBranch bool
 }
 
 // Handle identifies a spawned agent. PaneID is VOLATILE — it is re-resolved from

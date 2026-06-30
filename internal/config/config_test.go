@@ -66,8 +66,8 @@ func TestLoad_DefaultPipeline_DecodesStructure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if wf.Version != 0 || wf.EntryState != "intake" {
-		t.Errorf("version/entry = %d/%q", wf.Version, wf.EntryState)
+	if wf.Version != 0 || wf.EntryState == nil || *wf.EntryState != "intake" {
+		t.Errorf("version/entry = %d/%v", wf.Version, wf.EntryState)
 	}
 	if len(wf.States) != 11 {
 		t.Errorf("want 11 states, got %d", len(wf.States))
@@ -287,8 +287,9 @@ func TestInvariant4_GateMustBeAuthoritative(t *testing.T) {
 	// The JSON Schema enum already blocks non-authoritative gate types, so this
 	// invariant can only fire when bypassing the schema. Exercise the check
 	// directly against a hand-built workflow.
+	entry := "a"
 	wf := &Workflow{
-		EntryState: "a",
+		EntryState: &entry,
 		Gates:      map[string]Gate{"sketchy": {Type: "agent_self_report"}},
 		States: map[string]State{
 			"a": {Terminal: "success"},
@@ -412,6 +413,36 @@ states:
 	_, _, err := mustParse(t, yaml)
 	if !containsSubstr(semErrors(t, err), "has no exit") {
 		t.Errorf("want no-exit error, got %v", err)
+	}
+}
+
+// Fidelity with validate_workflow.py: an absent entry_state is a warning, but an
+// explicit empty (or otherwise undeclared) entry_state is a hard error.
+func TestEntryState_AbsentIsWarning(t *testing.T) {
+	yaml := `
+version: 0
+name: x
+states:
+  a: { terminal: success }`
+	_, warnings, err := mustParse(t, yaml)
+	if err != nil {
+		t.Fatalf("absent entry_state should be valid (warning only), got %v", err)
+	}
+	if !containsSubstr(warnings, "no entry_state declared") {
+		t.Errorf("want no-entry_state warning, got %v", warnings)
+	}
+}
+
+func TestEntryState_ExplicitEmptyIsError(t *testing.T) {
+	yaml := `
+version: 0
+name: x
+entry_state: ""
+states:
+  a: { terminal: success }`
+	_, _, err := mustParse(t, yaml)
+	if !containsSubstr(semErrors(t, err), `entry_state "" is not a declared state`) {
+		t.Errorf("explicit empty entry_state must error (match reference validator), got %v", err)
 	}
 }
 

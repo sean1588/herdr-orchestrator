@@ -5,9 +5,12 @@ package config
 
 // Workflow is a complete, decoded workflow config.
 type Workflow struct {
-	Version    int                 `yaml:"version"`
-	Name       string              `yaml:"name"`
-	EntryState string              `yaml:"entry_state"`
+	Version int    `yaml:"version"`
+	Name    string `yaml:"name"`
+	// EntryState is a pointer so an absent key (nil -> reachability warning) is
+	// distinguishable from an explicit empty/undeclared value (-> hard error),
+	// matching the reference validator's None-vs-"" semantics.
+	EntryState *string             `yaml:"entry_state"`
 	Policies   Policies            `yaml:"policies"`
 	Sources    []Source            `yaml:"sources"`
 	Roles      map[string]Role     `yaml:"roles"`
@@ -16,18 +19,16 @@ type Workflow struct {
 	States     map[string]State    `yaml:"states"`
 }
 
-// Policies holds workflow-wide policy knobs.
+// Policies holds workflow-wide policy knobs. In Phase 1 these are validated and
+// recorded but only retry_caps influences validation; dry_run, circuit_breaker,
+// max_concurrent_tasks, and execution gate the merge/scheduler/concurrency
+// machinery that is out of Phase 1 scope and therefore not yet enforced.
 type Policies struct {
 	MaxConcurrentTasks int            `yaml:"max_concurrent_tasks"`
-	DryRun             *bool          `yaml:"dry_run"` // pointer: distinguishes unset (default true) from explicit false
+	DryRun             *bool          `yaml:"dry_run"` // gates auto-merge (out of Phase 1 scope); nil => default-on
 	CircuitBreaker     bool           `yaml:"circuit_breaker"`
 	RetryCaps          map[string]int `yaml:"retry_caps"` // keyed by state name
 	Execution          Execution      `yaml:"execution"`
-}
-
-// DryRunEnabled reports the effective dry-run setting (defaults to true when unset).
-func (p Policies) DryRunEnabled() bool {
-	return p.DryRun == nil || *p.DryRun
 }
 
 // Execution describes how agents are run.

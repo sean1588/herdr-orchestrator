@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -17,10 +18,11 @@ import (
 // --- fakes ---
 
 type fakeBackend struct {
-	pane    string
-	events  []exec.Event
-	resolve bool
-	spawns  int
+	pane       string
+	events     []exec.Event
+	resolve    bool
+	resolveErr error
+	spawns     int
 }
 
 func (f *fakeBackend) Spawn(ctx context.Context, s exec.Spawn) (exec.Handle, error) {
@@ -49,6 +51,9 @@ func (f *fakeBackend) Events(ctx context.Context) (<-chan exec.Event, error) {
 	return ch, nil
 }
 func (f *fakeBackend) Resolve(ctx context.Context, label string) (exec.Handle, bool, error) {
+	if f.resolveErr != nil {
+		return exec.Handle{}, false, f.resolveErr
+	}
 	return exec.Handle{PaneID: f.pane, Workdir: "/wt"}, f.resolve, nil
 }
 func (f *fakeBackend) Close(ctx context.Context, h exec.Handle) error { return nil }
@@ -213,6 +218,52 @@ func TestRun_Timeout_Escalates(t *testing.T) {
 	}
 	if !hasAudit(auditFor(t, st, "issue-12"), "implementing", "escalated", "timeout", "") {
 		t.Errorf("missing timeout->escalated audit")
+	}
+}
+
+// A transient Resolve error must NOT be treated as "no live agent": doing so
+// would re-spawn over a possibly-live worktree, force-removing it and destroying
+// uncommitted work.
+func TestSpawn_ResolveErrorDoesNotDestructivelyRespawn(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+	if err := st.CreateTask(ctx, &store.Task{
+		ID: "issue-5", Issue: 5, Branch: "agent/issue-5",
+		CurrentState: "implementing", PaneID: "live:p1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	task, _ := st.GetTask(ctx, "issue-5")
+	b := &fakeBackend{pane: "x:p1", resolveErr: errors.New("herdr momentarily unavailable")}
+	e := newEngine(t, st, b, &fakeGH{}, 5*time.Second)
+
+	err := e.spawn(ctx, task, "implementer")
+	if err == nil {
+		t.Fatal("spawn should error when Resolve fails for an existing agent, not re-spawn")
+	}
+	if b.spawns != 0 {
+		t.Errorf("must not launch a fresh agent on a transient Resolve error (would destroy live worktree), spawns=%d", b.spawns)
+	}
+}
+
+func TestReconcile_ResolveErrorPropagatesAndKeepsPane(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+	if err := st.CreateTask(ctx, &store.Task{
+		ID: "issue-6", Issue: 6, Branch: "agent/issue-6",
+		CurrentState: "implementing", PaneID: "live:p1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	task, _ := st.GetTask(ctx, "issue-6")
+	b := &fakeBackend{resolveErr: errors.New("herdr unavailable")}
+	e := newEngine(t, st, b, &fakeGH{}, 5*time.Second)
+
+	if err := e.reconcile(ctx, task); err == nil {
+		t.Fatal("reconcile should propagate a Resolve error, not swallow it")
+	}
+	if task.PaneID != "live:p1" {
+		t.Errorf("pane id must not be cleared on a transient error, got %q", task.PaneID)
 	}
 }
 

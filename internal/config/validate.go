@@ -186,17 +186,18 @@ func checkLoopsTerminate(wf *Workflow, errs *[]string) {
 }
 
 func checkReachability(wf *Workflow, stateNames []string, warnings, errs *[]string) {
-	if wf.EntryState == "" {
+	if wf.EntryState == nil {
 		*warnings = append(*warnings, "no entry_state declared; cannot check reachability")
 		return
 	}
-	if _, ok := wf.States[wf.EntryState]; !ok {
-		*errs = append(*errs, fmt.Sprintf("entry_state %q is not a declared state", wf.EntryState))
+	entry := *wf.EntryState
+	if _, ok := wf.States[entry]; !ok {
+		*errs = append(*errs, fmt.Sprintf("entry_state %q is not a declared state", entry))
 		return
 	}
 	graph := buildGraph(wf)
 	seen := map[string]bool{}
-	stack := []string{wf.EntryState}
+	stack := []string{entry}
 	for len(stack) > 0 {
 		n := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
@@ -208,7 +209,7 @@ func checkReachability(wf *Workflow, stateNames []string, warnings, errs *[]stri
 	}
 	for _, n := range stateNames {
 		if !seen[n] && wf.States[n].WaitFor == "" {
-			*warnings = append(*warnings, fmt.Sprintf("state %q is unreachable from entry_state %q", n, wf.EntryState))
+			*warnings = append(*warnings, fmt.Sprintf("state %q is unreachable from entry_state %q", n, entry))
 		}
 	}
 }

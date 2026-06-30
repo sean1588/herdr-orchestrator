@@ -321,11 +321,19 @@ func (e *Engine) evalGate(ctx context.Context, task *store.Task, name string, g 
 // launching a second one.
 func (e *Engine) spawn(ctx context.Context, task *store.Task, role string) error {
 	if task.PaneID != "" {
-		if h, ok, err := e.backend.Resolve(ctx, task.ID); err == nil && ok {
+		h, ok, err := e.backend.Resolve(ctx, task.ID)
+		if err != nil {
+			// A transient Resolve failure must NOT fall through to a fresh spawn:
+			// backend.Spawn force-removes the worktree, which would destroy a
+			// still-live agent's uncommitted work. Abort and let the caller retry.
+			return fmt.Errorf("resolve existing agent for %s (refusing to re-spawn over a possibly-live worktree): %w", task.ID, err)
+		}
+		if ok {
 			task.PaneID = h.PaneID
 			e.log.Info("reusing live agent", "task", task.ID, "pane", h.PaneID)
 			return nil
 		}
+		// err == nil && !ok: the prior agent is genuinely gone — safe to spawn fresh.
 	}
 
 	r, ok := e.wf.Roles[role]
@@ -388,10 +396,17 @@ func (e *Engine) kickoff(r config.Role, task *store.Task, taskFile string) strin
 // reconcile re-resolves a task's volatile pane and short-circuits to the goal if
 // GitHub already shows the artifact for an implementing task.
 func (e *Engine) reconcile(ctx context.Context, task *store.Task) error {
-	if h, ok, err := e.backend.Resolve(ctx, task.ID); err == nil && ok {
+	h, ok, err := e.backend.Resolve(ctx, task.ID)
+	if err != nil {
+		// Don't clear the volatile pane on a transient failure: a cleared pane
+		// would let a later spawn re-launch over a possibly-live worktree. Let
+		// the caller log and skip/retry this task.
+		return fmt.Errorf("reconcile resolve %s: %w", task.ID, err)
+	}
+	if ok {
 		task.PaneID = h.PaneID
 	} else {
-		task.PaneID = ""
+		task.PaneID = "" // the prior agent is genuinely gone
 	}
 	if task.CurrentState == "implementing" {
 		pr, err := e.gh.FindPR(ctx, e.repoDir, task.Branch)

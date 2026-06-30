@@ -51,6 +51,12 @@ func (h *Herdr) Spawn(ctx context.Context, s Spawn) (Handle, error) {
 	// Best-effort cleanup of any prior attempt for this branch (ignore errors).
 	_, _ = h.r.Run(ctx, "", h.GitBin, "-C", s.RepoDir, "worktree", "remove", wt, "--force")
 	_, _ = h.r.Run(ctx, "", h.GitBin, "-C", s.RepoDir, "branch", "-D", s.Branch)
+	// Symmetric herdr-side cleanup: close any prior workspace with this label so a
+	// re-spawn doesn't create a duplicate label (which would break Resolve, since
+	// it matches workspaces by label).
+	if wsID, err := h.workspaceByLabel(ctx, s.TaskID); err == nil && wsID != "" {
+		_, _ = h.r.Run(ctx, "", h.HerdrBin, "workspace", "close", wsID)
+	}
 
 	if _, err := h.r.Run(ctx, "", h.GitBin, "-C", s.RepoDir, "worktree", "add", "-b", s.Branch, wt, s.Base); err != nil {
 		return Handle{}, fmt.Errorf("create worktree %s: %w", wt, err)

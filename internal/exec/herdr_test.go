@@ -105,6 +105,31 @@ func TestSpawn_ConstructsCommandsAndParsesPane(t *testing.T) {
 	}
 }
 
+// A re-spawn must close any pre-existing workspace carrying the same label,
+// mirroring the git worktree/branch cleanup; otherwise duplicate-label
+// workspaces accumulate and break Resolve (which matches by label).
+func TestSpawn_ClosesPreexistingSameLabelWorkspace(t *testing.T) {
+	f := &proc.Fake{Responder: func(c proc.Call) ([]byte, error) {
+		if c.Name == "herdr" && len(c.Args) >= 2 && c.Args[0] == "workspace" && c.Args[1] == "list" {
+			return []byte(`{"result":{"workspaces":[{"workspace_id":"wOld","label":"issue-5"}]}}`), nil
+		}
+		if c.Name == "herdr" && len(c.Args) >= 2 && c.Args[0] == "workspace" && c.Args[1] == "create" {
+			return []byte(`{"result":{"root_pane":{"pane_id":"wNew:p1"}}}`), nil
+		}
+		return nil, nil
+	}}
+	h := NewHerdr(f)
+
+	hd, err := h.Spawn(context.Background(), testSpawn()) // TaskID == "issue-5"
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	if hd.PaneID != "wNew:p1" {
+		t.Errorf("pane = %q, want wNew:p1", hd.PaneID)
+	}
+	hasExactCall(t, f.Snapshot(), "herdr", "workspace", "close", "wOld")
+}
+
 func TestSpawn_PropagatesWorktreeFailure(t *testing.T) {
 	f := &proc.Fake{Responder: func(c proc.Call) ([]byte, error) {
 		if c.Name == "git" && len(c.Args) >= 4 && c.Args[3] == "add" {

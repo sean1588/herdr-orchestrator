@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    name: build · vet · gofmt · test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # Track the module's go directive so CI matches local builds.
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt (must be clean)
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::these files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: build
+        run: go build ./...
+
+      - name: vet
+        run: go vet ./...
+
+      # -race exercises the engine's goroutines (event poll + await/timeout select)
+      # and the single-writer store. The race runtime needs cgo, which is on by
+      # default on the runner; the shipped binary is still built cgo-free.
+      - name: test
+        run: go test -race ./...

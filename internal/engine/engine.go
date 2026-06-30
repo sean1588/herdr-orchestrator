@@ -99,11 +99,17 @@ func New(c Config) *Engine {
 }
 
 // Run drives a single issue from the start state to the goal (pr_open) or a
-// terminal state, returning the final state.
+// terminal state, returning the final state. If the task already exists (a
+// re-run after a crash), it is reconciled against herdr/GitHub before driving.
 func (e *Engine) Run(ctx context.Context, issue int) (string, error) {
-	task, err := e.ensureTask(ctx, issue)
+	task, created, err := e.ensureTask(ctx, issue)
 	if err != nil {
 		return "", err
+	}
+	if !created {
+		if err := e.reconcile(ctx, task); err != nil {
+			return task.CurrentState, err
+		}
 	}
 	return e.drive(ctx, task)
 }
@@ -134,14 +140,15 @@ func (e *Engine) Recover(ctx context.Context) error {
 }
 
 // ensureTask loads an existing task or creates a fresh one at the start state.
-func (e *Engine) ensureTask(ctx context.Context, issue int) (*store.Task, error) {
+// The bool return reports whether a new task was created.
+func (e *Engine) ensureTask(ctx context.Context, issue int) (*store.Task, bool, error) {
 	id := taskID(issue)
 	existing, err := e.store.GetTask(ctx, id)
 	if err == nil {
-		return existing, nil
+		return existing, false, nil
 	}
 	if !errors.Is(err, store.ErrNotFound) {
-		return nil, fmt.Errorf("load task %s: %w", id, err)
+		return nil, false, fmt.Errorf("load task %s: %w", id, err)
 	}
 	task := &store.Task{
 		ID:           id,
@@ -151,10 +158,10 @@ func (e *Engine) ensureTask(ctx context.Context, issue int) (*store.Task, error)
 		CurrentState: e.startState,
 	}
 	if err := e.store.CreateTask(ctx, task); err != nil {
-		return nil, fmt.Errorf("create task %s: %w", id, err)
+		return nil, false, fmt.Errorf("create task %s: %w", id, err)
 	}
 	e.log.Info("task created", "task", id, "state", e.startState, "branch", task.Branch)
-	return task, nil
+	return task, true, nil
 }
 
 // drive runs the interpreter loop until a halt state (goal or terminal).

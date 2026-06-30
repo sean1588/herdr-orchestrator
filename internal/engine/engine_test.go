@@ -23,11 +23,20 @@ type fakeBackend struct {
 	resolve    bool
 	resolveErr error
 	spawns     int
+	resumes    int
+	spawnLog   []exec.Spawn
+	resumeLog  []string // kickoffs sent to Resume
 }
 
 func (f *fakeBackend) Spawn(ctx context.Context, s exec.Spawn) (exec.Handle, error) {
 	f.spawns++
+	f.spawnLog = append(f.spawnLog, s)
 	return exec.Handle{PaneID: f.pane, Workdir: "/wt"}, nil
+}
+func (f *fakeBackend) Resume(ctx context.Context, h exec.Handle, kickoff string) error {
+	f.resumes++
+	f.resumeLog = append(f.resumeLog, kickoff)
+	return nil
 }
 func (f *fakeBackend) WaitState(ctx context.Context, h exec.Handle, target exec.AgentState) (exec.AgentState, error) {
 	return target, nil
@@ -116,6 +125,7 @@ func newEngine(t *testing.T, st *store.Store, b exec.ExecutionBackend, gh github
 		RepoDir:      "/repo",
 		Base:         "main",
 		Repo:         "owner/repo",
+		ConfigDir:    "../config/testdata",
 		TaskDir:      t.TempDir(),
 		DurationFunc: func(string) (time.Duration, error) { return timeout, nil },
 		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -258,7 +268,7 @@ func TestSpawn_ResolveErrorDoesNotDestructivelyRespawn(t *testing.T) {
 	ctx := context.Background()
 	if err := st.CreateTask(ctx, &store.Task{
 		ID: "issue-5", Issue: 5, Branch: "agent/issue-5",
-		CurrentState: "implementing", PaneID: "live:p1",
+		CurrentState: "implementing", PaneID: "live:p1", PaneSpawnState: "implementing",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -266,7 +276,7 @@ func TestSpawn_ResolveErrorDoesNotDestructivelyRespawn(t *testing.T) {
 	b := &fakeBackend{pane: "x:p1", resolveErr: errors.New("herdr momentarily unavailable")}
 	e := newEngine(t, st, b, &fakeGH{}, 5*time.Second)
 
-	err := e.spawn(ctx, task, "implementer")
+	err := e.spawn(ctx, task, "implementer", e.wf.States["implementing"])
 	if err == nil {
 		t.Fatal("spawn should error when Resolve fails for an existing agent, not re-spawn")
 	}

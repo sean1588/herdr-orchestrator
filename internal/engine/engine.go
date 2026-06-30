@@ -38,9 +38,10 @@ type Config struct {
 	GitHub   github.Client
 	Store    *store.Store
 
-	RepoDir string // local checkout (absolute) where git/gh run
-	Base    string // base branch, e.g. "main"
-	Repo    string // owner/name slug recorded on the task
+	RepoDir   string // local checkout (absolute) where git/gh run
+	Base      string // base branch, e.g. "main"
+	Repo      string // owner/name slug recorded on the task
+	ConfigDir string // dir of the workflow config; decision rubric paths resolve against it
 
 	// Optional; sensible defaults applied by New.
 	TaskDir      string                              // where task files are written; default os.TempDir()
@@ -58,6 +59,7 @@ type Engine struct {
 	store   *store.Store
 
 	repoDir, base, repo string
+	configDir           string
 	taskDir             string
 	goal, startState    string
 	parseDur            func(string) (time.Duration, error)
@@ -74,6 +76,7 @@ func New(c Config) *Engine {
 		repoDir:    c.RepoDir,
 		base:       c.Base,
 		repo:       c.Repo,
+		configDir:  c.ConfigDir,
 		taskDir:    c.TaskDir,
 		goal:       c.Goal,
 		startState: c.StartState,
@@ -190,7 +193,7 @@ func (e *Engine) runState(ctx context.Context, task *store.Task) (next, trigger,
 	if st.Entry != nil {
 		switch {
 		case st.Entry.Spawn != "":
-			if err := e.spawn(ctx, task, st.Entry.Spawn); err != nil {
+			if err := e.spawn(ctx, task, st.Entry.Spawn, st); err != nil {
 				return "", "", "", err
 			}
 		case st.Entry.Resume != "":
@@ -259,9 +262,9 @@ func (e *Engine) awaitAgentState(ctx context.Context, task *store.Task, st confi
 			}
 			switch ev.State {
 			case exec.StateDone:
-				verdict, gerr := e.evaluateGate(ctx, task, doneT)
-				if gerr != nil {
-					return "", "", "", gerr
+				verdict, derr := e.evaluateDone(ctx, task, doneT)
+				if derr != nil {
+					return "", "", "", derr
 				}
 				return doneT.Branch[verdict], "agent.done", verdict, nil
 			case exec.StateBlocked:
@@ -274,6 +277,18 @@ func (e *Engine) awaitAgentState(ctx context.Context, task *store.Task, st confi
 			}
 		}
 	}
+}
+
+// evaluateDone resolves the outcome of an agent.done transition: a decision
+// verdict (judgment, read from the reviewer) or a gate result (authoritative).
+func (e *Engine) evaluateDone(ctx context.Context, task *store.Task, t *config.Transition) (string, error) {
+	if dec := t.DecisionRef(); dec != "" {
+		return e.evaluateDecision(task, dec)
+	}
+	if len(t.GateRefs()) > 0 {
+		return e.evaluateGate(ctx, task, t)
+	}
+	return "", fmt.Errorf("state %q: agent.done transition has neither a decision nor a gate to evaluate", task.CurrentState)
 }
 
 // evaluateGate evaluates all gates referenced by a transition over authoritative
@@ -315,12 +330,13 @@ func (e *Engine) evalGate(ctx context.Context, task *store.Task, name string, g 
 	}
 }
 
-// spawn runs the implementer entry action: write the task file, build a
-// single-line kickoff, and launch the agent. It is idempotent — if the task
-// already has a live agent (resume), it re-resolves the pane instead of
-// launching a second one.
-func (e *Engine) spawn(ctx context.Context, task *store.Task, role string) error {
-	if task.PaneID != "" {
+// spawn launches the agent for a state's entry: build the role-specific task file
+// + single-line kickoff and start the agent. It reuses an existing pane ONLY when
+// re-entering the same state its agent was spawned for (crash recovery) — entering
+// a new state always spawns a fresh agent for that state's role, so the reviewer
+// at pr_open is not mistaken for the still-labelled implementer workspace.
+func (e *Engine) spawn(ctx context.Context, task *store.Task, role string, st config.State) error {
+	if task.PaneID != "" && task.PaneSpawnState == task.CurrentState {
 		h, ok, err := e.backend.Resolve(ctx, task.ID)
 		if err != nil {
 			// A transient Resolve failure must NOT fall through to a fresh spawn:
@@ -330,7 +346,7 @@ func (e *Engine) spawn(ctx context.Context, task *store.Task, role string) error
 		}
 		if ok {
 			task.PaneID = h.PaneID
-			e.log.Info("reusing live agent", "task", task.ID, "pane", h.PaneID)
+			e.log.Info("reusing live agent", "task", task.ID, "pane", h.PaneID, "state", task.CurrentState)
 			return nil
 		}
 		// err == nil && !ok: the prior agent is genuinely gone — safe to spawn fresh.
@@ -341,7 +357,7 @@ func (e *Engine) spawn(ctx context.Context, task *store.Task, role string) error
 		return fmt.Errorf("role %q not declared", role)
 	}
 
-	taskFile, err := e.writeTaskFile(ctx, task)
+	taskFile, kickoff, err := e.agentTask(ctx, task, st, r)
 	if err != nil {
 		return err
 	}
@@ -354,18 +370,34 @@ func (e *Engine) spawn(ctx context.Context, task *store.Task, role string) error
 		Base:     e.base,
 		TaskFile: taskFile,
 		Launch:   r.Launch,
-		Kickoff:  e.kickoff(r, task, taskFile),
+		Kickoff:  kickoff,
 	}
 	h, err := e.backend.Spawn(ctx, sp)
 	if err != nil {
 		return fmt.Errorf("spawn %s: %w", role, err)
 	}
 	task.PaneID = h.PaneID
+	task.PaneSpawnState = task.CurrentState
 	if err := e.store.UpdateTask(ctx, task); err != nil {
 		return fmt.Errorf("persist pane id: %w", err)
 	}
-	e.log.Info("agent spawned", "task", task.ID, "role", role, "pane", h.PaneID)
+	e.log.Info("agent spawned", "task", task.ID, "role", role, "pane", h.PaneID, "state", task.CurrentState)
 	return nil
+}
+
+// agentTask builds the context file + single-line kickoff for a spawned agent. A
+// state whose agent.done transition evaluates a decision gets a reviewer task (the
+// rubric + a PR pointer, producing a verdict file); otherwise the agent is an
+// implementer and gets the issue.
+func (e *Engine) agentTask(ctx context.Context, task *store.Task, st config.State, r config.Role) (taskFile, kickoff string, err error) {
+	if dec := decisionForState(st); dec != "" {
+		return e.reviewerTask(task, dec)
+	}
+	taskFile, err = e.writeTaskFile(ctx, task)
+	if err != nil {
+		return "", "", err
+	}
+	return taskFile, e.kickoff(r, task, taskFile), nil
 }
 
 // writeTaskFile fetches the issue and writes its title+body to a context file.

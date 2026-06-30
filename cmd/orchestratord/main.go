@@ -141,14 +141,15 @@ func (cf commonFlags) wire(ctx context.Context) (*engine.Engine, *store.Store, e
 	}
 
 	eng := engine.New(engine.Config{
-		Workflow: wf,
-		Backend:  backend,
-		GitHub:   github.New(runner),
-		Store:    st,
-		RepoDir:  absRepo,
-		Base:     cf.base,
-		Repo:     repoSlug(wf),
-		TaskDir:  cf.taskDir,
+		Workflow:  wf,
+		Backend:   backend,
+		GitHub:    github.New(runner),
+		Store:     st,
+		RepoDir:   absRepo,
+		Base:      cf.base,
+		Repo:      repoSlug(wf),
+		ConfigDir: filepath.Dir(cf.config),
+		TaskDir:   cf.taskDir,
 	})
 	return eng, st, nil
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -24,6 +25,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     branch        TEXT NOT NULL,
     current_state TEXT NOT NULL,
     pane_id       TEXT NOT NULL,
+    pane_spawn_state TEXT NOT NULL DEFAULT '',
     pr_number     INTEGER,
     retry_counts  TEXT NOT NULL,
     created_at    TEXT NOT NULL,
@@ -66,7 +68,22 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("store: create schema: %w", err)
 	}
+	if err := applyMigrations(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return &Store{db: db, now: time.Now}, nil
+}
+
+// applyMigrations idempotently adds columns introduced after the initial schema.
+// SQLite lacks ADD COLUMN IF NOT EXISTS, so the duplicate-column error (the column
+// already exists on a freshly-created table) is tolerated.
+func applyMigrations(ctx context.Context, db *sql.DB) error {
+	const addPaneSpawnState = `ALTER TABLE tasks ADD COLUMN pane_spawn_state TEXT NOT NULL DEFAULT ''`
+	if _, err := db.ExecContext(ctx, addPaneSpawnState); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+		return fmt.Errorf("store: migrate pane_spawn_state: %w", err)
+	}
+	return nil
 }
 
 // Close releases the underlying database handle.
@@ -94,9 +111,9 @@ func (s *Store) CreateTask(ctx context.Context, t *Task) error {
 
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO tasks
-			(id, issue, repo, branch, current_state, pane_id, pr_number, retry_counts, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		t.ID, t.Issue, t.Repo, t.Branch, t.CurrentState, t.PaneID,
+			(id, issue, repo, branch, current_state, pane_id, pane_spawn_state, pr_number, retry_counts, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		t.ID, t.Issue, t.Repo, t.Branch, t.CurrentState, t.PaneID, t.PaneSpawnState,
 		prNumberArg(t.PRNumber), rc,
 		t.CreatedAt.Format(timeLayout), t.UpdatedAt.Format(timeLayout),
 	)
@@ -109,7 +126,7 @@ func (s *Store) CreateTask(ctx context.Context, t *Task) error {
 // GetTask returns the task with the given id, or ErrNotFound.
 func (s *Store) GetTask(ctx context.Context, id string) (*Task, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, issue, repo, branch, current_state, pane_id, pr_number, retry_counts, created_at, updated_at
+		SELECT id, issue, repo, branch, current_state, pane_id, pane_spawn_state, pr_number, retry_counts, created_at, updated_at
 		FROM tasks WHERE id = ?`, id)
 
 	t, err := scanTask(row)
@@ -134,10 +151,10 @@ func (s *Store) UpdateTask(ctx context.Context, t *Task) error {
 
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE tasks SET
-			repo = ?, branch = ?, current_state = ?, pane_id = ?,
+			repo = ?, branch = ?, current_state = ?, pane_id = ?, pane_spawn_state = ?,
 			pr_number = ?, retry_counts = ?, updated_at = ?
 		WHERE id = ?`,
-		t.Repo, t.Branch, t.CurrentState, t.PaneID,
+		t.Repo, t.Branch, t.CurrentState, t.PaneID, t.PaneSpawnState,
 		prNumberArg(t.PRNumber), rc, t.UpdatedAt.Format(timeLayout), t.ID,
 	)
 	if err != nil {
@@ -157,7 +174,7 @@ func (s *Store) UpdateTask(ctx context.Context, t *Task) error {
 // filter terminal states themselves.
 func (s *Store) List(ctx context.Context) ([]Task, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, issue, repo, branch, current_state, pane_id, pr_number, retry_counts, created_at, updated_at
+		SELECT id, issue, repo, branch, current_state, pane_id, pane_spawn_state, pr_number, retry_counts, created_at, updated_at
 		FROM tasks ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("store: list tasks: %w", err)
@@ -238,7 +255,7 @@ func scanTask(sc scanner) (*Task, error) {
 		created string
 		updated string
 	)
-	if err := sc.Scan(&t.ID, &t.Issue, &t.Repo, &t.Branch, &t.CurrentState, &t.PaneID,
+	if err := sc.Scan(&t.ID, &t.Issue, &t.Repo, &t.Branch, &t.CurrentState, &t.PaneID, &t.PaneSpawnState,
 		&pr, &rc, &created, &updated); err != nil {
 		return nil, err
 	}

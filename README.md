@@ -39,33 +39,66 @@ backend can later be swapped for a headless/container implementation.
 
 ## Build, test
 
+Requires Go 1.26+. The binary is pure Go (no cgo) — a single static binary.
+
 ```sh
-go build ./...
-go test ./...
+go build ./...     # compile everything
+go test ./...      # run the test suite
 go vet ./...
 gofmt -l .
+
+# build the CLI into a runnable binary
+go build -o orchestratord ./cmd/orchestratord
 ```
+
+The commands below assume `./orchestratord` is on your `PATH`; otherwise run them
+through the toolchain, e.g. `go run ./cmd/orchestratord validate <config>`.
 
 ## Usage
 
-Validate a workflow config (JSON Schema + the safety invariants):
+Validate a workflow config (JSON Schema + the safety invariants) — no external
+dependencies, safe to run anywhere:
 
 ```sh
 orchestratord validate internal/config/testdata/default-pipeline.yaml
 ```
 
-Drive one issue through the slice (needs a running herdr, a local checkout, and
-`gh` authenticated):
+### Prerequisites for `run` / `recover`
+
+`run` and `recover` drive a real agent and touch GitHub, so they need:
+
+- **herdr running**, and the process able to reach it — run from inside a herdr
+  pane, or with `HERDR_SOCKET_PATH` pointing at the server socket
+  (`echo $HERDR_ENV` should be `1` inside a pane; `echo $HERDR_SOCKET_PATH`).
+- **`gh` authenticated** for the target repo — verify with `gh auth status`.
+  (Confirm it from inside a herdr pane too; PR creation fails silently otherwise.)
+- A **local checkout** of the repo the agent will work in, passed as `--repo`
+  (absolute path). The engine creates per-task worktrees beside it.
+- The agent CLI named in the workflow's `roles.*.launch` on `PATH` (default
+  `claude`). Agents run **non-root** with no `--dangerously-skip-permissions`; on
+  a brand-new worktree the agent TUI may prompt to trust the folder.
+- An issue to work — for the shipped `default-pipeline.yaml` that means an issue
+  in `sean1588/minicode` (Phase 1 enqueues the `--issue` number directly; the
+  source `select:` label is not yet polled).
+
+Drive one issue through the slice to `pr_open`:
 
 ```sh
 orchestratord run \
   --config internal/config/testdata/default-pipeline.yaml \
   --repo /abs/path/to/checkout \
   --base main \
-  --issue 123
+  --issue 123 \
+  --db ./orchestrator.db          # optional; defaults to ./orchestrator.db
 ```
 
-Reconcile and resume in-flight tasks after a restart (crash recovery):
+Exit code is `0` when the task reaches `pr_open`, non-zero otherwise (e.g.
+`escalated`). Task state and a per-transition audit log persist in the `--db`
+SQLite file.
+
+Reconcile and resume in-flight tasks after a restart (crash recovery) — keys on
+the deterministic `agent/issue-<n>` branch and the durable task id, never the
+volatile herdr pane id:
 
 ```sh
 orchestratord recover --config <c> --repo /abs/path/to/checkout

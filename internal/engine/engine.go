@@ -197,7 +197,17 @@ func (e *Engine) runState(ctx context.Context, task *store.Task) (next, trigger,
 				return "", "", "", err
 			}
 		case st.Entry.Resume != "":
-			return "", "", "", fmt.Errorf("state %q: entry.resume is out of Phase 1 scope", name)
+			target, exhausted, err := e.checkRetryCap(task, st)
+			if err != nil {
+				return "", "", "", err
+			}
+			if exhausted {
+				e.log.Info("retry cap exhausted", "task", task.ID, "state", name)
+				return target, "retry_exhausted", "", nil
+			}
+			if err := e.spawn(ctx, task, st.Entry.Resume, st); err != nil {
+				return "", "", "", err
+			}
 		case st.Entry.Action != "":
 			return "", "", "", fmt.Errorf("state %q: entry.action %q is out of Phase 1 scope", name, st.Entry.Action)
 		}
@@ -393,6 +403,9 @@ func (e *Engine) agentTask(ctx context.Context, task *store.Task, st config.Stat
 	if dec := decisionForState(st); dec != "" {
 		return e.reviewerTask(task, dec)
 	}
+	if st.Entry != nil && st.Entry.Resume != "" {
+		return e.feedbackTask(task, st.Entry.With)
+	}
 	taskFile, err = e.writeTaskFile(ctx, task)
 	if err != nil {
 		return "", "", err
@@ -487,6 +500,30 @@ func (e *Engine) alert(ctx context.Context, task *store.Task, msg string) {
 	}); err != nil {
 		e.log.Warn("failed to record alert", "task", task.ID, "err", err)
 	}
+}
+
+// checkRetryCap enforces a state's retry cap on entry: it increments the
+// per-state counter and, once the cap is exceeded, returns the state's
+// retry_exhausted target. A capped state with no retry_exhausted transition is a
+// config error. The incremented count is persisted by the spawn/advance that
+// follows.
+func (e *Engine) checkRetryCap(task *store.Task, st config.State) (target string, exhausted bool, err error) {
+	limit, ok := e.wf.Policies.RetryCaps[task.CurrentState]
+	if !ok {
+		return "", false, nil
+	}
+	if task.RetryCounts == nil {
+		task.RetryCounts = map[string]int{}
+	}
+	task.RetryCounts[task.CurrentState]++
+	if task.RetryCounts[task.CurrentState] <= limit {
+		return "", false, nil
+	}
+	rt := findEventTransition(st, "retry_exhausted")
+	if rt == nil {
+		return "", true, fmt.Errorf("state %q exceeded retry cap %d but declares no retry_exhausted transition", task.CurrentState, limit)
+	}
+	return rt.To, true, nil
 }
 
 func (e *Engine) isHalt(state string) bool {

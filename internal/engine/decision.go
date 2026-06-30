@@ -92,6 +92,30 @@ func (e *Engine) reviewerTask(task *store.Task, decisionName string) (taskFile, 
 	return path, kickoff, nil
 }
 
+// feedbackTask builds the context file + kickoff for a resumed implementer. With
+// "review_feedback" it carries the reviewer's feedback (from the verdict file) so
+// the implementer addresses the requested changes and updates the PR. By the time
+// a task reaches changes_requested the original implementer pane is gone (the
+// reviewer replaced the per-task workspace), so this is a fresh implementer spawn.
+func (e *Engine) feedbackTask(task *store.Task, with string) (taskFile, kickoff string, err error) {
+	feedback := ""
+	if with == "review_feedback" {
+		if v, verr := readVerdict(e.taskDir, task.ID); verr == nil {
+			feedback = v.Feedback
+		}
+	}
+	path := filepath.Join(e.taskDir, "feedback-task-"+task.ID+".md")
+	body := fmt.Sprintf("# Address review feedback\n\nThe reviewer requested changes on PR #%d (branch %s):\n\n%s\n",
+		prNum(task), task.Branch, feedback)
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		return "", "", fmt.Errorf("write feedback task file: %w", err)
+	}
+	kickoff = fmt.Sprintf(
+		"Address the review feedback in %s on branch %s, then commit and run 'git push' so PR #%d updates. Stop when pushed.",
+		path, task.Branch, prNum(task))
+	return path, kickoff, nil
+}
+
 // readRubric reads a decision rubric, resolving a relative path against the
 // config dir (so a workflow ships its prompts/ alongside its yaml).
 func (e *Engine) readRubric(rel string) (string, error) {

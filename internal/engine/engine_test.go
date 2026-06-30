@@ -23,20 +23,13 @@ type fakeBackend struct {
 	resolve    bool
 	resolveErr error
 	spawns     int
-	resumes    int
 	spawnLog   []exec.Spawn
-	resumeLog  []string // kickoffs sent to Resume
 }
 
 func (f *fakeBackend) Spawn(ctx context.Context, s exec.Spawn) (exec.Handle, error) {
 	f.spawns++
 	f.spawnLog = append(f.spawnLog, s)
 	return exec.Handle{PaneID: f.pane, Workdir: "/wt"}, nil
-}
-func (f *fakeBackend) Resume(ctx context.Context, h exec.Handle, kickoff string) error {
-	f.resumes++
-	f.resumeLog = append(f.resumeLog, kickoff)
-	return nil
 }
 func (f *fakeBackend) WaitState(ctx context.Context, h exec.Handle, target exec.AgentState) (exec.AgentState, error) {
 	return target, nil

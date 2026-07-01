@@ -22,6 +22,10 @@ sources:
     emits_to: intake
 
 roles:
+  triager:
+    launch: ["claude"]
+    task_delivery: context_file
+    workspace: per_task
   implementer:
     launch: ["claude"]
     task_delivery: context_file
@@ -59,9 +63,13 @@ decisions:
 
 states:
   intake:
+    entry: { spawn: triager }
     transitions:
-      - when: { decision: triage }
+      - when: { event: agent.done }
+        evaluate: { decision: triage }
         branch: { accept: queued, reject: closed, needs_human: escalated }
+      - when: { timeout: 15m }
+        to: escalated
 
   queued:
     transitions:

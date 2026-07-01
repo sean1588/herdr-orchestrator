@@ -103,6 +103,34 @@ func TestLoad_DefaultPipeline_DecodesStructure(t *testing.T) {
 	}
 }
 
+// intake is executable: it spawns a triager and branches on the triage verdict.
+func TestLoad_DefaultPipeline_IntakeSpawnsTriagerAndBranchesTriage(t *testing.T) {
+	wf, warnings, err := Load("testdata/default-pipeline.yaml")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(warnings) != 2 { // still only pr_open + changes_requested spawn-without-timeout
+		t.Fatalf("want 2 warnings, got %d: %v", len(warnings), warnings)
+	}
+	if _, ok := wf.Roles["triager"]; !ok {
+		t.Fatal("triager role not declared")
+	}
+	intake := wf.States["intake"]
+	if intake.Entry == nil || intake.Entry.Spawn != "triager" {
+		t.Fatalf("intake.entry.spawn = %+v, want triager", intake.Entry)
+	}
+	t0 := intake.Transitions[0]
+	if t0.When.Event != "agent.done" || t0.Evaluate == nil || t0.Evaluate.Decision != "triage" {
+		t.Fatalf("intake t0 = %+v, want agent.done/evaluate triage", t0)
+	}
+	if t0.Branch["accept"] != "queued" || t0.Branch["reject"] != "closed" || t0.Branch["needs_human"] != "escalated" {
+		t.Errorf("intake branch = %v", t0.Branch)
+	}
+	if intake.Transitions[1].When.Timeout != "15m" || intake.Transitions[1].To != "escalated" {
+		t.Errorf("intake t1 = %+v, want timeout 15m -> escalated", intake.Transitions[1])
+	}
+}
+
 func TestLoad_BrokenPipeline_FailsInvariants1256(t *testing.T) {
 	_, _, err := Load("testdata/broken-pipeline.yaml")
 	errs := semErrors(t, err)

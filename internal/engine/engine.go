@@ -21,7 +21,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/sean1588/herdr-orchestrator/internal/config"
@@ -497,12 +496,17 @@ func (e *Engine) gatePass(ctx context.Context, task *store.Task, name string, g 
 // a new state always spawns a fresh agent for that state's role, so the reviewer
 // at pr_open is not mistaken for the still-labelled implementer workspace.
 // launchArgs returns the agent launch argv, scoping tools when the role declares
-// allowed_tools. Translation is claude-targeted today (our only launcher); a
-// provider->flag table is future work.
+// allowed_tools. Tools are appended as separate args to match claude's variadic
+// --allowedTools <tools...> flag (translation is claude-targeted today; our only
+// launcher). NOTE: the backend delivers this argv space-joined into the pane's
+// shell (see exec.Herdr.Spawn), so tool entries must be shell-safe tokens (e.g.
+// "Read", "Edit", "Bash") — arg-scoped specs containing spaces/globs/parens like
+// "Bash(gh pr view:*)" would need shell quoting at delivery, which is future work.
 func launchArgs(r config.Role) []string {
 	args := append([]string(nil), r.Launch...)
 	if len(r.AllowedTools) > 0 && len(r.Launch) > 0 && r.Launch[0] == "claude" {
-		args = append(args, "--allowedTools", strings.Join(r.AllowedTools, ","))
+		args = append(args, "--allowedTools")
+		args = append(args, r.AllowedTools...)
 	}
 	return args
 }

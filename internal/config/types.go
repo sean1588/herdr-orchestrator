@@ -62,7 +62,10 @@ type Role struct {
 	Kickoff      string   `yaml:"kickoff"`
 	// AllowedTools optionally scopes the agent's tools (defense-in-depth). When
 	// set, the backend passes the launcher's native allowlist flag. Empty => the
-	// agent's own default permission config governs.
+	// agent's own default permission config governs. Entries must be shell-safe
+	// tokens (coarse tool names like "Read"/"Edit"/"Bash") — the launch argv is
+	// delivered space-joined into the pane shell, so arg-scoped specs with
+	// spaces/globs/parens are not safely deliverable yet (see engine.launchArgs).
 	AllowedTools []string `yaml:"allowed_tools"`
 }
 

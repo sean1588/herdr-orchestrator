@@ -8,8 +8,10 @@ import (
 )
 
 func TestLaunchArgs_AppendsAllowedToolsForClaude(t *testing.T) {
-	got := launchArgs(config.Role{Launch: []string{"claude"}, AllowedTools: []string{"Read", "Bash(gh pr view:*)"}})
-	want := []string{"claude", "--allowedTools", "Read,Bash(gh pr view:*)"}
+	// Tools are appended as separate args (claude's --allowedTools is variadic
+	// `<tools...>`), not comma-joined into one token.
+	got := launchArgs(config.Role{Launch: []string{"claude"}, AllowedTools: []string{"Read", "Edit"}})
+	want := []string{"claude", "--allowedTools", "Read", "Edit"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("launchArgs = %v, want %v", got, want)
 	}

@@ -45,6 +45,9 @@ type Client interface {
 	FindPR(ctx context.Context, repoDir, branch string) (*PR, error)
 	// Issue fetches an issue's title and body by number.
 	Issue(ctx context.Context, repoDir string, number int) (*Issue, error)
+	// ListIssues returns the numbers of issues matching label, via
+	// `gh issue list --label <label> --json number` in repoDir.
+	ListIssues(ctx context.Context, repoDir, label string) ([]int, error)
 	// PRStatus reads the merge-gate inputs (state, checks, reviews, mergeability)
 	// for a PR in one call.
 	PRStatus(ctx context.Context, repoDir string, pr int) (*PRStatus, error)

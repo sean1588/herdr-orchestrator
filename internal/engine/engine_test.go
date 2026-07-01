@@ -88,6 +88,9 @@ func (g *fakeGH) Issue(ctx context.Context, repoDir string, n int) (*github.Issu
 	}
 	return &github.Issue{Number: n, Title: "Test", Body: "Body"}, nil
 }
+func (g *fakeGH) ListIssues(ctx context.Context, repoDir, label string) ([]int, error) {
+	return nil, nil
+}
 func (g *fakeGH) PRStatus(ctx context.Context, repoDir string, pr int) (*github.PRStatus, error) {
 	if g.merged {
 		state := g.mergeResultState

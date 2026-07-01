@@ -168,6 +168,9 @@ func TestIntake_TriageVerdict_Branches(t *testing.T) {
 			if b.spawns != 1 {
 				t.Errorf("triager should spawn exactly once, got %d", b.spawns)
 			}
+			if len(b.spawnLog) > 0 && !strings.Contains(b.spawnLog[0].Kickoff, "Triage issue") {
+				t.Errorf("intake spawn kickoff = %q, want a triage kickoff", b.spawnLog[0].Kickoff)
+			}
 		})
 	}
 }

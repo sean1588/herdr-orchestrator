@@ -566,9 +566,10 @@ func (e *Engine) spawn(ctx context.Context, task *store.Task, role string, st co
 }
 
 // agentTask builds the context file + single-line kickoff for a spawned agent. A
-// state whose agent.done transition evaluates a decision gets a reviewer task (the
-// rubric + a PR pointer, producing a verdict file); otherwise the agent is an
-// implementer and gets the issue.
+// state whose agent.done transition evaluates a decision gets a triage task
+// (rubric + issue, no PR) when no PR exists yet, or a reviewer task (rubric + PR
+// pointer) once a PR is present — each produces a verdict file. Otherwise the
+// agent is an implementer and gets the issue.
 func (e *Engine) agentTask(ctx context.Context, task *store.Task, st config.State, r config.Role) (taskFile, kickoff string, err error) {
 	if dec := decisionForState(st); dec != "" {
 		if task.PRNumber == nil {

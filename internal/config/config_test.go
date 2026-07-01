@@ -484,3 +484,29 @@ states:
 		t.Errorf("AllowedTools joined = %q, want %q", got, "Read,Bash(gh pr view:*)")
 	}
 }
+
+// Analyze classifies the default pipeline: merging is side-effecting, merged is
+// terminal, and the request_changes loop (pr_open <-> changes_requested) is a
+// real multi-node SCC.
+func TestAnalyze_DefaultPipeline_ClassifiesNodesAndCycle(t *testing.T) {
+	wf, _, err := Load("testdata/default-pipeline.yaml")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	a := Analyze(wf)
+	if !contains(a.SideEffecting, "merging") {
+		t.Errorf("SideEffecting = %v, want to include merging", a.SideEffecting)
+	}
+	if !contains(a.Terminal, "merged") {
+		t.Errorf("Terminal = %v, want to include merged", a.Terminal)
+	}
+	var cyc []string
+	for _, comp := range a.SCCs {
+		if contains(comp, "pr_open") {
+			cyc = comp
+		}
+	}
+	if len(cyc) < 2 || !contains(cyc, "changes_requested") {
+		t.Errorf("SCC for pr_open = %v, want multi-node incl. changes_requested", cyc)
+	}
+}

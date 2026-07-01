@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"strings"
 	"testing"
 
 	"github.com/sean1588/herdr-orchestrator/internal/config"
@@ -43,5 +45,33 @@ func TestRepoSlug(t *testing.T) {
 	}
 	if got := repoSlug(wf); got != "sean1588/minicode" {
 		t.Errorf("repoSlug = %q, want sean1588/minicode", got)
+	}
+}
+
+func TestRun_Plan_Dispatches(t *testing.T) {
+	if got := run([]string{"plan", goodFixture}); got != 0 {
+		t.Errorf("run(plan good) = %d, want 0", got)
+	}
+	if got := run([]string{"plan"}); got != 2 {
+		t.Errorf("run(plan) with no path = %d, want 2", got)
+	}
+	// Fail-closed: refuse to render an invalid config (same posture as run).
+	if got := run([]string{"plan", brokenFixture}); got != 1 {
+		t.Errorf("run(plan broken) = %d, want 1", got)
+	}
+}
+
+func TestWritePlan_MarksSideEffectingTerminalAndCycle(t *testing.T) {
+	wf, _, err := config.Load(goodFixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	writePlan(&buf, wf)
+	out := buf.String()
+	for _, want := range []string{"merging", "side-effecting", "merged", "terminal", "cycle", "changes_requested"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("plan output missing %q:\n%s", want, out)
+		}
 	}
 }

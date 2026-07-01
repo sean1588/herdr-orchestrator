@@ -5,6 +5,10 @@
 //	orchestratord validate <config.yaml>
 //	    Validate a workflow config (JSON Schema + safety invariants).
 //
+//	orchestratord plan <config.yaml>
+//	    Render the validated workflow's resolved graph, terminal and
+//	    side-effecting states, and cycles (with their cap/timeout status).
+//
 //	orchestratord run --config <c> --repo <dir> --issue <n> [--base main] [--db path]
 //	    Drive one issue through the pipeline to merged (or a terminal state).
 //
@@ -17,9 +21,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
+	"strings"
 	"syscall"
 
 	"github.com/sean1588/herdr-orchestrator/internal/config"
@@ -41,6 +48,8 @@ func run(args []string) int {
 	switch args[0] {
 	case "validate":
 		return cmdValidate(args[1:])
+	case "plan":
+		return cmdPlan(args[1:])
 	case "run":
 		return cmdRun(args[1:])
 	case "recover":
@@ -60,6 +69,7 @@ func usage(w *os.File) {
 
 commands:
   validate <config.yaml>                         validate a workflow config
+  plan <config.yaml>                             render the resolved graph + invariants
   run --config <c> --repo <dir> --issue <n>      drive one issue to merged
   recover --config <c> --repo <dir>              reconcile/resume in-flight tasks
 
@@ -100,6 +110,113 @@ func cmdValidate(args []string) int {
 	}
 	fmt.Printf("\nOK: %q valid (%d warning(s))\n", wf.Name, len(warnings))
 	return 0
+}
+
+// cmdPlan renders a validated workflow's resolved graph + safety classification.
+// Fail-closed: it refuses to render an invalid config (exit 1), same posture as
+// run. Exit 2 on usage/IO error.
+func cmdPlan(args []string) int {
+	if len(args) != 1 {
+		fmt.Fprintln(os.Stderr, "usage: orchestratord plan <config.yaml>")
+		return 2
+	}
+	wf, warnings, err := config.Load(args[0])
+	var ve *config.ValidationErrors
+	if errors.As(err, &ve) {
+		for _, e := range ve.Errors {
+			fmt.Fprintf(os.Stderr, "  ERROR %s\n", e)
+		}
+		fmt.Fprintf(os.Stderr, "refusing to render: config invalid (%d error(s))\n", len(ve.Errors))
+		return 1
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 2
+	}
+	for _, w := range warnings {
+		fmt.Fprintf(os.Stderr, "  WARN  %s\n", w)
+	}
+	writePlan(os.Stdout, wf)
+	return 0
+}
+
+// writePlan renders the resolved transition graph with per-state markers
+// ([terminal], [side-effecting], [wait_for]) and a cycles section noting whether
+// each cycle is retry-capped/timeout-bounded. Read-only; reuses config.Analyze.
+func writePlan(w io.Writer, wf *config.Workflow) {
+	a := config.Analyze(wf)
+	terminal := map[string]string{}
+	for _, s := range a.Terminal {
+		terminal[s] = wf.States[s].Terminal
+	}
+	side := map[string]bool{}
+	for _, s := range a.SideEffecting {
+		side[s] = true
+	}
+
+	entry := "(none)"
+	if wf.EntryState != nil {
+		entry = *wf.EntryState
+	}
+	fmt.Fprintf(w, "workflow: %s  (entry_state: %s)\n\n", wf.Name, entry)
+
+	names := make([]string, 0, len(wf.States))
+	for n := range wf.States {
+		names = append(names, n)
+	}
+	slices.Sort(names)
+
+	fmt.Fprintf(w, "states (%d):\n", len(names))
+	for _, name := range names {
+		tail := ""
+		if v, ok := terminal[name]; ok {
+			tail += "  [terminal:" + v + "]"
+		}
+		if side[name] {
+			tail += "  [side-effecting]"
+		}
+		if wf.States[name].WaitFor != "" {
+			tail += "  [wait_for:" + wf.States[name].WaitFor + "]"
+		}
+		if targets := a.Edges[name]; len(targets) > 0 {
+			tail += "  ->  " + strings.Join(targets, ", ")
+		}
+		fmt.Fprintf(w, "  %s%s\n", name, tail)
+	}
+
+	fmt.Fprintf(w, "\ncycles (non-trivial SCCs):\n")
+	found := false
+	for _, comp := range a.SCCs {
+		cyclic := len(comp) > 1 || (len(comp) == 1 && slices.Contains(a.Edges[comp[0]], comp[0]))
+		if !cyclic {
+			continue
+		}
+		found = true
+		note := "retry-capped or timeout-bounded"
+		if !cycleBounded(comp, wf) {
+			note = "UNCAPPED (validation would have rejected this)"
+		}
+		c := append([]string(nil), comp...)
+		slices.Sort(c)
+		fmt.Fprintf(w, "  {%s}  %s\n", strings.Join(c, ", "), note)
+	}
+	if !found {
+		fmt.Fprintln(w, "  (none)")
+	}
+}
+
+// cycleBounded mirrors the validator (checkLoopsTerminate): a cycle terminates
+// if any member state carries a retry cap or a timeout transition.
+func cycleBounded(comp []string, wf *config.Workflow) bool {
+	for _, n := range comp {
+		if _, ok := wf.Policies.RetryCaps[n]; ok {
+			return true
+		}
+		if wf.States[n].HasTimeoutTransition() {
+			return true
+		}
+	}
+	return false
 }
 
 // commonFlags are shared by run and recover.

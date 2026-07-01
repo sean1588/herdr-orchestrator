@@ -1,0 +1,8 @@
+{
+  "result": {
+    "workspaces": [
+      { "workspace_id": "ws-208", "label": "issue-208", "focused": true },
+      { "workspace_id": "ws-311", "label": "issue-311", "focused": false }
+    ]
+  }
+}

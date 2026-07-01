@@ -74,7 +74,46 @@ func semanticChecks(wf *Workflow) (warnings, errs []string) {
 		}
 	}
 
+	// role allowed_tools tokens must be shell-safe (delivered space-joined into
+	// the pane shell; arg-scoped specs would break at spawn — fail closed here).
+	checkAllowedTools(wf, &errs)
+
 	return warnings, errs
+}
+
+// checkAllowedTools rejects role allowed_tools entries that are not shell-safe
+// tokens. The launch argv is delivered space-joined into the pane shell (see
+// engine.launchArgs / exec.Herdr.Spawn), so a token with spaces/globs/parens
+// would produce a shell error at spawn; validation fails closed instead.
+func checkAllowedTools(wf *Workflow, errs *[]string) {
+	for _, rname := range sortedKeys(wf.Roles) {
+		for _, tok := range wf.Roles[rname].AllowedTools {
+			if !shellSafeToolToken(tok) {
+				*errs = append(*errs, fmt.Sprintf(
+					"role %q: allowed_tools entry %q is not a shell-safe token "+
+						"(only letters, digits, underscore); arg-scoped specs like "+
+						"\"Bash(gh pr view:*)\" are not deliverable yet",
+					rname, tok))
+			}
+		}
+	}
+}
+
+// shellSafeToolToken reports whether s is a bare tool token safe to pass through
+// the unquoted pane-shell launch: letters, digits, and underscore only (covers
+// coarse tool names and mcp__server__tool).
+func shellSafeToolToken(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func checkEntryRoles(wf *Workflow, sname string, s State, errs *[]string) {

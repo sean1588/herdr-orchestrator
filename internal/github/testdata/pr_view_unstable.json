@@ -1,0 +1,12 @@
+{
+  "state": "OPEN",
+  "reviewDecision": "REVIEW_REQUIRED",
+  "mergeable": "MERGEABLE",
+  "mergeStateStatus": "BLOCKED",
+  "statusCheckRollup": [
+    { "__typename": "CheckRun", "name": "build", "status": "COMPLETED", "conclusion": "SUCCESS" },
+    { "__typename": "CheckRun", "name": "test", "status": "IN_PROGRESS", "conclusion": "" },
+    { "__typename": "StatusContext", "context": "ci/deploy", "state": "FAILURE" }
+  ],
+  "reviews": []
+}

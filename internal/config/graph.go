@@ -1,5 +1,39 @@
 package config
 
+// GraphAnalysis is a human-auditable view of a validated workflow's structure:
+// the transition graph, its strongly-connected components (cycles), and the
+// terminal and side-effecting states. It surfaces the mechanism/policy split the
+// engine already computes so the `plan` subcommand can render it.
+type GraphAnalysis struct {
+	Edges         map[string][]string // state -> targets (sorted)
+	SCCs          [][]string          // strongly-connected components
+	Terminal      []string            // states with a terminal verdict (sorted)
+	SideEffecting []string            // states whose entry.action is side-effecting, e.g. merge_pr (sorted)
+}
+
+// Analyze builds the human-auditable graph view of a validated workflow. It
+// reuses buildGraph/tarjanSCC and the validator's sideEffectingActions set — no
+// classification logic is duplicated.
+func Analyze(wf *Workflow) GraphAnalysis {
+	edges := buildGraph(wf)
+	var terminal, side []string
+	for _, name := range sortedKeys(wf.States) {
+		s := wf.States[name]
+		if s.Terminal != "" {
+			terminal = append(terminal, name)
+		}
+		if s.Entry != nil && sideEffectingActions[s.Entry.Action] {
+			side = append(side, name)
+		}
+	}
+	return GraphAnalysis{
+		Edges:         edges,
+		SCCs:          tarjanSCC(edges),
+		Terminal:      terminal,
+		SideEffecting: side,
+	}
+}
+
 // buildGraph builds the directed transition graph: state -> destination states.
 // Action-only transitions contribute no edge (mirrors validate_workflow.py).
 func buildGraph(wf *Workflow) map[string][]string {

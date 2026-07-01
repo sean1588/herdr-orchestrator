@@ -462,3 +462,72 @@ states:
 		t.Errorf("want unreachable warning, got %v", warnings)
 	}
 }
+
+// A role's allowed_tools must pass the schema (additionalProperties:false) and
+// decode onto Role.AllowedTools.
+func TestParse_RoleAllowedTools_Decodes(t *testing.T) {
+	wf, _, err := mustParse(t, `
+version: 0
+name: t
+entry_state: s
+roles:
+  reviewer:
+    launch: [claude]
+    allowed_tools: [Read, Write]
+states:
+  s: { terminal: success }
+`)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got := strings.Join(wf.Roles["reviewer"].AllowedTools, ","); got != "Read,Write" {
+		t.Errorf("AllowedTools joined = %q, want %q", got, "Read,Write")
+	}
+}
+
+// allowed_tools entries must be shell-safe tokens: the launch argv is delivered
+// space-joined into the pane shell, so an arg-scoped spec (spaces/globs/parens)
+// would fail at spawn. Reject it at validation (fail-closed), not at runtime.
+func TestParse_RoleAllowedTools_RejectsShellUnsafe(t *testing.T) {
+	_, _, err := mustParse(t, `
+version: 0
+name: t
+entry_state: s
+roles:
+  reviewer:
+    launch: [claude]
+    allowed_tools: [Read, "Bash(gh pr view:*)"]
+states:
+  s: { terminal: success }
+`)
+	errs := semErrors(t, err)
+	if !containsSubstr(errs, `allowed_tools entry "Bash(gh pr view:*)"`) {
+		t.Errorf("want a shell-unsafe allowed_tools error, got %v", errs)
+	}
+}
+
+// Analyze classifies the default pipeline: merging is side-effecting, merged is
+// terminal, and the request_changes loop (pr_open <-> changes_requested) is a
+// real multi-node SCC.
+func TestAnalyze_DefaultPipeline_ClassifiesNodesAndCycle(t *testing.T) {
+	wf, _, err := Load("testdata/default-pipeline.yaml")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	a := Analyze(wf)
+	if !contains(a.SideEffecting, "merging") {
+		t.Errorf("SideEffecting = %v, want to include merging", a.SideEffecting)
+	}
+	if !contains(a.Terminal, "merged") {
+		t.Errorf("Terminal = %v, want to include merged", a.Terminal)
+	}
+	var cyc []string
+	for _, comp := range a.SCCs {
+		if contains(comp, "pr_open") {
+			cyc = comp
+		}
+	}
+	if len(cyc) < 2 || !contains(cyc, "changes_requested") {
+		t.Errorf("SCC for pr_open = %v, want multi-node incl. changes_requested", cyc)
+	}
+}

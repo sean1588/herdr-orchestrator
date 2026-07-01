@@ -120,7 +120,11 @@ func registerCommon(fs *flag.FlagSet, cf *commonFlags) {
 
 // wire loads+validates the config and builds the engine with real backends.
 func (cf commonFlags) wire(ctx context.Context) (*engine.Engine, *store.Store, error) {
-	wf, warnings, err := config.Load(cf.config)
+	raw, err := os.ReadFile(cf.config)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read config %q: %w", cf.config, err)
+	}
+	wf, warnings, err := config.Parse(raw)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -151,16 +155,17 @@ func (cf commonFlags) wire(ctx context.Context) (*engine.Engine, *store.Store, e
 	}
 
 	eng := engine.New(engine.Config{
-		Workflow:  wf,
-		Backend:   backend,
-		GitHub:    github.New(runner),
-		Store:     st,
-		RepoDir:   absRepo,
-		Base:      cf.base,
-		Repo:      repoSlug(wf),
-		ConfigDir: filepath.Dir(cf.config),
-		TaskDir:   cf.taskDir,
-		Notifier:  notifier,
+		Workflow:       wf,
+		WorkflowSource: raw,
+		Backend:        backend,
+		GitHub:         github.New(runner),
+		Store:          st,
+		RepoDir:        absRepo,
+		Base:           cf.base,
+		Repo:           repoSlug(wf),
+		ConfigDir:      filepath.Dir(cf.config),
+		TaskDir:        cf.taskDir,
+		Notifier:       notifier,
 	})
 	return eng, st, nil
 }

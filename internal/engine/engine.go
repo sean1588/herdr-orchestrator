@@ -39,6 +39,11 @@ type Config struct {
 	GitHub   github.Client
 	Store    *store.Store
 
+	// WorkflowSource is the raw config bytes snapshotted onto each new task, so
+	// recovery resumes against the graph the task started under. Empty => no
+	// snapshot (recovery falls back to the current --config).
+	WorkflowSource []byte
+
 	RepoDir   string // local checkout (absolute) where git/gh run
 	Base      string // base branch, e.g. "main"
 	Repo      string // owner/name slug recorded on the task
@@ -59,10 +64,11 @@ type Config struct {
 
 // Engine drives tasks through the workflow.
 type Engine struct {
-	wf      *config.Workflow
-	backend exec.ExecutionBackend
-	gh      github.Client
-	store   *store.Store
+	wf             *config.Workflow
+	backend        exec.ExecutionBackend
+	gh             github.Client
+	store          *store.Store
+	workflowSource []byte
 
 	repoDir, base, repo string
 	configDir           string
@@ -77,21 +83,22 @@ type Engine struct {
 // New builds an Engine, applying defaults.
 func New(c Config) *Engine {
 	e := &Engine{
-		wf:         c.Workflow,
-		backend:    c.Backend,
-		gh:         c.GitHub,
-		store:      c.Store,
-		repoDir:    c.RepoDir,
-		base:       c.Base,
-		repo:       c.Repo,
-		configDir:  c.ConfigDir,
-		taskDir:    c.TaskDir,
-		goal:       c.Goal,
-		startState: c.StartState,
-		parseDur:   c.DurationFunc,
-		statusPoll: c.StatusPollInterval,
-		log:        c.Logger,
-		notifier:   c.Notifier,
+		wf:             c.Workflow,
+		backend:        c.Backend,
+		gh:             c.GitHub,
+		store:          c.Store,
+		workflowSource: c.WorkflowSource,
+		repoDir:        c.RepoDir,
+		base:           c.Base,
+		repo:           c.Repo,
+		configDir:      c.ConfigDir,
+		taskDir:        c.TaskDir,
+		goal:           c.Goal,
+		startState:     c.StartState,
+		parseDur:       c.DurationFunc,
+		statusPoll:     c.StatusPollInterval,
+		log:            c.Logger,
+		notifier:       c.Notifier,
 	}
 	if e.taskDir == "" {
 		e.taskDir = os.TempDir()
@@ -170,11 +177,12 @@ func (e *Engine) ensureTask(ctx context.Context, issue int) (*store.Task, bool, 
 		return nil, false, fmt.Errorf("load task %s: %w", id, err)
 	}
 	task := &store.Task{
-		ID:           id,
-		Issue:        issue,
-		Repo:         e.repo,
-		Branch:       branchName(issue),
-		CurrentState: e.startState,
+		ID:               id,
+		Issue:            issue,
+		Repo:             e.repo,
+		Branch:           branchName(issue),
+		CurrentState:     e.startState,
+		WorkflowSnapshot: string(e.workflowSource),
 	}
 	if err := e.store.CreateTask(ctx, task); err != nil {
 		return nil, false, fmt.Errorf("create task %s: %w", id, err)

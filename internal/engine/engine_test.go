@@ -203,6 +203,22 @@ func TestRun_DoneWithPR_ReachesPROpen(t *testing.T) {
 	}
 }
 
+func TestRun_NewTask_RecordsWorkflowSnapshot(t *testing.T) {
+	st := newStore(t)
+	b := &fakeBackend{pane: "w1:p1", events: []exec.Event{{PaneID: "w1:p1", State: exec.StateDone}}}
+	e := newEngine(t, st, b, &fakeGH{pr: &github.PR{Number: 42, State: "OPEN"}}, 5*time.Second)
+	e.goal = "pr_open"
+	e.workflowSource = []byte("SNAPSHOT-BYTES") // unexported test hook set directly
+
+	if _, err := e.Run(context.Background(), 7); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got, _ := st.GetTask(context.Background(), "issue-7")
+	if got.WorkflowSnapshot != "SNAPSHOT-BYTES" {
+		t.Errorf("snapshot = %q, want SNAPSHOT-BYTES", got.WorkflowSnapshot)
+	}
+}
+
 func TestRun_DoneWithoutPR_Escalates(t *testing.T) {
 	st := newStore(t)
 	b := &fakeBackend{pane: "w1:p1", events: []exec.Event{

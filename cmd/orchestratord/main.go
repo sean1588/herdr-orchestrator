@@ -14,6 +14,10 @@
 //
 //	orchestratord recover --config <c> --repo <dir> [--base main] [--db path]
 //	    Reconcile and resume in-flight tasks against herdr panes and GitHub PRs.
+//
+//	orchestratord daemon --config <c> --repo <dir> [--poll-interval 30s]
+//	    Poll a labeled GitHub source and drive up to max_concurrent_tasks issues
+//	    through the pipeline concurrently. Runs until SIGINT/SIGTERM.
 package main
 
 import (
@@ -22,12 +26,14 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"slices"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/sean1588/herdr-orchestrator/internal/config"
 	"github.com/sean1588/herdr-orchestrator/internal/engine"
@@ -35,6 +41,7 @@ import (
 	"github.com/sean1588/herdr-orchestrator/internal/github"
 	"github.com/sean1588/herdr-orchestrator/internal/notify"
 	"github.com/sean1588/herdr-orchestrator/internal/proc"
+	"github.com/sean1588/herdr-orchestrator/internal/scheduler"
 	"github.com/sean1588/herdr-orchestrator/internal/store"
 )
 
@@ -54,6 +61,8 @@ func run(args []string) int {
 		return cmdRun(args[1:])
 	case "recover":
 		return cmdRecover(args[1:])
+	case "daemon":
+		return cmdDaemon(args[1:])
 	case "-h", "--help", "help":
 		usage(os.Stdout)
 		return 0
@@ -72,8 +81,9 @@ commands:
   plan <config.yaml>                             render the resolved graph + invariants
   run --config <c> --repo <dir> --issue <n>      drive one issue to merged
   recover --config <c> --repo <dir>              reconcile/resume in-flight tasks
+  daemon --config <c> --repo <dir>               poll a labeled source and drive concurrently
 
-run/recover flags:
+run/recover/daemon flags:
   --config PATH          workflow config (required)
   --repo PATH            local repo checkout (required)
   --issue N              issue number (run only, required)
@@ -82,6 +92,7 @@ run/recover flags:
   --worktrees-dir PATH   parent dir for worktrees (default: sibling of repo)
   --task-dir PATH        dir for task context files (default: temp dir)
   --notify-webhook URL   POST escalation/alert events as JSON (default: none)
+  --poll-interval DUR    daemon source poll cadence (default 30s)
 `)
 }
 
@@ -235,15 +246,24 @@ func registerCommon(fs *flag.FlagSet, cf *commonFlags) {
 	fs.StringVar(&cf.notifyWebhook, "notify-webhook", "", "POST escalation/alert events as JSON to this URL (default: none)")
 }
 
+// wired bundles everything a subcommand needs after loading + validating config.
+type wired struct {
+	eng     *engine.Engine
+	store   *store.Store
+	gh      github.Client
+	wf      *config.Workflow
+	repoDir string
+}
+
 // wire loads+validates the config and builds the engine with real backends.
-func (cf commonFlags) wire(ctx context.Context) (*engine.Engine, *store.Store, error) {
+func (cf commonFlags) wire(ctx context.Context) (*wired, error) {
 	raw, err := os.ReadFile(cf.config)
 	if err != nil {
-		return nil, nil, fmt.Errorf("read config %q: %w", cf.config, err)
+		return nil, fmt.Errorf("read config %q: %w", cf.config, err)
 	}
 	wf, warnings, err := config.Parse(raw)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	for _, w := range warnings {
 		fmt.Fprintf(os.Stderr, "  WARN  %s\n", w)
@@ -251,12 +271,12 @@ func (cf commonFlags) wire(ctx context.Context) (*engine.Engine, *store.Store, e
 
 	absRepo, err := filepath.Abs(cf.repo)
 	if err != nil {
-		return nil, nil, fmt.Errorf("resolve repo dir: %w", err)
+		return nil, fmt.Errorf("resolve repo dir: %w", err)
 	}
 
 	st, err := store.Open(ctx, cf.db)
 	if err != nil {
-		return nil, nil, fmt.Errorf("open store: %w", err)
+		return nil, fmt.Errorf("open store: %w", err)
 	}
 
 	runner := proc.New()
@@ -279,11 +299,12 @@ func (cf commonFlags) wire(ctx context.Context) (*engine.Engine, *store.Store, e
 		start = *wf.EntryState
 	}
 
+	gh := github.New(runner)
 	eng := engine.New(engine.Config{
 		Workflow:       wf,
 		WorkflowSource: raw,
 		Backend:        backend,
-		GitHub:         github.New(runner),
+		GitHub:         gh,
 		Store:          st,
 		RepoDir:        absRepo,
 		Base:           cf.base,
@@ -293,7 +314,7 @@ func (cf commonFlags) wire(ctx context.Context) (*engine.Engine, *store.Store, e
 		Notifier:       notifier,
 		StartState:     start,
 	})
-	return eng, st, nil
+	return &wired{eng: eng, store: st, gh: gh, wf: wf, repoDir: absRepo}, nil
 }
 
 func cmdRun(args []string) int {
@@ -312,13 +333,13 @@ func cmdRun(args []string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	eng, st, err := cf.wire(ctx)
+	w, err := cf.wire(ctx)
 	if err != nil {
 		return reportConfigErr(err)
 	}
-	defer st.Close()
+	defer w.store.Close()
 
-	final, err := eng.Run(ctx, *issue)
+	final, err := w.eng.Run(ctx, *issue)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "run issue %d: %v\n", *issue, err)
 		return 1
@@ -348,18 +369,122 @@ func cmdRecover(args []string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	eng, st, err := cf.wire(ctx)
+	w, err := cf.wire(ctx)
 	if err != nil {
 		return reportConfigErr(err)
 	}
-	defer st.Close()
+	defer w.store.Close()
 
-	if err := eng.Recover(ctx); err != nil {
+	if err := w.eng.Recover(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "recover: %v\n", err)
 		return 1
 	}
 	fmt.Println("reconcile complete")
 	return 0
+}
+
+// cmdDaemon runs the orchestrator as a long-running daemon: poll a labeled source
+// and drive up to max_concurrent_tasks issues through the pipeline concurrently.
+func cmdDaemon(args []string) int {
+	fs := flag.NewFlagSet("daemon", flag.ContinueOnError)
+	var cf commonFlags
+	registerCommon(fs, &cf)
+	pollInterval := fs.Duration("poll-interval", 30*time.Second, "source poll cadence")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if cf.config == "" || cf.repo == "" {
+		fmt.Fprintln(os.Stderr, "daemon requires --config and --repo")
+		return 2
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	w, err := cf.wire(ctx)
+	if err != nil {
+		return reportConfigErr(err)
+	}
+	defer w.store.Close()
+
+	label, err := sourceLabel(w.wf)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "daemon: %v\n", err)
+		return 2
+	}
+	terminal := terminalStates(w.wf)
+	workers := w.wf.Policies.MaxConcurrentTasks
+	if workers < 1 {
+		workers = 1
+	}
+
+	sched := &scheduler.Scheduler{
+		List: func(ctx context.Context) ([]int, error) {
+			return w.gh.ListIssues(ctx, w.repoDir, label)
+		},
+		Done: func(ctx context.Context, issue int) (bool, error) {
+			tk, err := w.store.GetTask(ctx, fmt.Sprintf("issue-%d", issue))
+			if errors.Is(err, store.ErrNotFound) {
+				return false, nil
+			}
+			if err != nil {
+				return false, err
+			}
+			return terminal[tk.CurrentState], nil
+		},
+		RunTask: func(ctx context.Context, issue int) error {
+			_, err := w.eng.Run(ctx, issue)
+			return err
+		},
+		SeedFrom: func(ctx context.Context) ([]int, error) {
+			tasks, err := w.store.List(ctx)
+			if err != nil {
+				return nil, err
+			}
+			var out []int
+			for _, tk := range tasks {
+				if !terminal[tk.CurrentState] {
+					out = append(out, tk.Issue)
+				}
+			}
+			return out, nil
+		},
+		Interval: *pollInterval,
+		Workers:  workers,
+		Log:      slog.Default(),
+	}
+
+	slog.Info("daemon starting", "label", label, "workers", workers, "poll", pollInterval.String())
+	if err := sched.Serve(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "daemon: %v\n", err)
+		return 1
+	}
+	slog.Info("daemon stopped")
+	return 0
+}
+
+// sourceLabel returns the label of the first github_issues source, or an error
+// if the workflow declares no such source with select.label.
+func sourceLabel(wf *config.Workflow) (string, error) {
+	for _, s := range wf.Sources {
+		if s.Type == "github_issues" {
+			if l, ok := s.Select["label"].(string); ok && l != "" {
+				return l, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("no github_issues source with select.label declared")
+}
+
+// terminalStates returns the set of state names with a terminal verdict.
+func terminalStates(wf *config.Workflow) map[string]bool {
+	out := map[string]bool{}
+	for name, s := range wf.States {
+		if s.Terminal != "" {
+			out[name] = true
+		}
+	}
+	return out
 }
 
 // reportConfigErr prints a config validation failure (refusing to run) or a

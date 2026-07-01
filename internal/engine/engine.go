@@ -490,27 +490,28 @@ func (e *Engine) gatePass(ctx context.Context, task *store.Task, name string, g 
 	}
 }
 
-// spawn launches the agent for a state's entry: build the role-specific task file
-// + single-line kickoff and start the agent. It reuses an existing pane ONLY when
-// re-entering the same state its agent was spawned for (crash recovery) — entering
-// a new state always spawns a fresh agent for that state's role, so the reviewer
-// at pr_open is not mistaken for the still-labelled implementer workspace.
 // launchArgs returns the agent launch argv, scoping tools when the role declares
 // allowed_tools. Tools are appended as separate args to match claude's variadic
 // --allowedTools <tools...> flag (translation is claude-targeted today; our only
-// launcher). NOTE: the backend delivers this argv space-joined into the pane's
-// shell (see exec.Herdr.Spawn), so tool entries must be shell-safe tokens (e.g.
-// "Read", "Edit", "Bash") — arg-scoped specs containing spaces/globs/parens like
-// "Bash(gh pr view:*)" would need shell quoting at delivery, which is future work.
+// launcher; matched by basename so an absolute path still counts). Config
+// validation rejects shell-unsafe tool tokens, because the backend delivers this
+// argv space-joined into the pane's shell (see exec.Herdr.Spawn); arg-scoped
+// specs with spaces/globs/parens would need shell quoting at delivery, which is
+// future work.
 func launchArgs(r config.Role) []string {
 	args := append([]string(nil), r.Launch...)
-	if len(r.AllowedTools) > 0 && len(r.Launch) > 0 && r.Launch[0] == "claude" {
+	if len(r.AllowedTools) > 0 && len(r.Launch) > 0 && filepath.Base(r.Launch[0]) == "claude" {
 		args = append(args, "--allowedTools")
 		args = append(args, r.AllowedTools...)
 	}
 	return args
 }
 
+// spawn launches the agent for a state's entry: build the role-specific task file
+// + single-line kickoff and start the agent. It reuses an existing pane ONLY when
+// re-entering the same state its agent was spawned for (crash recovery) — entering
+// a new state always spawns a fresh agent for that state's role, so the reviewer
+// at pr_open is not mistaken for the still-labelled implementer workspace.
 func (e *Engine) spawn(ctx context.Context, task *store.Task, role string, st config.State) error {
 	if task.PaneID != "" && task.PaneSpawnState == task.CurrentState {
 		h, ok, err := e.backend.Resolve(ctx, task.ID)

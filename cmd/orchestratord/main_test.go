@@ -69,9 +69,32 @@ func TestWritePlan_MarksSideEffectingTerminalAndCycle(t *testing.T) {
 	var buf bytes.Buffer
 	writePlan(&buf, wf)
 	out := buf.String()
-	for _, want := range []string{"merging", "side-effecting", "merged", "terminal", "cycle", "changes_requested"} {
+	for _, want := range []string{"merging  [side-effecting]", "merged  [terminal:success]"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("plan output missing %q:\n%s", want, out)
 		}
+	}
+	// The request_changes loop must render as a real SCC line (not just the
+	// section header) with its bounded annotation.
+	if !strings.Contains(out, "{changes_requested, pr_open}  retry-capped or timeout-bounded") {
+		t.Errorf("plan output missing the request_changes cycle line:\n%s", out)
+	}
+}
+
+// The UNCAPPED branch is unreachable via cmdPlan (which refuses invalid configs),
+// so exercise writePlan directly on an in-memory uncapped self-loop. This also
+// pins cycleBounded's parity with the validator (a cycle with no cap/timeout).
+func TestWritePlan_UncappedCycleAnnotated(t *testing.T) {
+	wf := &config.Workflow{
+		Name: "x",
+		States: map[string]config.State{
+			"loop": {Transitions: []config.Transition{{To: "loop"}}},
+		},
+	}
+	var buf bytes.Buffer
+	writePlan(&buf, wf)
+	out := buf.String()
+	if !strings.Contains(out, "{loop}") || !strings.Contains(out, "UNCAPPED") {
+		t.Errorf("uncapped self-loop should render {loop} ... UNCAPPED:\n%s", out)
 	}
 }

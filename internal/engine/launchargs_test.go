@@ -23,4 +23,10 @@ func TestLaunchArgs_AppendsAllowedToolsForClaude(t *testing.T) {
 	if g := launchArgs(config.Role{Launch: []string{"aider"}, AllowedTools: []string{"Read"}}); !reflect.DeepEqual(g, []string{"aider"}) {
 		t.Errorf("non-claude launcher scoped: %v", g)
 	}
+	// An absolute-path claude launcher is still recognized (match by basename).
+	gotAbs := launchArgs(config.Role{Launch: []string{"/usr/local/bin/claude"}, AllowedTools: []string{"Read"}})
+	wantAbs := []string{"/usr/local/bin/claude", "--allowedTools", "Read"}
+	if !reflect.DeepEqual(gotAbs, wantAbs) {
+		t.Errorf("absolute-path claude launcher = %v, want %v", gotAbs, wantAbs)
+	}
 }

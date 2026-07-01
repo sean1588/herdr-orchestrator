@@ -23,8 +23,17 @@ func fakeGh(t *testing.T, fixture string) {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
+	// The fake also asserts the --json field set: it emits the fixture only when
+	// the request carries the fields PRStatus parses. So if PRStatus drops
+	// statusCheckRollup or reviews from its query, the fake exits non-zero and the
+	// test fails — that is the contract this integration test is meant to pin.
 	body := "#!/bin/sh\n" +
-		"if [ \"$1\" = pr ] && [ \"$2\" = view ]; then cat " + abs + "; exit 0; fi\n" +
+		"if [ \"$1\" = pr ] && [ \"$2\" = view ]; then\n" +
+		"  case \"$*\" in\n" +
+		"    *statusCheckRollup*reviews*) cat " + abs + "; exit 0 ;;\n" +
+		"    *) echo \"fake gh: missing required --json fields in: $*\" >&2; exit 3 ;;\n" +
+		"  esac\n" +
+		"fi\n" +
 		"exit 9\n"
 	if err := os.WriteFile(filepath.Join(dir, "gh"), []byte(body), 0o755); err != nil {
 		t.Fatalf("write fake gh: %v", err)

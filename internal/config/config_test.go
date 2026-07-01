@@ -473,15 +473,36 @@ entry_state: s
 roles:
   reviewer:
     launch: [claude]
-    allowed_tools: [Read, "Bash(gh pr view:*)"]
+    allowed_tools: [Read, Write]
 states:
   s: { terminal: success }
 `)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if got := strings.Join(wf.Roles["reviewer"].AllowedTools, ","); got != "Read,Bash(gh pr view:*)" {
-		t.Errorf("AllowedTools joined = %q, want %q", got, "Read,Bash(gh pr view:*)")
+	if got := strings.Join(wf.Roles["reviewer"].AllowedTools, ","); got != "Read,Write" {
+		t.Errorf("AllowedTools joined = %q, want %q", got, "Read,Write")
+	}
+}
+
+// allowed_tools entries must be shell-safe tokens: the launch argv is delivered
+// space-joined into the pane shell, so an arg-scoped spec (spaces/globs/parens)
+// would fail at spawn. Reject it at validation (fail-closed), not at runtime.
+func TestParse_RoleAllowedTools_RejectsShellUnsafe(t *testing.T) {
+	_, _, err := mustParse(t, `
+version: 0
+name: t
+entry_state: s
+roles:
+  reviewer:
+    launch: [claude]
+    allowed_tools: [Read, "Bash(gh pr view:*)"]
+states:
+  s: { terminal: success }
+`)
+	errs := semErrors(t, err)
+	if !containsSubstr(errs, `allowed_tools entry "Bash(gh pr view:*)"`) {
+		t.Errorf("want a shell-unsafe allowed_tools error, got %v", errs)
 	}
 }
 

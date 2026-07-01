@@ -1,0 +1,15 @@
+{
+  "state": "OPEN",
+  "reviewDecision": "APPROVED",
+  "mergeable": "MERGEABLE",
+  "mergeStateStatus": "CLEAN",
+  "statusCheckRollup": [
+    { "__typename": "CheckRun", "name": "build", "status": "COMPLETED", "conclusion": "SUCCESS" },
+    { "__typename": "CheckRun", "name": "test", "status": "COMPLETED", "conclusion": "SUCCESS" },
+    { "__typename": "StatusContext", "context": "ci/legacy", "state": "SUCCESS" }
+  ],
+  "reviews": [
+    { "author": { "login": "octocat" }, "state": "COMMENTED", "submittedAt": "2026-06-30T10:00:00Z" },
+    { "author": { "login": "reviewer1" }, "state": "APPROVED", "submittedAt": "2026-06-30T11:00:00Z" }
+  ]
+}

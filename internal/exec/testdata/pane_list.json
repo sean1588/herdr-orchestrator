@@ -1,0 +1,24 @@
+{
+  "result": {
+    "panes": [
+      {
+        "pane_id": "wA:p1",
+        "tab_id": "wA:t1",
+        "workspace_id": "ws-208",
+        "agent": "claude",
+        "agent_status": "working",
+        "cwd": "/home/sean/github/wt-issue-208",
+        "focused": true
+      },
+      {
+        "pane_id": "wB:p1",
+        "tab_id": "wB:t1",
+        "workspace_id": "ws-311",
+        "agent": "",
+        "agent_status": "idle",
+        "cwd": "/home/sean/github/wt-issue-311",
+        "focused": false
+      }
+    ]
+  }
+}

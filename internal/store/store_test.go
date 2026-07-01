@@ -75,6 +75,33 @@ func TestCreateGetRoundTrip(t *testing.T) {
 	}
 }
 
+func TestTask_WorkflowSnapshot_RoundTrips(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+	want := "version: 0\nname: x\nstates: {}\n"
+	in := &Task{ID: "issue-1", Issue: 1, Repo: "o/r", Branch: "agent/issue-1",
+		CurrentState: "queued", WorkflowSnapshot: want}
+	if err := st.CreateTask(ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.GetTask(ctx, "issue-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.WorkflowSnapshot != want {
+		t.Errorf("snapshot = %q, want %q", got.WorkflowSnapshot, want)
+	}
+	// Snapshot is immutable: a state change must not drop it.
+	got.CurrentState = "implementing"
+	if err := st.UpdateTask(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+	again, _ := st.GetTask(ctx, "issue-1")
+	if again.WorkflowSnapshot != want {
+		t.Errorf("snapshot lost after update: %q", again.WorkflowSnapshot)
+	}
+}
+
 func TestGetTaskNotFound(t *testing.T) {
 	st := newStore(t)
 	_, err := st.GetTask(context.Background(), "nope")

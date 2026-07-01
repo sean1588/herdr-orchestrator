@@ -20,10 +20,14 @@ type Task struct {
 	// reuses a live pane only when re-entering that same state (crash recovery);
 	// entering a new state spawns a fresh agent for that state's role.
 	PaneSpawnState string
-	PRNumber       *int           // nil until a PR is detected
-	RetryCounts    map[string]int // keyed by retry-cap key, may be nil/empty
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	// WorkflowSnapshot is the exact config the task started under (raw bytes).
+	// Recovery resumes against this, never a possibly-edited --config. Set once
+	// at create; never rewritten. Empty for tasks created before this column.
+	WorkflowSnapshot string
+	PRNumber         *int           // nil until a PR is detected
+	RetryCounts      map[string]int // keyed by retry-cap key, may be nil/empty
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
 }
 
 // AuditEntry is one immutable row in a task's transition history.

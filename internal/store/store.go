@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     current_state TEXT NOT NULL,
     pane_id       TEXT NOT NULL,
     pane_spawn_state TEXT NOT NULL DEFAULT '',
+    workflow_snapshot TEXT NOT NULL DEFAULT '',
     pr_number     INTEGER,
     retry_counts  TEXT NOT NULL,
     created_at    TEXT NOT NULL,
@@ -83,6 +84,10 @@ func applyMigrations(ctx context.Context, db *sql.DB) error {
 	if _, err := db.ExecContext(ctx, addPaneSpawnState); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 		return fmt.Errorf("store: migrate pane_spawn_state: %w", err)
 	}
+	const addSnapshot = `ALTER TABLE tasks ADD COLUMN workflow_snapshot TEXT NOT NULL DEFAULT ''`
+	if _, err := db.ExecContext(ctx, addSnapshot); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+		return fmt.Errorf("store: migrate workflow_snapshot: %w", err)
+	}
 	return nil
 }
 
@@ -111,9 +116,9 @@ func (s *Store) CreateTask(ctx context.Context, t *Task) error {
 
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO tasks
-			(id, issue, repo, branch, current_state, pane_id, pane_spawn_state, pr_number, retry_counts, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		t.ID, t.Issue, t.Repo, t.Branch, t.CurrentState, t.PaneID, t.PaneSpawnState,
+			(id, issue, repo, branch, current_state, pane_id, pane_spawn_state, workflow_snapshot, pr_number, retry_counts, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		t.ID, t.Issue, t.Repo, t.Branch, t.CurrentState, t.PaneID, t.PaneSpawnState, t.WorkflowSnapshot,
 		prNumberArg(t.PRNumber), rc,
 		t.CreatedAt.Format(timeLayout), t.UpdatedAt.Format(timeLayout),
 	)
@@ -126,7 +131,7 @@ func (s *Store) CreateTask(ctx context.Context, t *Task) error {
 // GetTask returns the task with the given id, or ErrNotFound.
 func (s *Store) GetTask(ctx context.Context, id string) (*Task, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, issue, repo, branch, current_state, pane_id, pane_spawn_state, pr_number, retry_counts, created_at, updated_at
+		SELECT id, issue, repo, branch, current_state, pane_id, pane_spawn_state, workflow_snapshot, pr_number, retry_counts, created_at, updated_at
 		FROM tasks WHERE id = ?`, id)
 
 	t, err := scanTask(row)
@@ -174,7 +179,7 @@ func (s *Store) UpdateTask(ctx context.Context, t *Task) error {
 // filter terminal states themselves.
 func (s *Store) List(ctx context.Context) ([]Task, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, issue, repo, branch, current_state, pane_id, pane_spawn_state, pr_number, retry_counts, created_at, updated_at
+		SELECT id, issue, repo, branch, current_state, pane_id, pane_spawn_state, workflow_snapshot, pr_number, retry_counts, created_at, updated_at
 		FROM tasks ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("store: list tasks: %w", err)
@@ -256,7 +261,7 @@ func scanTask(sc scanner) (*Task, error) {
 		updated string
 	)
 	if err := sc.Scan(&t.ID, &t.Issue, &t.Repo, &t.Branch, &t.CurrentState, &t.PaneID, &t.PaneSpawnState,
-		&pr, &rc, &created, &updated); err != nil {
+		&t.WorkflowSnapshot, &pr, &rc, &created, &updated); err != nil {
 		return nil, err
 	}
 

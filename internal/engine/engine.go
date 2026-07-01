@@ -150,19 +150,42 @@ func (e *Engine) Recover(ctx context.Context) error {
 	}
 	for i := range tasks {
 		task := &tasks[i]
-		if e.isHalt(task.CurrentState) {
+		// Drive the task against the graph it started under (its snapshot), never a
+		// possibly-edited current --config. Re-validating via config.Parse keeps
+		// recovery fail-closed: a snapshot that no longer satisfies the invariants
+		// is skipped, not silently run. An empty snapshot (legacy row) resumes
+		// against the current --config, preserving pre-snapshot behavior.
+		eng := e
+		if task.WorkflowSnapshot != "" {
+			wf, _, perr := config.Parse([]byte(task.WorkflowSnapshot))
+			if perr != nil {
+				e.log.Warn("recover: task snapshot invalid; skipping (fix or migrate)", "task", task.ID, "err", perr)
+				continue
+			}
+			eng = e.cloneWithWorkflow(wf)
+		}
+		if eng.isHalt(task.CurrentState) {
 			continue
 		}
 		e.log.Info("recovering task", "task", task.ID, "state", task.CurrentState)
-		if err := e.reconcile(ctx, task); err != nil {
+		if err := eng.reconcile(ctx, task); err != nil {
 			e.log.Warn("reconcile failed", "task", task.ID, "err", err)
 			continue
 		}
-		if _, err := e.drive(ctx, task); err != nil {
+		if _, err := eng.drive(ctx, task); err != nil {
 			e.log.Warn("resume failed", "task", task.ID, "err", err)
 		}
 	}
 	return nil
+}
+
+// cloneWithWorkflow returns a shallow copy of e bound to a different workflow, so
+// a recovered task can be driven against the graph it started under. All other
+// dependencies (store, backend, gh, logger, notifier, goal, ...) are shared.
+func (e *Engine) cloneWithWorkflow(wf *config.Workflow) *Engine {
+	c := *e
+	c.wf = wf
+	return &c
 }
 
 // ensureTask loads an existing task or creates a fresh one at the start state.

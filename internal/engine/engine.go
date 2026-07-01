@@ -571,7 +571,10 @@ func (e *Engine) spawn(ctx context.Context, task *store.Task, role string, st co
 // implementer and gets the issue.
 func (e *Engine) agentTask(ctx context.Context, task *store.Task, st config.State, r config.Role) (taskFile, kickoff string, err error) {
 	if dec := decisionForState(st); dec != "" {
-		return e.reviewerTask(task, dec)
+		if task.PRNumber == nil {
+			return e.triageTask(ctx, task, dec) // pipeline-entry decision: rubric + issue
+		}
+		return e.reviewerTask(task, dec) // review decision: rubric + PR pointer
 	}
 	if st.Entry != nil && st.Entry.Resume != "" {
 		return e.feedbackTask(task, st.Entry.With)

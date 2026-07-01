@@ -271,6 +271,14 @@ func (cf commonFlags) wire(ctx context.Context) (*engine.Engine, *store.Store, e
 		notifier = notify.Webhook{URL: cf.notifyWebhook}
 	}
 
+	// StartState is the workflow's entry_state so `run`/`daemon` create tasks at
+	// the pipeline front door (intake/triage). Empty entry_state falls back to the
+	// engine default ("queued"), preserving pre-triage behavior.
+	start := ""
+	if wf.EntryState != nil {
+		start = *wf.EntryState
+	}
+
 	eng := engine.New(engine.Config{
 		Workflow:       wf,
 		WorkflowSource: raw,
@@ -283,6 +291,7 @@ func (cf commonFlags) wire(ctx context.Context) (*engine.Engine, *store.Store, e
 		ConfigDir:      filepath.Dir(cf.config),
 		TaskDir:        cf.taskDir,
 		Notifier:       notifier,
+		StartState:     start,
 	})
 	return eng, st, nil
 }

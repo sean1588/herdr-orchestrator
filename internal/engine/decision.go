@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -89,6 +90,32 @@ func (e *Engine) reviewerTask(task *store.Task, decisionName string) (taskFile, 
 	kickoff = fmt.Sprintf(
 		"Review PR #%d (branch %s) following the rubric in %s. When done, write your verdict as JSON {\"verdict\": one of %v, \"feedback\": \"...\"} to %s. Stop when the verdict file is written.",
 		prNum(task), task.Branch, path, d.Verdicts, vp)
+	return path, kickoff, nil
+}
+
+// triageTask builds the triager's context file (the decision rubric + the issue
+// title/body) and a single-line kickoff to write the verdict file. Unlike
+// reviewerTask it references the ISSUE, not a PR: triage runs at the pipeline
+// entry, before any PR exists.
+func (e *Engine) triageTask(ctx context.Context, task *store.Task, decisionName string) (taskFile, kickoff string, err error) {
+	d := e.wf.Decisions[decisionName]
+	rubric, err := e.readRubric(d.Impl.Rubric)
+	if err != nil {
+		return "", "", fmt.Errorf("decision %q: %w", decisionName, err)
+	}
+	issue, err := e.gh.Issue(ctx, e.repoDir, task.Issue)
+	if err != nil {
+		return "", "", fmt.Errorf("triage: fetch issue %d: %w", task.Issue, err)
+	}
+	path := filepath.Join(e.taskDir, "triage-task-"+task.ID+".md")
+	body := fmt.Sprintf("%s\n\n## Issue under triage\n\n# %s\n\n%s\n", rubric, issue.Title, issue.Body)
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		return "", "", fmt.Errorf("write triage task file: %w", err)
+	}
+	vp := verdictPath(e.taskDir, task.ID)
+	kickoff = fmt.Sprintf(
+		"Triage issue #%d following the rubric in %s. When done, write your verdict as JSON {\"verdict\": one of %v, \"feedback\": \"...\"} to %s. Stop when the verdict file is written.",
+		task.Issue, path, d.Verdicts, vp)
 	return path, kickoff, nil
 }
 

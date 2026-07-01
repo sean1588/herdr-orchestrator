@@ -47,3 +47,23 @@ func (g *GH) Issue(ctx context.Context, repoDir string, number int) (*Issue, err
 	}
 	return &issue, nil
 }
+
+// ListIssues runs `gh issue list --label <label> --json number` in repoDir and
+// returns the matching issue numbers.
+func (g *GH) ListIssues(ctx context.Context, repoDir, label string) ([]int, error) {
+	out, err := g.run.Run(ctx, repoDir, "gh", "issue", "list", "--label", label, "--json", "number")
+	if err != nil {
+		return nil, fmt.Errorf("gh issue list --label %s: %w", label, err)
+	}
+	var items []struct {
+		Number int `json:"number"`
+	}
+	if err := json.Unmarshal(out, &items); err != nil {
+		return nil, fmt.Errorf("parse gh issue list output: %w", err)
+	}
+	nums := make([]int, len(items))
+	for i, it := range items {
+		nums[i] = it.Number
+	}
+	return nums, nil
+}

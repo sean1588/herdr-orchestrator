@@ -82,3 +82,36 @@ func TestGH_PRStatus_UnstableFixture(t *testing.T) {
 		t.Errorf("MergeStateStatus = %q, want BLOCKED", s.MergeStateStatus)
 	}
 }
+
+func TestGH_ListIssues_AgainstFakeBinary(t *testing.T) {
+	abs, err := filepath.Abs("testdata/issue_list.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	// Fake gh emits the fixture only for `gh issue list --label ... --json number`.
+	body := "#!/bin/sh\n" +
+		"if [ \"$1\" = issue ] && [ \"$2\" = list ]; then\n" +
+		"  case \"$*\" in *--label*--json*number*) cat " + abs + "; exit 0 ;; esac\n" +
+		"  echo \"fake gh: unexpected issue list args: $*\" >&2; exit 3\n" +
+		"fi\n" +
+		"exit 9\n"
+	if err := os.WriteFile(filepath.Join(dir, "gh"), []byte(body), 0o755); err != nil {
+		t.Fatalf("write fake gh: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	got, err := github.New(proc.New()).ListIssues(context.Background(), t.TempDir(), "agent-ready")
+	if err != nil {
+		t.Fatalf("ListIssues: %v", err)
+	}
+	want := []int{5, 8, 13}
+	if len(got) != len(want) {
+		t.Fatalf("ListIssues = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("ListIssues = %v, want %v", got, want)
+		}
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sean1588/herdr-orchestrator/internal/exec"
+	"github.com/sean1588/herdr-orchestrator/internal/github"
 	"github.com/sean1588/herdr-orchestrator/internal/store"
 )
 
@@ -132,5 +133,79 @@ func TestPROpen_MissingVerdictFile_IsError(t *testing.T) {
 
 	if _, err := e.drive(context.Background(), task); err == nil {
 		t.Fatal("drive should error when the reviewer wrote no verdict file")
+	}
+}
+
+// Driving from intake spawns the triager and branches on its verdict.
+func TestIntake_TriageVerdict_Branches(t *testing.T) {
+	tests := []struct{ name, verdict, goal, wantTo string }{
+		{"accept -> queued", "accept", "queued", "queued"},
+		{"reject -> closed (terminal)", "reject", "merged", "closed"},
+		{"needs_human -> escalated (terminal)", "needs_human", "merged", "escalated"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := newStore(t)
+			b := &fakeBackend{pane: "w1:p1", events: []exec.Event{
+				{PaneID: "w1:p1", State: exec.StateWorking},
+				{PaneID: "w1:p1", State: exec.StateDone},
+			}}
+			e := newEngine(t, st, b, &fakeGH{}, 5*time.Second)
+			e.goal = tt.goal
+			task := &store.Task{ID: "issue-9", Issue: 9, Branch: "agent/issue-9", CurrentState: "intake"}
+			if err := st.CreateTask(context.Background(), task); err != nil {
+				t.Fatal(err)
+			}
+			writeVerdict(t, e.taskDir, task.ID, `{"verdict":"`+tt.verdict+`","feedback":""}`)
+
+			final, err := e.drive(context.Background(), task)
+			if err != nil {
+				t.Fatalf("drive: %v", err)
+			}
+			if final != tt.wantTo {
+				t.Fatalf("final = %q, want %q", final, tt.wantTo)
+			}
+			if b.spawns != 1 {
+				t.Errorf("triager should spawn exactly once, got %d", b.spawns)
+			}
+			if len(b.spawnLog) > 0 && !strings.Contains(b.spawnLog[0].Kickoff, "Triage issue") {
+				t.Errorf("intake spawn kickoff = %q, want a triage kickoff", b.spawnLog[0].Kickoff)
+			}
+		})
+	}
+}
+
+// The triager's task file carries the rubric + the issue (no PR), and the
+// kickoff instructs it to write the verdict file.
+func TestIntake_TriagerTask_CarriesRubricAndIssueNoPR(t *testing.T) {
+	st := newStore(t)
+	b := &fakeBackend{pane: "w1:p1", events: []exec.Event{
+		{PaneID: "w1:p1", State: exec.StateDone},
+	}}
+	gh := &fakeGH{issue: &github.Issue{Number: 9, Title: "Add feature", Body: "the details"}}
+	e := newEngine(t, st, b, gh, 5*time.Second)
+	e.goal = "queued"
+	task := &store.Task{ID: "issue-9", Issue: 9, Branch: "agent/issue-9", CurrentState: "intake"}
+	if err := st.CreateTask(context.Background(), task); err != nil {
+		t.Fatal(err)
+	}
+	writeVerdict(t, e.taskDir, task.ID, `{"verdict":"accept","feedback":""}`)
+
+	if _, err := e.drive(context.Background(), task); err != nil {
+		t.Fatalf("drive: %v", err)
+	}
+	sp := b.spawnLog[0]
+	content, err := os.ReadFile(sp.TaskFile)
+	if err != nil {
+		t.Fatalf("read triage task file: %v", err)
+	}
+	if !strings.Contains(string(content), "Triage rubric") || !strings.Contains(string(content), "Add feature") {
+		t.Errorf("triage task file missing rubric or issue:\n%s", content)
+	}
+	if strings.Contains(string(content), "PR #") {
+		t.Errorf("triage task must not reference a PR:\n%s", content)
+	}
+	if !strings.Contains(sp.Kickoff, "Triage issue #9") || !strings.Contains(sp.Kickoff, verdictPath(e.taskDir, task.ID)) {
+		t.Errorf("kickoff does not instruct writing the verdict for issue 9: %q", sp.Kickoff)
 	}
 }

@@ -22,6 +22,11 @@ func Load(path string) (*Workflow, []string, error) {
 	return parse(data)
 }
 
+// Parse decodes + schema-validates + invariant-checks raw config bytes (no file
+// I/O). Load is Parse plus os.ReadFile. Recovery uses it to re-validate each
+// task's stored workflow snapshot before resuming against it.
+func Parse(data []byte) (*Workflow, []string, error) { return parse(data) }
+
 // parse runs the same pipeline as Load on in-memory bytes.
 func parse(data []byte) (*Workflow, []string, error) {
 	schemaErrs, err := validateSchema(data)

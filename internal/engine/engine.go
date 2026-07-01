@@ -39,6 +39,11 @@ type Config struct {
 	GitHub   github.Client
 	Store    *store.Store
 
+	// WorkflowSource is the raw config bytes snapshotted onto each new task, so
+	// recovery resumes against the graph the task started under. Empty => no
+	// snapshot (recovery falls back to the current --config).
+	WorkflowSource []byte
+
 	RepoDir   string // local checkout (absolute) where git/gh run
 	Base      string // base branch, e.g. "main"
 	Repo      string // owner/name slug recorded on the task
@@ -59,10 +64,11 @@ type Config struct {
 
 // Engine drives tasks through the workflow.
 type Engine struct {
-	wf      *config.Workflow
-	backend exec.ExecutionBackend
-	gh      github.Client
-	store   *store.Store
+	wf             *config.Workflow
+	backend        exec.ExecutionBackend
+	gh             github.Client
+	store          *store.Store
+	workflowSource []byte
 
 	repoDir, base, repo string
 	configDir           string
@@ -77,21 +83,22 @@ type Engine struct {
 // New builds an Engine, applying defaults.
 func New(c Config) *Engine {
 	e := &Engine{
-		wf:         c.Workflow,
-		backend:    c.Backend,
-		gh:         c.GitHub,
-		store:      c.Store,
-		repoDir:    c.RepoDir,
-		base:       c.Base,
-		repo:       c.Repo,
-		configDir:  c.ConfigDir,
-		taskDir:    c.TaskDir,
-		goal:       c.Goal,
-		startState: c.StartState,
-		parseDur:   c.DurationFunc,
-		statusPoll: c.StatusPollInterval,
-		log:        c.Logger,
-		notifier:   c.Notifier,
+		wf:             c.Workflow,
+		backend:        c.Backend,
+		gh:             c.GitHub,
+		store:          c.Store,
+		workflowSource: c.WorkflowSource,
+		repoDir:        c.RepoDir,
+		base:           c.Base,
+		repo:           c.Repo,
+		configDir:      c.ConfigDir,
+		taskDir:        c.TaskDir,
+		goal:           c.Goal,
+		startState:     c.StartState,
+		parseDur:       c.DurationFunc,
+		statusPoll:     c.StatusPollInterval,
+		log:            c.Logger,
+		notifier:       c.Notifier,
 	}
 	if e.taskDir == "" {
 		e.taskDir = os.TempDir()
@@ -143,19 +150,42 @@ func (e *Engine) Recover(ctx context.Context) error {
 	}
 	for i := range tasks {
 		task := &tasks[i]
-		if e.isHalt(task.CurrentState) {
+		// Drive the task against the graph it started under (its snapshot), never a
+		// possibly-edited current --config. Re-validating via config.Parse keeps
+		// recovery fail-closed: a snapshot that no longer satisfies the invariants
+		// is skipped, not silently run. An empty snapshot (legacy row) resumes
+		// against the current --config, preserving pre-snapshot behavior.
+		eng := e
+		if task.WorkflowSnapshot != "" {
+			wf, _, perr := config.Parse([]byte(task.WorkflowSnapshot))
+			if perr != nil {
+				e.log.Warn("recover: task snapshot invalid; skipping (fix or migrate)", "task", task.ID, "err", perr)
+				continue
+			}
+			eng = e.cloneWithWorkflow(wf)
+		}
+		if eng.isHalt(task.CurrentState) {
 			continue
 		}
 		e.log.Info("recovering task", "task", task.ID, "state", task.CurrentState)
-		if err := e.reconcile(ctx, task); err != nil {
+		if err := eng.reconcile(ctx, task); err != nil {
 			e.log.Warn("reconcile failed", "task", task.ID, "err", err)
 			continue
 		}
-		if _, err := e.drive(ctx, task); err != nil {
+		if _, err := eng.drive(ctx, task); err != nil {
 			e.log.Warn("resume failed", "task", task.ID, "err", err)
 		}
 	}
 	return nil
+}
+
+// cloneWithWorkflow returns a shallow copy of e bound to a different workflow, so
+// a recovered task can be driven against the graph it started under. All other
+// dependencies (store, backend, gh, logger, notifier, goal, ...) are shared.
+func (e *Engine) cloneWithWorkflow(wf *config.Workflow) *Engine {
+	c := *e
+	c.wf = wf
+	return &c
 }
 
 // ensureTask loads an existing task or creates a fresh one at the start state.
@@ -170,11 +200,12 @@ func (e *Engine) ensureTask(ctx context.Context, issue int) (*store.Task, bool, 
 		return nil, false, fmt.Errorf("load task %s: %w", id, err)
 	}
 	task := &store.Task{
-		ID:           id,
-		Issue:        issue,
-		Repo:         e.repo,
-		Branch:       branchName(issue),
-		CurrentState: e.startState,
+		ID:               id,
+		Issue:            issue,
+		Repo:             e.repo,
+		Branch:           branchName(issue),
+		CurrentState:     e.startState,
+		WorkflowSnapshot: string(e.workflowSource),
 	}
 	if err := e.store.CreateTask(ctx, task); err != nil {
 		return nil, false, fmt.Errorf("create task %s: %w", id, err)

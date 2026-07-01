@@ -37,6 +37,9 @@ type Scheduler struct {
 // returns when ctx is done), and returns. Tasks persist their state, so the next
 // start resumes them via SeedFrom.
 func (s *Scheduler) Serve(ctx context.Context) error {
+	if s.Log == nil {
+		s.Log = slog.Default()
+	}
 	workers := s.Workers
 	if workers < 1 {
 		workers = 1

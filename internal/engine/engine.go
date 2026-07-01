@@ -2,16 +2,19 @@
 //
 // It drives the full review->merge loop: queued -> implementing -> pr_open ->
 // (review decision) -> approved -> (merge gate) -> merging -> merged, plus the
-// changes_requested resume loop, the agent.blocked alert, and the timeout /
-// retry_exhausted escalation edges. The default goal is "merged"; the real merge
-// is withheld under policies.dry_run (default-on), which halts at "merging".
-// Triage/intake, the scheduler (concurrency > 1), the MCP surface, and cross-task
-// memory remain out of scope: the engine parses and validates the full pipeline
-// but does not execute those.
+// intake triage decision (accept/reject/needs_human), the changes_requested
+// resume loop, the agent.blocked alert, and the timeout / retry_exhausted
+// escalation edges. The default goal is "merged"; the real merge is withheld
+// under policies.dry_run (default-on), which halts at "merging". The MCP surface
+// and cross-task memory remain out of scope: the engine validates them in the
+// full pipeline but does not execute them.
 //
-// The engine is the single writer of task state: all store writes happen on the
-// goroutine that runs Run/Recover. GitHub is authoritative for artifacts; an
-// agent's "done" is only a trigger to go check GitHub.
+// Run drives one issue to completion. The daemon (cmd/orchestratord) may run up
+// to policies.max_concurrent_tasks such drives concurrently; each task's state is
+// written only by the goroutine driving that issue (tasks are row-partitioned by
+// issue id) and the store serializes all writes through a single connection, so
+// concurrent drives never race. GitHub is authoritative for artifacts; an agent's
+// "done" is only a trigger to go check GitHub.
 package engine
 
 import (
@@ -30,8 +33,8 @@ import (
 	"github.com/sean1588/herdr-orchestrator/internal/store"
 )
 
-// autoFiredEvents are events with no real source in Phase 1 (the scheduler is
-// stubbed); the engine fires them immediately on entering the state.
+// autoFiredEvents are events with no real external source; the engine fires them
+// immediately on entering the state.
 var autoFiredEvents = map[string]bool{"scheduled": true}
 
 // Config wires the engine's dependencies and tunables.
@@ -193,7 +196,7 @@ func (e *Engine) cloneWithWorkflow(wf *config.Workflow) *Engine {
 // ensureTask loads an existing task or creates a fresh one at the start state.
 // The bool return reports whether a new task was created.
 func (e *Engine) ensureTask(ctx context.Context, issue int) (*store.Task, bool, error) {
-	id := taskID(issue)
+	id := TaskID(issue)
 	existing, err := e.store.GetTask(ctx, id)
 	if err == nil {
 		return existing, false, nil
@@ -760,7 +763,7 @@ func (e *Engine) isHalt(state string) bool {
 
 // --- small helpers ---
 
-func taskID(issue int) string     { return fmt.Sprintf("issue-%d", issue) }
+func TaskID(issue int) string     { return fmt.Sprintf("issue-%d", issue) }
 func branchName(issue int) string { return fmt.Sprintf("agent/issue-%d", issue) }
 
 func prNum(t *store.Task) int {

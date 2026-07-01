@@ -119,6 +119,9 @@ func TestLoad_DefaultPipeline_IntakeSpawnsTriagerAndBranchesTriage(t *testing.T)
 	if intake.Entry == nil || intake.Entry.Spawn != "triager" {
 		t.Fatalf("intake.entry.spawn = %+v, want triager", intake.Entry)
 	}
+	if len(intake.Transitions) < 2 {
+		t.Fatalf("intake: want >=2 transitions, got %d", len(intake.Transitions))
+	}
 	t0 := intake.Transitions[0]
 	if t0.When.Event != "agent.done" || t0.Evaluate == nil || t0.Evaluate.Decision != "triage" {
 		t.Fatalf("intake t0 = %+v, want agent.done/evaluate triage", t0)

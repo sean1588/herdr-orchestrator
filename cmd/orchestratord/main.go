@@ -412,7 +412,7 @@ func cmdDaemon(args []string) int {
 		fmt.Fprintf(os.Stderr, "daemon: %v\n", err)
 		return 2
 	}
-	terminal := terminalStates(w.wf)
+	settled := settledStates(w.wf)
 	workers := w.wf.Policies.MaxConcurrentTasks
 	if workers < 1 {
 		workers = 1
@@ -423,14 +423,14 @@ func cmdDaemon(args []string) int {
 			return w.gh.ListIssues(ctx, w.repoDir, label)
 		},
 		Done: func(ctx context.Context, issue int) (bool, error) {
-			tk, err := w.store.GetTask(ctx, fmt.Sprintf("issue-%d", issue))
+			tk, err := w.store.GetTask(ctx, engine.TaskID(issue))
 			if errors.Is(err, store.ErrNotFound) {
 				return false, nil
 			}
 			if err != nil {
 				return false, err
 			}
-			return terminal[tk.CurrentState], nil
+			return settled[tk.CurrentState], nil
 		},
 		RunTask: func(ctx context.Context, issue int) error {
 			_, err := w.eng.Run(ctx, issue)
@@ -443,7 +443,7 @@ func cmdDaemon(args []string) int {
 			}
 			var out []int
 			for _, tk := range tasks {
-				if !terminal[tk.CurrentState] {
+				if !settled[tk.CurrentState] {
 					out = append(out, tk.Issue)
 				}
 			}
@@ -482,6 +482,23 @@ func terminalStates(wf *config.Workflow) map[string]bool {
 	for name, s := range wf.States {
 		if s.Terminal != "" {
 			out[name] = true
+		}
+	}
+	return out
+}
+
+// settledStates returns the state names at which the daemon must stop re-driving
+// an issue: every terminal state, plus — when dry_run is enabled — any merge_pr
+// side-effecting state. dry_run (default-on) deliberately halts the engine at the
+// merge gate ("merging"), a NON-terminal state; without treating that as settled,
+// a completed issue would be re-driven on every poll (unbounded audit growth).
+func settledStates(wf *config.Workflow) map[string]bool {
+	out := terminalStates(wf) // fresh map; safe to extend
+	if wf.Policies.DryRunEnabled() {
+		for name, s := range wf.States {
+			if s.Entry != nil && s.Entry.Action == "merge_pr" {
+				out[name] = true
+			}
 		}
 	}
 	return out

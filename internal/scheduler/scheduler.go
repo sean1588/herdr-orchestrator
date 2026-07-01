@@ -16,6 +16,10 @@ import (
 // skips a full channel and the still-labelled issue is re-discovered next tick.
 const queueDepth = 128
 
+// defaultInterval is used when Serve is given a non-positive Interval, so the
+// daemon poll loop never panics on a zero value.
+const defaultInterval = 30 * time.Second
+
 // Scheduler drives discovered issues concurrently. All external dependencies are
 // injected as funcs so it is unit-testable without the engine, store, or gh.
 type Scheduler struct {
@@ -58,11 +62,15 @@ func (s *Scheduler) Serve(ctx context.Context) error {
 		if seed, err := s.SeedFrom(ctx); err != nil {
 			s.Log.Warn("seed failed", "err", err)
 		} else {
-			s.enqueue(work, inflight, seed)
+			s.enqueue(ctx, work, inflight, seed)
 		}
 	}
 
-	ticker := time.NewTicker(s.Interval)
+	interval := s.Interval
+	if interval <= 0 {
+		interval = defaultInterval
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -76,20 +84,20 @@ func (s *Scheduler) Serve(ctx context.Context) error {
 				s.Log.Warn("poll failed", "err", err)
 				continue
 			}
-			s.enqueue(work, inflight, issues)
+			s.enqueue(ctx, work, inflight, issues)
 		}
 	}
 }
 
 // enqueue adds issues that are neither in-flight nor already done. It never
 // blocks: a full channel means the issue is skipped and re-discovered next poll.
-func (s *Scheduler) enqueue(work chan int, inflight *inflightSet, issues []int) {
+func (s *Scheduler) enqueue(ctx context.Context, work chan int, inflight *inflightSet, issues []int) {
 	for _, issue := range issues {
 		if inflight.has(issue) {
 			continue
 		}
 		if s.Done != nil {
-			done, err := s.Done(context.Background(), issue)
+			done, err := s.Done(ctx, issue)
 			if err != nil {
 				s.Log.Warn("done check failed", "issue", issue, "err", err)
 				continue

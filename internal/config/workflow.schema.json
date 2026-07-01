@@ -64,7 +64,8 @@
         "launch": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
         "task_delivery": { "type": "string", "enum": ["context_file", "inline"] },
         "workspace": { "type": "string", "enum": ["per_task", "shared"] },
-        "kickoff": { "type": "string" }
+        "kickoff": { "type": "string" },
+        "allowed_tools": { "type": "array", "items": { "type": "string" } }
       }
     },
     "gate": {

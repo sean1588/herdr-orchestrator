@@ -462,3 +462,25 @@ states:
 		t.Errorf("want unreachable warning, got %v", warnings)
 	}
 }
+
+// A role's allowed_tools must pass the schema (additionalProperties:false) and
+// decode onto Role.AllowedTools.
+func TestParse_RoleAllowedTools_Decodes(t *testing.T) {
+	wf, _, err := mustParse(t, `
+version: 0
+name: t
+entry_state: s
+roles:
+  reviewer:
+    launch: [claude]
+    allowed_tools: [Read, "Bash(gh pr view:*)"]
+states:
+  s: { terminal: success }
+`)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got := strings.Join(wf.Roles["reviewer"].AllowedTools, ","); got != "Read,Bash(gh pr view:*)" {
+		t.Errorf("AllowedTools joined = %q, want %q", got, "Read,Bash(gh pr view:*)")
+	}
+}

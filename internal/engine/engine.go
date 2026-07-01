@@ -1,11 +1,13 @@
 // Package engine executes a validated workflow as a deterministic state graph.
 //
-// Phase 1 drives only the proven slice: queued -> implementing ->
-// (agent.done -> gate pr_exists -> pr_open | escalated), plus the agent.blocked
-// alert and the implementing timeout -> escalated edge. It interprets the full
-// default-pipeline.yaml but halts at the goal state (pr_open); review, merge,
-// and triage are out of scope and surface as explicit "not implemented" errors
-// if ever reached.
+// It drives the full review->merge loop: queued -> implementing -> pr_open ->
+// (review decision) -> approved -> (merge gate) -> merging -> merged, plus the
+// changes_requested resume loop, the agent.blocked alert, and the timeout /
+// retry_exhausted escalation edges. The default goal is "merged"; the real merge
+// is withheld under policies.dry_run (default-on), which halts at "merging".
+// Triage/intake, the scheduler (concurrency > 1), the MCP surface, and cross-task
+// memory remain out of scope: the engine parses and validates the full pipeline
+// but does not execute those.
 //
 // The engine is the single writer of task state: all store writes happen on the
 // goroutine that runs Run/Recover. GitHub is authoritative for artifacts; an
@@ -19,6 +21,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/sean1588/herdr-orchestrator/internal/config"
@@ -493,6 +496,17 @@ func (e *Engine) gatePass(ctx context.Context, task *store.Task, name string, g 
 // re-entering the same state its agent was spawned for (crash recovery) — entering
 // a new state always spawns a fresh agent for that state's role, so the reviewer
 // at pr_open is not mistaken for the still-labelled implementer workspace.
+// launchArgs returns the agent launch argv, scoping tools when the role declares
+// allowed_tools. Translation is claude-targeted today (our only launcher); a
+// provider->flag table is future work.
+func launchArgs(r config.Role) []string {
+	args := append([]string(nil), r.Launch...)
+	if len(r.AllowedTools) > 0 && len(r.Launch) > 0 && r.Launch[0] == "claude" {
+		args = append(args, "--allowedTools", strings.Join(r.AllowedTools, ","))
+	}
+	return args
+}
+
 func (e *Engine) spawn(ctx context.Context, task *store.Task, role string, st config.State) error {
 	if task.PaneID != "" && task.PaneSpawnState == task.CurrentState {
 		h, ok, err := e.backend.Resolve(ctx, task.ID)
@@ -527,7 +541,7 @@ func (e *Engine) spawn(ctx context.Context, task *store.Task, role string, st co
 		RepoDir:  e.repoDir,
 		Base:     e.base,
 		TaskFile: taskFile,
-		Launch:   r.Launch,
+		Launch:   launchArgs(r),
 		Kickoff:  kickoff,
 		// A task with a detected PR is being re-spawned (reviewer/resume): keep
 		// its branch so the PR's commits survive (see exec.Spawn.PreserveBranch).

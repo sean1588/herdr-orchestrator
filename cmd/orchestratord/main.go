@@ -45,6 +45,10 @@ import (
 	"github.com/sean1588/herdr-orchestrator/internal/store"
 )
 
+// version is the binary's reported version. Overridable at build time via
+// -ldflags "-X main.version=...".
+var version = "dev"
+
 func main() { os.Exit(run(os.Args[1:])) }
 
 func run(args []string) int {
@@ -63,6 +67,8 @@ func run(args []string) int {
 		return cmdRecover(args[1:])
 	case "daemon":
 		return cmdDaemon(args[1:])
+	case "version":
+		return cmdVersion(os.Stdout)
 	case "-h", "--help", "help":
 		usage(os.Stdout)
 		return 0
@@ -82,6 +88,7 @@ commands:
   run --config <c> --repo <dir> --issue <n>      drive one issue to merged
   recover --config <c> --repo <dir>              reconcile/resume in-flight tasks
   daemon --config <c> --repo <dir>               poll a labeled source and drive concurrently
+  version                                        print the orchestratord version
 
 run/recover/daemon flags:
   --config PATH          workflow config (required)
@@ -94,6 +101,12 @@ run/recover/daemon flags:
   --notify-webhook URL   POST escalation/alert events as JSON (default: none)
   --poll-interval DUR    daemon source poll cadence (default 30s)
 `)
+}
+
+// cmdVersion prints the binary's version on a single line and returns 0.
+func cmdVersion(w io.Writer) int {
+	fmt.Fprintf(w, "orchestratord %s\n", version)
+	return 0
 }
 
 // cmdValidate validates a workflow config, exit 0 if valid (warnings allowed),

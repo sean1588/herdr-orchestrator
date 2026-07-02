@@ -29,6 +29,7 @@ func TestRun_Dispatch(t *testing.T) {
 		{"run missing issue", []string{"run", "--config", goodFixture, "--repo", "."}, 2},
 		{"recover missing flags", []string{"recover"}, 2},
 		{"daemon missing flags", []string{"daemon"}, 2},
+		{"version", []string{"version"}, 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -36,6 +37,23 @@ func TestRun_Dispatch(t *testing.T) {
 				t.Errorf("run(%v) = %d, want %d", tc.args, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestCmdVersion(t *testing.T) {
+	var buf bytes.Buffer
+	if got := cmdVersion(&buf); got != 0 {
+		t.Errorf("cmdVersion = %d, want 0", got)
+	}
+	out := strings.TrimSpace(buf.String())
+	if out == "" {
+		t.Fatal("cmdVersion wrote no output")
+	}
+	if strings.Count(buf.String(), "\n") != 1 {
+		t.Errorf("cmdVersion should write a single line, got %q", buf.String())
+	}
+	if !strings.Contains(out, version) {
+		t.Errorf("cmdVersion output %q does not contain version %q", out, version)
 	}
 }
 

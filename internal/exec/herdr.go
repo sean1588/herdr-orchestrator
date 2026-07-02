@@ -21,6 +21,7 @@ type Herdr struct {
 	GitBin       string        // default "git"
 	HerdrBin     string        // default "herdr"
 	WorktreesDir string        // parent dir for worktrees; "" => sibling of the repo
+	RepoDir      string        // main checkout; lets Cleanup resolve a task's worktree path without a live pane
 	ReadyMatch   string        // readiness marker awaited before the kickoff; default ">"
 	ReadyTimeout time.Duration // bound on the readiness wait; default 20s
 	WaitTimeout  time.Duration // WaitState bound when ctx has no sooner deadline; default 45m
@@ -224,14 +225,49 @@ func (h *Herdr) Close(ctx context.Context, hd Handle) error {
 	return nil
 }
 
+// Cleanup removes a settled task's isolated git worktree and closes its herdr
+// workspace, keyed by the durable taskID label. It runs when a task halts at a
+// no-PR terminal state (a triage reject -> closed, or a needs_human / failed-drive
+// escalation -> escalated), so a settled issue leaves nothing registered.
+//
+// The worktree path is resolved deterministically (the same convention Spawn uses),
+// so cleanup works even after the agent pane has exited — the exact state a
+// failed-drive escalation produces. Both operations are best-effort and
+// idempotent-safe: an already-removed worktree or already-closed workspace must not
+// fail the drive. Only a failure to close a still-present workspace is surfaced (the
+// engine logs it and continues).
+func (h *Herdr) Cleanup(ctx context.Context, taskID string) error {
+	wsID, err := h.workspaceByLabel(ctx, taskID)
+	if err != nil {
+		return fmt.Errorf("cleanup %s: %w", taskID, err)
+	}
+	if wsID == "" {
+		return nil // nothing registered under this label — already clean
+	}
+	// Remove the worktree at its deterministic path (mirrors Spawn's prior-attempt
+	// cleanup, run with -C RepoDir). Best-effort: an already-gone worktree is fine,
+	// and this does not depend on a live agent pane.
+	wt := h.worktreeDir(h.RepoDir, taskID)
+	_, _ = h.r.Run(ctx, "", h.GitBin, "-C", h.RepoDir, "worktree", "remove", wt, "--force")
+	if _, err := h.r.Run(ctx, "", h.HerdrBin, "workspace", "close", wsID); err != nil {
+		return fmt.Errorf("cleanup %s: close workspace %s: %w", taskID, wsID, err)
+	}
+	return nil
+}
+
 // --- helpers ---
 
-func (h *Herdr) worktreePath(s Spawn) string {
+func (h *Herdr) worktreePath(s Spawn) string { return h.worktreeDir(s.RepoDir, s.TaskID) }
+
+// worktreeDir is a task's deterministic worktree path: WorktreesDir (or the repo's
+// sibling dir when unset) + "wt-<taskID>". Shared by Spawn (via the Spawn's RepoDir)
+// and Cleanup (via the backend's RepoDir) so setup and teardown agree on the path.
+func (h *Herdr) worktreeDir(repoDir, taskID string) string {
 	base := h.WorktreesDir
 	if base == "" {
-		base = filepath.Dir(s.RepoDir)
+		base = filepath.Dir(repoDir)
 	}
-	return filepath.Join(base, "wt-"+s.TaskID)
+	return filepath.Join(base, "wt-"+taskID)
 }
 
 type paneInfo struct {

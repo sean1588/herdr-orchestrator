@@ -24,6 +24,8 @@ type fakeBackend struct {
 	resolveErr error
 	spawns     int
 	spawnLog   []exec.Spawn
+	cleanups   []string // taskIDs Cleanup was called with
+	cleanupErr error
 }
 
 func (f *fakeBackend) Spawn(ctx context.Context, s exec.Spawn) (exec.Handle, error) {
@@ -59,6 +61,10 @@ func (f *fakeBackend) Resolve(ctx context.Context, label string) (exec.Handle, b
 	return exec.Handle{PaneID: f.pane, Workdir: "/wt"}, f.resolve, nil
 }
 func (f *fakeBackend) Close(ctx context.Context, h exec.Handle) error { return nil }
+func (f *fakeBackend) Cleanup(ctx context.Context, taskID string) error {
+	f.cleanups = append(f.cleanups, taskID)
+	return f.cleanupErr
+}
 
 type fakeGH struct {
 	pr    *github.PR

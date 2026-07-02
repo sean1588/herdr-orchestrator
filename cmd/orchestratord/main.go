@@ -294,6 +294,7 @@ func (cf commonFlags) wire(ctx context.Context) (*wired, error) {
 
 	runner := proc.New()
 	backend := exec.NewHerdr(runner)
+	backend.RepoDir = absRepo // lets Cleanup resolve a task's worktree path deterministically
 	if cf.worktreesDir != "" {
 		backend.WorktreesDir = cf.worktreesDir
 	}

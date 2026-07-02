@@ -33,8 +33,8 @@ func writeVerdict(t *testing.T, dir, taskID, body string) {
 	}
 }
 
-// reviewerDoneBackend emits a single agent.done for the reviewer pane.
-func reviewerDoneBackend() *fakeBackend {
+// agentDoneBackend emits a single agent.done for the spawned pane (any role).
+func agentDoneBackend() *fakeBackend {
 	return &fakeBackend{pane: "w1:p1", events: []exec.Event{
 		{PaneID: "w1:p1", State: exec.StateWorking},
 		{PaneID: "w1:p1", State: exec.StateDone},
@@ -56,7 +56,7 @@ func TestPROpen_ReviewVerdict_Branches(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			st := newStore(t)
-			b := reviewerDoneBackend()
+			b := agentDoneBackend()
 			e := newEngine(t, st, b, &fakeGH{}, 5*time.Second)
 			if tt.halt != "" {
 				e.goal = tt.halt
@@ -83,7 +83,7 @@ func TestPROpen_ReviewVerdict_Branches(t *testing.T) {
 
 func TestPROpen_ReviewerTask_CarriesRubricAndVerdictInstruction(t *testing.T) {
 	st := newStore(t)
-	b := reviewerDoneBackend()
+	b := agentDoneBackend()
 	e := newEngine(t, st, b, &fakeGH{}, 5*time.Second)
 	e.goal = "approved"
 	task := seedPROpen(t, st, 42)
@@ -112,7 +112,7 @@ func TestPROpen_ReviewerTask_CarriesRubricAndVerdictInstruction(t *testing.T) {
 
 func TestPROpen_InvalidVerdict_IsError(t *testing.T) {
 	st := newStore(t)
-	b := reviewerDoneBackend()
+	b := agentDoneBackend()
 	e := newEngine(t, st, b, &fakeGH{}, 5*time.Second)
 	e.goal = "approved"
 	task := seedPROpen(t, st, 42)
@@ -125,7 +125,7 @@ func TestPROpen_InvalidVerdict_IsError(t *testing.T) {
 
 func TestPROpen_MissingVerdictFile_IsError(t *testing.T) {
 	st := newStore(t)
-	b := reviewerDoneBackend()
+	b := agentDoneBackend()
 	e := newEngine(t, st, b, &fakeGH{}, 5*time.Second)
 	e.goal = "approved"
 	task := seedPROpen(t, st, 42)

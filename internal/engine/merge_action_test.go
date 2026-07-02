@@ -12,7 +12,8 @@ import (
 func TestMerging_DryRun_HaltsWithoutMerging(t *testing.T) {
 	st := newStore(t)
 	gh := &fakeGH{} // default-pipeline ships dry_run: true
-	e := newEngine(t, st, &fakeBackend{}, gh, 5*time.Second)
+	b := &fakeBackend{}
+	e := newEngine(t, st, b, gh, 5*time.Second)
 	task := seedAt(t, st, "merging", 42, nil)
 
 	final, err := e.drive(context.Background(), task)
@@ -24,6 +25,9 @@ func TestMerging_DryRun_HaltsWithoutMerging(t *testing.T) {
 	}
 	if gh.merges != 0 {
 		t.Errorf("dry-run must not call Merge, got %d calls", gh.merges)
+	}
+	if len(b.cleanups) != 0 {
+		t.Errorf("dry-run merging halt is not terminal and must not trigger cleanup, got %v", b.cleanups)
 	}
 	if !hasAudit(auditFor(t, st, task.ID), "merging", "merging", "dry_run", "would_merge") {
 		t.Error("missing dry-run audit row")

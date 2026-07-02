@@ -432,20 +432,13 @@ func cmdDaemon(args []string) int {
 		workers = 1
 	}
 
+	dc := doneChecker{gh: w.gh, store: w.store, settled: settled, repoDir: w.repoDir, label: label, log: slog.Default()}
+
 	sched := &scheduler.Scheduler{
 		List: func(ctx context.Context) ([]int, error) {
 			return w.gh.ListIssues(ctx, w.repoDir, label)
 		},
-		Done: func(ctx context.Context, issue int) (bool, error) {
-			tk, err := w.store.GetTask(ctx, engine.TaskID(issue))
-			if errors.Is(err, store.ErrNotFound) {
-				return false, nil
-			}
-			if err != nil {
-				return false, err
-			}
-			return settled[tk.CurrentState], nil
-		},
+		Done: dc.done,
 		RunTask: func(ctx context.Context, issue int) error {
 			_, err := w.eng.Run(ctx, issue)
 			return err
@@ -516,6 +509,43 @@ func settledStates(wf *config.Workflow) map[string]bool {
 		}
 	}
 	return out
+}
+
+// doneChecker implements the scheduler's Done seam: it reports whether a polled
+// issue's task has settled and, on the settled path, drains the source label so
+// the poller stops re-listing it. It groups the poll-time dependencies so the
+// scheduler callback stays a plain (ctx, issue) func.
+type doneChecker struct {
+	gh      github.Client
+	store   *store.Store
+	settled map[string]bool
+	repoDir string
+	label   string
+	log     *slog.Logger
+}
+
+// done reports whether the issue's task is settled. A missing task is not
+// settled (it has never been driven). When settled, the issue still carries the
+// source label (it was just returned by ListIssues), so removing it drains the
+// backlog: subsequent polls no longer list it. Removal is best-effort — a
+// failure is logged and the issue reports done anyway, so the worker pool is
+// never wedged; the still-labelled issue is simply retried next poll, and
+// RemoveLabel is idempotent.
+func (d doneChecker) done(ctx context.Context, issue int) (bool, error) {
+	tk, err := d.store.GetTask(ctx, engine.TaskID(issue))
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !d.settled[tk.CurrentState] {
+		return false, nil
+	}
+	if err := d.gh.RemoveLabel(ctx, d.repoDir, issue, d.label); err != nil {
+		d.log.Warn("remove source label failed", "issue", issue, "label", d.label, "err", err)
+	}
+	return true, nil
 }
 
 // reportConfigErr prints a config validation failure (refusing to run) or a

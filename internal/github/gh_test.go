@@ -169,3 +169,45 @@ func TestIssue_UnparseableJSONIsError(t *testing.T) {
 		t.Errorf("want wrapped parse error mentioning issue, got %v", err)
 	}
 }
+
+func TestRemoveLabel(t *testing.T) {
+	fake := &proc.Fake{Responder: func(c proc.Call) ([]byte, error) {
+		return nil, nil
+	}}
+	c := New(fake)
+
+	if err := c.RemoveLabel(context.Background(), "/repo", 5, "agent-ready"); err != nil {
+		t.Fatalf("RemoveLabel: %v", err)
+	}
+
+	if len(fake.Calls) != 1 {
+		t.Fatalf("want 1 call, got %d", len(fake.Calls))
+	}
+	call := fake.Calls[0]
+	if call.Name != "gh" {
+		t.Errorf("Name = %q, want gh", call.Name)
+	}
+	if call.Dir != "/repo" {
+		t.Errorf("Dir = %q, want /repo", call.Dir)
+	}
+	wantArgv := []string{"issue", "edit", "5", "--remove-label", "agent-ready"}
+	if !reflect.DeepEqual(call.Args, wantArgv) {
+		t.Errorf("Args = %v, want %v", call.Args, wantArgv)
+	}
+}
+
+func TestRemoveLabel_RunnerErrorIsWrapped(t *testing.T) {
+	sentinel := errors.New("gh boom")
+	fake := &proc.Fake{Responder: func(c proc.Call) ([]byte, error) {
+		return nil, sentinel
+	}}
+	c := New(fake)
+
+	err := c.RemoveLabel(context.Background(), "/repo", 5, "agent-ready")
+	if err == nil {
+		t.Fatal("want error")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("error %v does not wrap sentinel", err)
+	}
+}

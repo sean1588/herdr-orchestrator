@@ -11,14 +11,6 @@ import (
 	"github.com/sean1588/herdr-orchestrator/internal/store"
 )
 
-// triagerDoneBackend emits a single agent.done for the triager pane.
-func triagerDoneBackend() *fakeBackend {
-	return &fakeBackend{pane: "w1:p1", events: []exec.Event{
-		{PaneID: "w1:p1", State: exec.StateWorking},
-		{PaneID: "w1:p1", State: exec.StateDone},
-	}}
-}
-
 func newIntakeTask(t *testing.T, st *store.Store) *store.Task {
 	t.Helper()
 	task := &store.Task{ID: "issue-9", Issue: 9, Branch: "agent/issue-9", CurrentState: "intake"}
@@ -38,9 +30,8 @@ func TestDrive_NoPRTerminal_Cleans(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			st := newStore(t)
-			b := triagerDoneBackend()
+			b := agentDoneBackend()
 			e := newEngine(t, st, b, &fakeGH{}, 5*time.Second)
-			e.goal = "merged" // terminal is reached en route to a non-terminal goal
 			task := newIntakeTask(t, st)
 			writeVerdict(t, e.taskDir, task.ID, `{"verdict":"`+tt.verdict+`","feedback":""}`)
 
@@ -65,10 +56,9 @@ func TestDrive_NoPRTerminal_Cleans(t *testing.T) {
 // normally with the settled state.
 func TestDrive_CleanupError_DoesNotFailDrive(t *testing.T) {
 	st := newStore(t)
-	b := triagerDoneBackend()
+	b := agentDoneBackend()
 	b.cleanupErr = errors.New("herdr momentarily unavailable")
 	e := newEngine(t, st, b, &fakeGH{}, 5*time.Second)
-	e.goal = "merged"
 	task := newIntakeTask(t, st)
 	writeVerdict(t, e.taskDir, task.ID, `{"verdict":"reject","feedback":""}`)
 
@@ -79,8 +69,8 @@ func TestDrive_CleanupError_DoesNotFailDrive(t *testing.T) {
 	if final != "closed" {
 		t.Fatalf("final = %q, want closed", final)
 	}
-	if len(b.cleanups) != 1 {
-		t.Errorf("Cleanup should still have been attempted, got %v", b.cleanups)
+	if len(b.cleanups) != 1 || b.cleanups[0] != task.ID {
+		t.Errorf("Cleanup should still have been attempted once with %q, got %v", task.ID, b.cleanups)
 	}
 }
 
@@ -89,9 +79,8 @@ func TestDrive_CleanupError_DoesNotFailDrive(t *testing.T) {
 // no cleanup runs.
 func TestDrive_TerminalWithPR_DoesNotClean(t *testing.T) {
 	st := newStore(t)
-	b := reviewerDoneBackend()
+	b := agentDoneBackend()
 	e := newEngine(t, st, b, &fakeGH{}, 5*time.Second)
-	e.goal = "merged" // let pr_open execute; escalated is terminal en route
 	task := seedPROpen(t, st, 42)
 	writeVerdict(t, e.taskDir, task.ID, `{"verdict":"escalate","feedback":""}`)
 

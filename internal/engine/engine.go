@@ -229,8 +229,8 @@ func (e *Engine) drive(ctx context.Context, task *store.Task) (string, error) {
 		if e.isHalt(task.CurrentState) {
 			if transitioned {
 				e.notifyTerminalAlert(ctx, task)
+				e.maybeCleanup(ctx, task)
 			}
-			e.maybeCleanup(ctx, task)
 			e.log.Info("halt", "task", task.ID, "state", task.CurrentState, "pr", prNum(task))
 			return task.CurrentState, nil
 		}
@@ -763,13 +763,18 @@ func (e *Engine) isTerminal(state string) bool {
 	return ok && st.Terminal != ""
 }
 
-// maybeCleanup tears down a settled task's isolated worktree + herdr workspace
-// when it halts at a terminal state with no PR — a triage reject (-> closed) or an
-// intake needs_human (-> escalated), which otherwise leave a wt-issue-<n> worktree
-// and workspace registered. Terminal states that produced a PR (and the dry-run
-// merging halt) keep their branch/PR on GitHub, so a human may still want the
-// local worktree — those are left alone. Cleanup is best-effort: a failure is
-// logged and never fails or blocks the drive.
+// maybeCleanup tears down a settled task's isolated worktree + herdr workspace when
+// it halts at a terminal state with no PR. This covers every no-PR terminal: a
+// triage reject (-> closed), an intake needs_human (-> escalated), and a failed
+// implementation that escalates before opening a PR (-> escalated) — each of which
+// would otherwise leave a wt-issue-<n> worktree and workspace registered. Terminal
+// states that produced a PR keep their branch/PR on GitHub (a human may still want
+// the local worktree), and the dry-run `merging` halt is not terminal; both are
+// left alone. Cleanup is best-effort: a failure is logged and never fails the drive.
+//
+// Only called on the drive that actually transitions into the terminal (see the
+// `transitioned` guard at the halt site), so a re-run of an already-settled task
+// does not repeat the teardown.
 func (e *Engine) maybeCleanup(ctx context.Context, task *store.Task) {
 	if task.PRNumber != nil || !e.isTerminal(task.CurrentState) {
 		return

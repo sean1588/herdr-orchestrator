@@ -21,6 +21,7 @@ type Herdr struct {
 	GitBin       string        // default "git"
 	HerdrBin     string        // default "herdr"
 	WorktreesDir string        // parent dir for worktrees; "" => sibling of the repo
+	RepoDir      string        // main checkout; lets Cleanup resolve a task's worktree path without a live pane
 	ReadyMatch   string        // readiness marker awaited before the kickoff; default ">"
 	ReadyTimeout time.Duration // bound on the readiness wait; default 20s
 	WaitTimeout  time.Duration // WaitState bound when ctx has no sooner deadline; default 45m
@@ -226,12 +227,15 @@ func (h *Herdr) Close(ctx context.Context, hd Handle) error {
 
 // Cleanup removes a settled task's isolated git worktree and closes its herdr
 // workspace, keyed by the durable taskID label. It runs when a task halts at a
-// no-PR terminal state (e.g. a triage reject -> closed, or an intake needs_human
-// -> escalated), so a rejected/escalated issue leaves nothing registered.
+// no-PR terminal state (a triage reject -> closed, or a needs_human / failed-drive
+// escalation -> escalated), so a settled issue leaves nothing registered.
 //
-// Both operations are best-effort and idempotent-safe: an already-removed
-// worktree or already-closed workspace must not fail the drive. Only a failure to
-// close a still-present workspace is surfaced (the engine logs it and continues).
+// The worktree path is resolved deterministically (the same convention Spawn uses),
+// so cleanup works even after the agent pane has exited — the exact state a
+// failed-drive escalation produces. Both operations are best-effort and
+// idempotent-safe: an already-removed worktree or already-closed workspace must not
+// fail the drive. Only a failure to close a still-present workspace is surfaced (the
+// engine logs it and continues).
 func (h *Herdr) Cleanup(ctx context.Context, taskID string) error {
 	wsID, err := h.workspaceByLabel(ctx, taskID)
 	if err != nil {
@@ -240,14 +244,11 @@ func (h *Herdr) Cleanup(ctx context.Context, taskID string) error {
 	if wsID == "" {
 		return nil // nothing registered under this label — already clean
 	}
-	// The isolated worktree lives at the workspace pane's cwd (set to the worktree
-	// at spawn). Resolve it BEFORE closing the workspace, which removes the pane.
-	// Removing the worktree is best-effort — an already-gone worktree is fine — so
-	// we ignore its error; git worktree remove tolerates being run from the
-	// worktree it removes (see Cleanup tests).
-	if wt := h.workspaceCwd(ctx, wsID); wt != "" {
-		_, _ = h.r.Run(ctx, "", h.GitBin, "-C", wt, "worktree", "remove", wt, "--force")
-	}
+	// Remove the worktree at its deterministic path (mirrors Spawn's prior-attempt
+	// cleanup, run with -C RepoDir). Best-effort: an already-gone worktree is fine,
+	// and this does not depend on a live agent pane.
+	wt := h.worktreeDir(h.RepoDir, taskID)
+	_, _ = h.r.Run(ctx, "", h.GitBin, "-C", h.RepoDir, "worktree", "remove", wt, "--force")
 	if _, err := h.r.Run(ctx, "", h.HerdrBin, "workspace", "close", wsID); err != nil {
 		return fmt.Errorf("cleanup %s: close workspace %s: %w", taskID, wsID, err)
 	}
@@ -256,12 +257,17 @@ func (h *Herdr) Cleanup(ctx context.Context, taskID string) error {
 
 // --- helpers ---
 
-func (h *Herdr) worktreePath(s Spawn) string {
+func (h *Herdr) worktreePath(s Spawn) string { return h.worktreeDir(s.RepoDir, s.TaskID) }
+
+// worktreeDir is a task's deterministic worktree path: WorktreesDir (or the repo's
+// sibling dir when unset) + "wt-<taskID>". Shared by Spawn (via the Spawn's RepoDir)
+// and Cleanup (via the backend's RepoDir) so setup and teardown agree on the path.
+func (h *Herdr) worktreeDir(repoDir, taskID string) string {
 	base := h.WorktreesDir
 	if base == "" {
-		base = filepath.Dir(s.RepoDir)
+		base = filepath.Dir(repoDir)
 	}
-	return filepath.Join(base, "wt-"+s.TaskID)
+	return filepath.Join(base, "wt-"+taskID)
 }
 
 type paneInfo struct {
@@ -310,21 +316,6 @@ func (h *Herdr) workspaceByLabel(ctx context.Context, label string) (string, err
 		}
 	}
 	return "", nil
-}
-
-// workspaceCwd returns the cwd of the pane carrying wsID (= the task's worktree
-// path), or "" if no live pane is found for that workspace.
-func (h *Herdr) workspaceCwd(ctx context.Context, wsID string) string {
-	panes, err := h.listPanes(ctx)
-	if err != nil {
-		return ""
-	}
-	for _, p := range panes {
-		if p.WorkspaceID == wsID {
-			return p.Cwd
-		}
-	}
-	return ""
 }
 
 func (h *Herdr) workspaceForPane(ctx context.Context, paneID string) (string, error) {

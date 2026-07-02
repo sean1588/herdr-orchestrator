@@ -319,8 +319,8 @@ func TestResolve_ByLabel(t *testing.T) {
 	}
 }
 
-// noCall asserts that no recorded call matches name + the given arg subsequence
-// (all args present, in order-agnostic membership).
+// hasNoCallContaining asserts that no recorded call matches name + the given arg
+// subsequence (all args present, order-agnostic membership).
 func hasNoCallContaining(t *testing.T, calls []proc.Call, name string, wantArgs ...string) {
 	t.Helper()
 	for _, c := range calls {
@@ -340,43 +340,68 @@ func hasNoCallContaining(t *testing.T, calls []proc.Call, name string, wantArgs 
 	}
 }
 
-// cleanupResponder answers workspace/pane list so a labeled workspace resolves to
-// a worktree path; other calls succeed by default.
-func cleanupResponder(label, wsID, cwd string) func(proc.Call) ([]byte, error) {
+// wsListResponder answers `herdr workspace list` with a single workspace under
+// label (or none when wsID==""); other calls succeed by default.
+func wsListResponder(label, wsID string) func(proc.Call) ([]byte, error) {
 	return func(c proc.Call) ([]byte, error) {
-		switch {
-		case c.Name == "herdr" && len(c.Args) >= 2 && c.Args[0] == "workspace" && c.Args[1] == "list":
+		if c.Name == "herdr" && len(c.Args) >= 2 && c.Args[0] == "workspace" && c.Args[1] == "list" {
+			if wsID == "" {
+				return []byte(`{"result":{"workspaces":[]}}`), nil
+			}
 			return []byte(fmt.Sprintf(`{"result":{"workspaces":[{"workspace_id":%q,"label":%q}]}}`, wsID, label)), nil
-		case c.Name == "herdr" && len(c.Args) >= 2 && c.Args[0] == "pane" && c.Args[1] == "list":
-			return []byte(fmt.Sprintf(`{"result":{"panes":[{"pane_id":"p1","agent_status":"done","workspace_id":%q,"cwd":%q}]}}`, wsID, cwd)), nil
 		}
 		return nil, nil
 	}
 }
 
-// Cleanup removes the task's isolated worktree and closes its herdr workspace,
-// keyed by the durable taskID label.
+// cleanupBackend wires a Herdr with deterministic worktree resolution, so a task's
+// worktree path is WorktreesDir + "wt-<taskID>" (here /wt/wt-<taskID>) with no live
+// pane required.
+func cleanupBackend(r proc.Runner) *Herdr {
+	h := NewHerdr(r)
+	h.WorktreesDir = "/wt"
+	h.RepoDir = "/repo"
+	return h
+}
+
+// Cleanup removes the task's worktree at its DETERMINISTIC path and closes its
+// herdr workspace, keyed by the durable taskID label.
 func TestCleanup_RemovesWorktreeAndClosesWorkspace(t *testing.T) {
-	f := &proc.Fake{Responder: cleanupResponder("issue-5", "wZ", "/home/u/wt-issue-5")}
-	if err := NewHerdr(f).Cleanup(context.Background(), "issue-5"); err != nil {
+	f := &proc.Fake{Responder: wsListResponder("issue-5", "wZ")}
+	if err := cleanupBackend(f).Cleanup(context.Background(), "issue-5"); err != nil {
 		t.Fatalf("cleanup: %v", err)
 	}
 	calls := f.Snapshot()
-	// Worktree removed at the workspace's cwd, workspace closed by its id.
-	hasExactCall(t, calls, "git", "-C", "/home/u/wt-issue-5", "worktree", "remove", "/home/u/wt-issue-5", "--force")
+	hasExactCall(t, calls, "git", "-C", "/repo", "worktree", "remove", "/wt/wt-issue-5", "--force")
 	hasExactCall(t, calls, "herdr", "workspace", "close", "wZ")
 }
 
-// An unknown label => nothing registered; Cleanup is a no-op and errors nothing
-// (idempotent-safe: a re-run after a prior cleanup must not fail the drive).
-func TestCleanup_UnknownLabel_NoOp(t *testing.T) {
+// A failed-drive escalation closes the agent pane before cleanup runs: the workspace
+// is still registered but no pane carries it. Cleanup must STILL remove the worktree
+// via its deterministic path — the case the old live-pane lookup silently missed.
+func TestCleanup_NoLivePane_StillRemovesWorktree(t *testing.T) {
 	f := &proc.Fake{Responder: func(c proc.Call) ([]byte, error) {
-		if c.Name == "herdr" && len(c.Args) >= 2 && c.Args[0] == "workspace" && c.Args[1] == "list" {
-			return []byte(`{"result":{"workspaces":[]}}`), nil
+		switch {
+		case c.Name == "herdr" && len(c.Args) >= 2 && c.Args[0] == "workspace" && c.Args[1] == "list":
+			return []byte(`{"result":{"workspaces":[{"workspace_id":"wZ","label":"issue-5"}]}}`), nil
+		case c.Name == "herdr" && len(c.Args) >= 2 && c.Args[0] == "pane" && c.Args[1] == "list":
+			return []byte(`{"result":{"panes":[]}}`), nil // pane already gone
 		}
 		return nil, nil
 	}}
-	if err := NewHerdr(f).Cleanup(context.Background(), "issue-404"); err != nil {
+	if err := cleanupBackend(f).Cleanup(context.Background(), "issue-5"); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	calls := f.Snapshot()
+	hasExactCall(t, calls, "git", "-C", "/repo", "worktree", "remove", "/wt/wt-issue-5", "--force")
+	hasExactCall(t, calls, "herdr", "workspace", "close", "wZ")
+}
+
+// An unknown label => nothing registered; Cleanup is a no-op (no worktree removal,
+// no workspace close) and errors nothing (idempotent-safe re-run).
+func TestCleanup_UnknownLabel_NoOp(t *testing.T) {
+	f := &proc.Fake{Responder: wsListResponder("issue-5", "")}
+	if err := cleanupBackend(f).Cleanup(context.Background(), "issue-404"); err != nil {
 		t.Fatalf("cleanup unknown label should be a no-op, got %v", err)
 	}
 	calls := f.Snapshot()
@@ -387,14 +412,14 @@ func TestCleanup_UnknownLabel_NoOp(t *testing.T) {
 // A failing worktree removal (e.g. already gone) must not fail cleanup: the
 // worktree remove is best-effort; the workspace is still closed.
 func TestCleanup_WorktreeRemoveFailure_StillClosesWorkspace(t *testing.T) {
-	base := cleanupResponder("issue-5", "wZ", "/home/u/wt-issue-5")
+	base := wsListResponder("issue-5", "wZ")
 	f := &proc.Fake{Responder: func(c proc.Call) ([]byte, error) {
 		if c.Name == "git" && slices.Contains(c.Args, "worktree") && slices.Contains(c.Args, "remove") {
-			return nil, fmt.Errorf("fatal: cannot change to worktree")
+			return nil, fmt.Errorf("fatal: cannot remove worktree")
 		}
 		return base(c)
 	}}
-	if err := NewHerdr(f).Cleanup(context.Background(), "issue-5"); err != nil {
+	if err := cleanupBackend(f).Cleanup(context.Background(), "issue-5"); err != nil {
 		t.Fatalf("worktree-remove failure must be swallowed, got %v", err)
 	}
 	hasExactCall(t, f.Snapshot(), "herdr", "workspace", "close", "wZ")
@@ -403,14 +428,14 @@ func TestCleanup_WorktreeRemoveFailure_StillClosesWorkspace(t *testing.T) {
 // A failing workspace close is surfaced (the engine logs it and continues), so
 // the caller can observe cleanup that only partially succeeded.
 func TestCleanup_WorkspaceCloseFailure_IsReturned(t *testing.T) {
-	base := cleanupResponder("issue-5", "wZ", "/home/u/wt-issue-5")
+	base := wsListResponder("issue-5", "wZ")
 	f := &proc.Fake{Responder: func(c proc.Call) ([]byte, error) {
 		if c.Name == "herdr" && len(c.Args) >= 2 && c.Args[0] == "workspace" && c.Args[1] == "close" {
 			return nil, fmt.Errorf("herdr unavailable")
 		}
 		return base(c)
 	}}
-	if err := NewHerdr(f).Cleanup(context.Background(), "issue-5"); err == nil {
+	if err := cleanupBackend(f).Cleanup(context.Background(), "issue-5"); err == nil {
 		t.Fatal("workspace-close failure should be returned")
 	}
 }

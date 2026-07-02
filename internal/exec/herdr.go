@@ -224,6 +224,36 @@ func (h *Herdr) Close(ctx context.Context, hd Handle) error {
 	return nil
 }
 
+// Cleanup removes a settled task's isolated git worktree and closes its herdr
+// workspace, keyed by the durable taskID label. It runs when a task halts at a
+// no-PR terminal state (e.g. a triage reject -> closed, or an intake needs_human
+// -> escalated), so a rejected/escalated issue leaves nothing registered.
+//
+// Both operations are best-effort and idempotent-safe: an already-removed
+// worktree or already-closed workspace must not fail the drive. Only a failure to
+// close a still-present workspace is surfaced (the engine logs it and continues).
+func (h *Herdr) Cleanup(ctx context.Context, taskID string) error {
+	wsID, err := h.workspaceByLabel(ctx, taskID)
+	if err != nil {
+		return fmt.Errorf("cleanup %s: %w", taskID, err)
+	}
+	if wsID == "" {
+		return nil // nothing registered under this label — already clean
+	}
+	// The isolated worktree lives at the workspace pane's cwd (set to the worktree
+	// at spawn). Resolve it BEFORE closing the workspace, which removes the pane.
+	// Removing the worktree is best-effort — an already-gone worktree is fine — so
+	// we ignore its error; git worktree remove tolerates being run from the
+	// worktree it removes (see Cleanup tests).
+	if wt := h.workspaceCwd(ctx, wsID); wt != "" {
+		_, _ = h.r.Run(ctx, "", h.GitBin, "-C", wt, "worktree", "remove", wt, "--force")
+	}
+	if _, err := h.r.Run(ctx, "", h.HerdrBin, "workspace", "close", wsID); err != nil {
+		return fmt.Errorf("cleanup %s: close workspace %s: %w", taskID, wsID, err)
+	}
+	return nil
+}
+
 // --- helpers ---
 
 func (h *Herdr) worktreePath(s Spawn) string {
@@ -280,6 +310,21 @@ func (h *Herdr) workspaceByLabel(ctx context.Context, label string) (string, err
 		}
 	}
 	return "", nil
+}
+
+// workspaceCwd returns the cwd of the pane carrying wsID (= the task's worktree
+// path), or "" if no live pane is found for that workspace.
+func (h *Herdr) workspaceCwd(ctx context.Context, wsID string) string {
+	panes, err := h.listPanes(ctx)
+	if err != nil {
+		return ""
+	}
+	for _, p := range panes {
+		if p.WorkspaceID == wsID {
+			return p.Cwd
+		}
+	}
+	return ""
 }
 
 func (h *Herdr) workspaceForPane(ctx context.Context, paneID string) (string, error) {

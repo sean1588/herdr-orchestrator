@@ -230,6 +230,7 @@ func (e *Engine) drive(ctx context.Context, task *store.Task) (string, error) {
 			if transitioned {
 				e.notifyTerminalAlert(ctx, task)
 			}
+			e.maybeCleanup(ctx, task)
 			e.log.Info("halt", "task", task.ID, "state", task.CurrentState, "pr", prNum(task))
 			return task.CurrentState, nil
 		}
@@ -754,11 +755,28 @@ func (e *Engine) checkRetryCap(task *store.Task, st config.State) (target string
 }
 
 func (e *Engine) isHalt(state string) bool {
-	if state == e.goal {
-		return true
-	}
+	return state == e.goal || e.isTerminal(state)
+}
+
+func (e *Engine) isTerminal(state string) bool {
 	st, ok := e.wf.States[state]
 	return ok && st.Terminal != ""
+}
+
+// maybeCleanup tears down a settled task's isolated worktree + herdr workspace
+// when it halts at a terminal state with no PR — a triage reject (-> closed) or an
+// intake needs_human (-> escalated), which otherwise leave a wt-issue-<n> worktree
+// and workspace registered. Terminal states that produced a PR (and the dry-run
+// merging halt) keep their branch/PR on GitHub, so a human may still want the
+// local worktree — those are left alone. Cleanup is best-effort: a failure is
+// logged and never fails or blocks the drive.
+func (e *Engine) maybeCleanup(ctx context.Context, task *store.Task) {
+	if task.PRNumber != nil || !e.isTerminal(task.CurrentState) {
+		return
+	}
+	if err := e.backend.Cleanup(ctx, task.ID); err != nil {
+		e.log.Warn("cleanup failed", "task", task.ID, "state", task.CurrentState, "err", err)
+	}
 }
 
 // --- small helpers ---

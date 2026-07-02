@@ -2,11 +2,62 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
+	"io"
+	"log/slog"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/sean1588/herdr-orchestrator/internal/config"
+	"github.com/sean1588/herdr-orchestrator/internal/engine"
+	"github.com/sean1588/herdr-orchestrator/internal/github"
+	"github.com/sean1588/herdr-orchestrator/internal/store"
 )
+
+// fakeGH is a github.Client that records RemoveLabel calls and otherwise does
+// nothing, so the daemon's settled-issue label drain can be tested in isolation.
+type fakeGH struct {
+	removed   []removeCall
+	removeErr error
+}
+
+type removeCall struct {
+	repoDir string
+	number  int
+	label   string
+}
+
+func (f *fakeGH) FindPR(ctx context.Context, repoDir, branch string) (*github.PR, error) {
+	return nil, nil
+}
+func (f *fakeGH) Issue(ctx context.Context, repoDir string, number int) (*github.Issue, error) {
+	return nil, nil
+}
+func (f *fakeGH) ListIssues(ctx context.Context, repoDir, label string) ([]int, error) {
+	return nil, nil
+}
+func (f *fakeGH) RemoveLabel(ctx context.Context, repoDir string, number int, label string) error {
+	f.removed = append(f.removed, removeCall{repoDir: repoDir, number: number, label: label})
+	return f.removeErr
+}
+func (f *fakeGH) PRStatus(ctx context.Context, repoDir string, pr int) (*github.PRStatus, error) {
+	return nil, nil
+}
+func (f *fakeGH) Merge(ctx context.Context, repoDir string, pr int) error { return nil }
+
+func newStore(t *testing.T) *store.Store {
+	t.Helper()
+	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "tasks.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	return st
+}
+
+func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
 const (
 	goodFixture   = "../../internal/config/testdata/default-pipeline.yaml"
@@ -169,6 +220,87 @@ func TestSettledStates(t *testing.T) {
 	}
 	if !settled["merged"] {
 		t.Error(`settledStates: "merged" must stay settled`)
+	}
+}
+
+func TestDoneChecker_DrainsLabelOnSettled(t *testing.T) {
+	ctx := context.Background()
+	settled := map[string]bool{"merged": true, "merging": true, "escalated": true, "closed": true}
+
+	cases := []struct {
+		name        string
+		state       string // task's CurrentState; "" => no task in the store (missing)
+		wantDone    bool
+		wantRemoved bool
+	}{
+		{"dry-run merge halt drains label", "merging", true, true},
+		{"terminal escalated drains label", "escalated", true, true},
+		{"in-flight task keeps its label", "implementing", false, false},
+		{"missing task removes nothing", "", false, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newStore(t)
+			const issue = 7
+			if tc.state != "" {
+				if err := st.CreateTask(ctx, &store.Task{
+					ID: engine.TaskID(issue), Issue: issue, Repo: "o/r",
+					Branch: "agent/issue-7", CurrentState: tc.state,
+				}); err != nil {
+					t.Fatalf("CreateTask: %v", err)
+				}
+			}
+			gh := &fakeGH{}
+			dc := doneChecker{gh: gh, store: st, settled: settled, repoDir: "/repo", label: "agent-ready", log: discardLogger()}
+
+			done, err := dc.done(ctx, issue)
+			if err != nil {
+				t.Fatalf("done: unexpected error: %v", err)
+			}
+			if done != tc.wantDone {
+				t.Errorf("done = %v, want %v", done, tc.wantDone)
+			}
+			if gotRemoved := len(gh.removed) > 0; gotRemoved != tc.wantRemoved {
+				t.Errorf("label removed = %v, want %v (calls=%+v)", gotRemoved, tc.wantRemoved, gh.removed)
+			}
+			if tc.wantRemoved {
+				if len(gh.removed) != 1 {
+					t.Fatalf("want exactly 1 RemoveLabel call, got %d", len(gh.removed))
+				}
+				want := removeCall{repoDir: "/repo", number: issue, label: "agent-ready"}
+				if gh.removed[0] != want {
+					t.Errorf("RemoveLabel called with %+v, want %+v", gh.removed[0], want)
+				}
+			}
+		})
+	}
+}
+
+// Label removal must never fail or block the poll: a gh error is logged and the
+// issue is still reported settled (done), so the worker pool is not wedged.
+func TestDoneChecker_LabelRemovalFailureDoesNotBlock(t *testing.T) {
+	ctx := context.Background()
+	st := newStore(t)
+	const issue = 7
+	if err := st.CreateTask(ctx, &store.Task{
+		ID: engine.TaskID(issue), Issue: issue, Repo: "o/r",
+		Branch: "agent/issue-7", CurrentState: "merging",
+	}); err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	gh := &fakeGH{removeErr: errors.New("gh offline")}
+	dc := doneChecker{gh: gh, store: st, settled: map[string]bool{"merging": true}, repoDir: "/repo", label: "agent-ready", log: discardLogger()}
+
+	done, err := dc.done(ctx, issue)
+	if err != nil {
+		t.Fatalf("done must swallow label-removal errors, got: %v", err)
+	}
+	if !done {
+		t.Error("settled issue must still report done even when label removal fails")
+	}
+	if len(gh.removed) != 1 {
+		t.Errorf("want RemoveLabel attempted once, got %d", len(gh.removed))
 	}
 }
 

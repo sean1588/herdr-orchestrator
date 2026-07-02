@@ -48,6 +48,10 @@ type Client interface {
 	// ListIssues returns the numbers of issues matching label, via
 	// `gh issue list --label <label> --json number` in repoDir.
 	ListIssues(ctx context.Context, repoDir, label string) ([]int, error)
+	// RemoveLabel removes label from an issue via
+	// `gh issue edit <number> --remove-label <label>` in repoDir. Removing a
+	// label the issue does not carry is a no-op, not an error (gh is idempotent).
+	RemoveLabel(ctx context.Context, repoDir string, number int, label string) error
 	// PRStatus reads the merge-gate inputs (state, checks, reviews, mergeability)
 	// for a PR in one call.
 	PRStatus(ctx context.Context, repoDir string, pr int) (*PRStatus, error)

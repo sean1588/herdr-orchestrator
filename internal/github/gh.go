@@ -67,3 +67,14 @@ func (g *GH) ListIssues(ctx context.Context, repoDir, label string) ([]int, erro
 	}
 	return nums, nil
 }
+
+// RemoveLabel runs `gh issue edit <number> --remove-label <label>` in repoDir.
+// gh treats removing a label the issue does not carry as a no-op (exit 0), so
+// this is idempotent — the daemon can call it whenever an issue is settled
+// without tracking whether the label is still present.
+func (g *GH) RemoveLabel(ctx context.Context, repoDir string, number int, label string) error {
+	if _, err := g.run.Run(ctx, repoDir, "gh", "issue", "edit", strconv.Itoa(number), "--remove-label", label); err != nil {
+		return fmt.Errorf("gh issue edit %d --remove-label %s: %w", number, label, err)
+	}
+	return nil
+}

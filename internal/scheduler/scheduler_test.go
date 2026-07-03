@@ -144,6 +144,29 @@ func TestServe_SeedsInFlightOnStartup(t *testing.T) {
 	}
 }
 
+// A suspended task (still returned by SeedFrom, never settling) is re-driven on
+// each poll, not only at startup — this is how a blocked_on_gate task resumes to
+// re-check its merge gate after yielding its worker.
+func TestServe_ResumesSuspendedTaskEachPoll(t *testing.T) {
+	var runs int32
+	s := &Scheduler{
+		List:     func(ctx context.Context) ([]int, error) { return nil, nil },
+		Done:     func(ctx context.Context, issue int) (bool, error) { return false, nil },             // never settles
+		RunTask:  func(ctx context.Context, issue int) error { atomic.AddInt32(&runs, 1); return nil }, // returns at once (suspend)
+		SeedFrom: func(ctx context.Context) ([]int, error) { return []int{9}, nil },
+		Interval: 5 * time.Millisecond,
+		Workers:  1,
+		Log:      testLog(),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { _ = s.Serve(ctx) }()
+	time.Sleep(70 * time.Millisecond) // several poll ticks
+	cancel()
+	if n := atomic.LoadInt32(&runs); n < 2 {
+		t.Errorf("suspended task ran %d times, want >= 2 (re-driven each poll, not just at startup)", n)
+	}
+}
+
 // Serve returns promptly when the context is cancelled.
 func TestServe_ReturnsOnCancel(t *testing.T) {
 	s := &Scheduler{

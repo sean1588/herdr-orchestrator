@@ -58,9 +58,13 @@ Past `pr_open` the engine runs the rest of the pipeline:
   `escalated` once `policies.retry_caps.changes_requested` is exceeded.
 - **Merge gate.** `approved` evaluates the merge gate
   (`github_checks` + `github_reviews` + `github_mergeable`) over one authoritative
-  `PRStatus` read. If not yet green it parks in `blocked_on_gate`, which **polls**
-  GitHub every `StatusPollInterval` until the gate passes (`status.changed` has no
-  push source) or the state timeout escalates.
+  `PRStatus` read. If not yet green it parks in `blocked_on_gate`, which evaluates
+  the gate once and, while it neither passes nor has timed out, **suspends** —
+  the drive returns and frees its worker slot instead of pinning it for the whole
+  wait, and the scheduler re-drives the task each poll to re-check the gate
+  (`status.changed` has no push source). The state timeout is measured from the
+  audit-recorded entry time, so it survives suspend/resume and daemon restarts;
+  past it, the task escalates.
 - **Merge.** `merging` runs the `merge_pr` action — **gated on `policies.dry_run`
   (default-on)**. A dry run logs the intended merge and halts at `merging`; with
   `dry_run: false` it `gh pr merge --squash --delete-branch`, verifies the PR is

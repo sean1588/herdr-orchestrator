@@ -33,9 +33,11 @@ type Scheduler struct {
 }
 
 // Serve seeds in-flight work, starts the worker pool, then polls until ctx is
-// done. On cancellation it stops the poller, lets the workers drain (each drive
-// returns when ctx is done), and returns. Tasks persist their state, so the next
-// start resumes them via SeedFrom.
+// done. Each poll discovers new candidates (List) and re-enqueues non-settled
+// in-flight tasks (SeedFrom), so a task that yielded its worker mid-drive — a
+// blocked_on_gate merge-gate wait that suspended rather than pinning its slot for
+// the whole wait — is resumed to re-check its gate. On cancellation it stops the
+// poller, lets the workers drain (each drive returns when ctx is done), and returns.
 func (s *Scheduler) Serve(ctx context.Context) error {
 	if s.Log == nil {
 		s.Log = slog.Default()
@@ -61,13 +63,7 @@ func (s *Scheduler) Serve(ctx context.Context) error {
 		}()
 	}
 
-	if s.SeedFrom != nil {
-		if seed, err := s.SeedFrom(ctx); err != nil {
-			s.Log.Warn("seed failed", "err", err)
-		} else {
-			s.enqueue(ctx, work, inflight, seed)
-		}
-	}
+	s.seed(ctx, work, inflight) // resume in-flight/suspended tasks immediately
 
 	interval := s.Interval
 	if interval <= 0 {
@@ -82,14 +78,33 @@ func (s *Scheduler) Serve(ctx context.Context) error {
 			wg.Wait()
 			return nil
 		case <-ticker.C:
-			issues, err := s.List(ctx)
-			if err != nil {
+			if issues, err := s.List(ctx); err != nil {
 				s.Log.Warn("poll failed", "err", err)
-				continue
+			} else {
+				s.enqueue(ctx, work, inflight, issues)
 			}
-			s.enqueue(ctx, work, inflight, issues)
+			// Re-enqueue non-settled in-store tasks too, so a suspended drive (a
+			// blocked_on_gate wait that yielded its worker) resumes. Runs even when
+			// List errors — a source outage must not strand in-flight work.
+			s.seed(ctx, work, inflight)
 		}
 	}
+}
+
+// seed re-enqueues the non-settled in-flight tasks reported by SeedFrom. It runs
+// at startup and on every poll so a task that yielded its worker mid-drive (a
+// suspended blocked_on_gate wait) is resumed; enqueue's inflight and Done checks
+// keep it from racing a task already being driven or one that has since settled.
+func (s *Scheduler) seed(ctx context.Context, work chan int, inflight *inflightSet) {
+	if s.SeedFrom == nil {
+		return
+	}
+	issues, err := s.SeedFrom(ctx)
+	if err != nil {
+		s.Log.Warn("seed failed", "err", err)
+		return
+	}
+	s.enqueue(ctx, work, inflight, issues)
 }
 
 // enqueue adds issues that are neither in-flight nor already done. It never

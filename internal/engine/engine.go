@@ -37,6 +37,13 @@ import (
 // immediately on entering the state.
 var autoFiredEvents = map[string]bool{"scheduled": true}
 
+// errSuspended is a control signal, not a failure: a drive parked in a merge-gate
+// wait (blocked_on_gate) evaluates the gate once and, while it neither passes nor
+// times out, yields — Run returns with the task persisted at that state so the
+// worker slot is freed. The scheduler re-drives the task on a later poll. Handled
+// in drive; never surfaced to callers.
+var errSuspended = errors.New("suspended: awaiting merge gate")
+
 // Config wires the engine's dependencies and tunables.
 type Config struct {
 	Workflow *config.Workflow
@@ -59,10 +66,7 @@ type Config struct {
 	Goal         string                              // halt-on-enter success state; default "pr_open"
 	StartState   string                              // where Phase 1 enqueues issues; default "queued"
 	DurationFunc func(string) (time.Duration, error) // default time.ParseDuration
-	// StatusPollInterval is how often the merge gate is re-evaluated while waiting
-	// for CI/reviews/mergeability; default 15s.
-	StatusPollInterval time.Duration
-	Logger             *slog.Logger
+	Logger       *slog.Logger
 	// Notifier forwards escalation/alert events out-of-band; default notify.Nop.
 	Notifier notify.Notifier
 }
@@ -80,7 +84,7 @@ type Engine struct {
 	taskDir             string
 	goal, startState    string
 	parseDur            func(string) (time.Duration, error)
-	statusPoll          time.Duration
+	now                 func() time.Time // injectable clock; drives the blocked_on_gate wait timeout
 	log                 *slog.Logger
 	notifier            notify.Notifier
 }
@@ -101,7 +105,6 @@ func New(c Config) *Engine {
 		goal:           c.Goal,
 		startState:     c.StartState,
 		parseDur:       c.DurationFunc,
-		statusPoll:     c.StatusPollInterval,
 		log:            c.Logger,
 		notifier:       c.Notifier,
 	}
@@ -117,8 +120,8 @@ func New(c Config) *Engine {
 	if e.parseDur == nil {
 		e.parseDur = time.ParseDuration
 	}
-	if e.statusPoll == 0 {
-		e.statusPoll = 15 * time.Second
+	if e.now == nil {
+		e.now = time.Now
 	}
 	if e.log == nil {
 		e.log = slog.New(slog.NewTextHandler(os.Stderr, nil))
@@ -235,6 +238,13 @@ func (e *Engine) drive(ctx context.Context, task *store.Task) (string, error) {
 			return task.CurrentState, nil
 		}
 		next, trigger, result, err := e.runState(ctx, task)
+		if errors.Is(err, errSuspended) {
+			// A merge-gate wait yielded: leave the task at its current state (no
+			// transition, no audit) and return so the worker frees. The scheduler
+			// re-drives it, re-evaluating the gate, until it passes or times out.
+			e.log.Info("suspend: awaiting merge gate; yielding worker", "task", task.ID, "state", task.CurrentState)
+			return task.CurrentState, nil
+		}
 		if err != nil {
 			return task.CurrentState, err
 		}
@@ -308,11 +318,12 @@ func (e *Engine) runState(ctx context.Context, task *store.Task) (next, trigger,
 	}
 
 	// Merge-gate wait: status.changed re-evaluates the merge gate. A state with a
-	// timeout (blocked_on_gate) polls until the gate passes or it gives up; one
-	// without (approved) checks once on entry and branches.
+	// timeout (blocked_on_gate) evaluates once and, while the gate neither passes
+	// nor has timed out, suspends (yields its worker); one without (approved) checks
+	// once on entry and branches.
 	if sct := findEventTransition(st, "status.changed"); sct != nil {
 		if timeoutT := findTimeoutTransition(st); timeoutT != nil {
-			return e.awaitStatusGate(ctx, task, sct, timeoutT)
+			return e.evaluateGateOrSuspend(ctx, task, sct, timeoutT)
 		}
 		verdict, err := e.evaluateGate(ctx, task, sct)
 		if err != nil {
@@ -324,36 +335,39 @@ func (e *Engine) runState(ctx context.Context, task *store.Task) (next, trigger,
 	return "", "", "", fmt.Errorf("state %q: no supported trigger (no agent.done or status.changed transition)", name)
 }
 
-// awaitStatusGate polls the merge gate on an interval until it passes (taking the
-// transition's pass branch, e.g. merging) or the state's timeout elapses (the
-// timeout target, e.g. escalated). status changes have no push source in Phase
-// 2a, so the engine polls the authoritative GitHub status.
-func (e *Engine) awaitStatusGate(ctx context.Context, task *store.Task, gateT, timeoutT *config.Transition) (next, trigger, result string, err error) {
+// evaluateGateOrSuspend evaluates the merge gate once. On pass it takes the
+// transition's pass branch (e.g. merging). On fail it compares how long the task
+// has been in this state — measured from the audit-recorded entry time, so the
+// bound survives suspend/resume and daemon restarts — against the state's timeout:
+// past the timeout it escalates; otherwise it returns errSuspended so the drive
+// yields its worker and the scheduler re-drives it on a later poll. Status changes
+// have no push source, so re-evaluation is scheduler-paced rather than an
+// in-process poll loop that would pin the worker slot for the whole wait.
+func (e *Engine) evaluateGateOrSuspend(ctx context.Context, task *store.Task, gateT, timeoutT *config.Transition) (next, trigger, result string, err error) {
+	verdict, gerr := e.evaluateGate(ctx, task, gateT)
+	if gerr != nil {
+		return "", "", "", gerr
+	}
+	if verdict == "pass" {
+		return gateT.Branch["pass"], "status.changed", "pass", nil
+	}
 	d, perr := e.parseDur(timeoutT.When.Timeout)
 	if perr != nil {
 		return "", "", "", fmt.Errorf("parse timeout %q: %w", timeoutT.When.Timeout, perr)
 	}
-	deadline := time.NewTimer(d)
-	defer deadline.Stop()
-
-	for {
-		verdict, gerr := e.evaluateGate(ctx, task, gateT)
-		if gerr != nil {
-			return "", "", "", gerr
-		}
-		if verdict == "pass" {
-			return gateT.Branch["pass"], "status.changed", "pass", nil
-		}
-		select {
-		case <-ctx.Done():
-			return "", "", "", ctx.Err()
-		case <-deadline.C:
-			e.log.Warn("merge gate timeout", "task", task.ID, "state", task.CurrentState)
-			return timeoutT.To, "timeout", "", nil
-		case <-time.After(e.statusPoll):
-			// re-poll
-		}
+	entry, ok, eerr := e.store.StateEntryTime(ctx, task.ID, task.CurrentState)
+	if eerr != nil {
+		return "", "", "", fmt.Errorf("state entry time: %w", eerr)
 	}
+	// ok is always true in practice: advance() records the approved->blocked_on_gate
+	// entry before the state change, and suspend appends no row, so a task parked
+	// here always has a genuine entry. If it were somehow missing, keep re-checking
+	// the gate (suspend) rather than escalate on an unknown elapsed time.
+	if ok && e.now().Sub(entry) >= d {
+		e.log.Warn("merge gate timeout", "task", task.ID, "state", task.CurrentState)
+		return timeoutT.To, "timeout", "", nil
+	}
+	return "", "", "", errSuspended
 }
 
 // awaitAgentState implements the implementing-state wait: react to agent.done
@@ -619,6 +633,15 @@ func (e *Engine) kickoff(r config.Role, task *store.Task, taskFile string) strin
 // reconcile re-resolves a task's volatile pane and short-circuits to the goal if
 // GitHub already shows the artifact for an implementing task.
 func (e *Engine) reconcile(ctx context.Context, task *store.Task) error {
+	// Only a state that runs an agent has a volatile pane worth re-resolving. A
+	// gate-wait state (blocked_on_gate) has no live agent, and the daemon re-drives
+	// such a task every poll to re-check the merge gate — so that resume, and the
+	// escalation timeout, must not depend on herdr (the gate read and escalation
+	// touch only GitHub). Skipping the Resolve keeps a herdr outage from stalling
+	// the gate and its safety timeout, and avoids per-poll shell-outs for no reason.
+	if !stateHasAgent(e.wf.States[task.CurrentState]) {
+		return nil
+	}
 	h, ok, err := e.backend.Resolve(ctx, task.ID)
 	if err != nil {
 		// Don't clear the volatile pane on a transient failure: a cleared pane
@@ -794,6 +817,12 @@ func prNum(t *store.Task) int {
 		return 0
 	}
 	return *t.PRNumber
+}
+
+// stateHasAgent reports whether a state runs an agent (a spawn or resume entry),
+// i.e. whether it has a volatile herdr pane worth re-resolving on reconcile.
+func stateHasAgent(st config.State) bool {
+	return st.Entry != nil && (st.Entry.Spawn != "" || st.Entry.Resume != "")
 }
 
 func findEventTransition(st config.State, event string) *config.Transition {

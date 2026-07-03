@@ -506,7 +506,7 @@ These are the deferred subsystems. They are **not** decomposed into bite-sized t
 - **Reference:** CAO's memory feature (markdown wiki + `memory_metadata` + `audit_log.py` + `secret_gate.py`).
 
 ### Cross-cutting (fold into the above or do opportunistically)
-- **Push-based herdr events** *(open question):* if herdr exposes `events.subscribe` over its unix socket, replace the 2s `pollEvents` ticker + the merge-gate poll with a push stream — lower latency, less work. **Verify the socket API exists first** (the comparison flagged this as unconfirmed; CAO's `herdr_backend` reads `herdr pane get` JSON but that is not necessarily a subscription). If push doesn't exist, polling is the correct call — don't build it.
+- **Push-based herdr events** *(open question):* if herdr exposes `events.subscribe` over its unix socket, replace the 2s `eventHub` pane-list poll ticker + the merge-gate poll with a push stream — lower latency, less work. **Verify the socket API exists first** (the comparison flagged this as unconfirmed; CAO's `herdr_backend` reads `herdr pane get` JSON but that is not necessarily a subscription). If push doesn't exist, polling is the correct call — don't build it.
 - **Per-provider tool-flag table:** generalize T2's claude-only `--allowedTools` translation into a provider→flag map when a second launcher is added. YAGNI until then.
 - **Full live e2e harness:** T3 pins the CLI JSON contract with fixtures; a *live* herdr+gh smoke test (behind a build tag, opt-in, not in default CI) would catch real end-to-end drift. Lower priority; the live run on issue 208/PR #227 already exercised the real path once.
 

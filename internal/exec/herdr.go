@@ -30,22 +30,28 @@ type Herdr struct {
 	// submitting Enter. Claude Code's Ink TUI swallows a too-early Enter, so the
 	// text + Enter must be separated; default 1s (0 in tests).
 	SubmitDelay time.Duration
+
+	// hub multiplexes one pane-list poller across all Events subscribers, reading
+	// PollInterval at poller start so a test-set interval still applies.
+	hub *eventHub
 }
 
 var _ ExecutionBackend = (*Herdr)(nil)
 
 // NewHerdr returns a Herdr backend with Spike-0 defaults.
 func NewHerdr(r proc.Runner) *Herdr {
-	return &Herdr{
+	h := &Herdr{
 		r:            r,
 		GitBin:       "git",
 		HerdrBin:     "herdr",
 		ReadyMatch:   ">",
 		ReadyTimeout: 20 * time.Second,
 		WaitTimeout:  45 * time.Minute,
-		PollInterval: 2 * time.Second,
+		PollInterval: defaultEventPollInterval,
 		SubmitDelay:  1 * time.Second,
 	}
+	h.hub = newEventHub(h.listPanes, func() time.Duration { return h.PollInterval })
+	return h
 }
 
 // Spawn: git worktree (isolated) -> herdr workspace -> launch agent -> readiness
@@ -151,40 +157,13 @@ func (h *Herdr) Read(ctx context.Context, hd Handle, lines int) (string, error) 
 	return string(out), nil
 }
 
-// Events polls `herdr pane list` and emits one Event per observed status change
-// (including each pane's first observation). This is the liveness stream; GitHub
-// remains authoritative for artifacts.
+// Events returns a stream of agent status changes across all panes, primed with
+// the current pane states and then carrying live changes. The engine filters by
+// its task's pane id. All subscribers share one `herdr pane list` poller (see
+// eventHub); the subscription ends when ctx is done. This is the liveness stream;
+// GitHub remains authoritative for artifacts.
 func (h *Herdr) Events(ctx context.Context) (<-chan Event, error) {
-	ch := make(chan Event, 32)
-	go h.pollEvents(ctx, ch)
-	return ch, nil
-}
-
-func (h *Herdr) pollEvents(ctx context.Context, ch chan<- Event) {
-	defer close(ch)
-	last := map[string]AgentState{}
-	ticker := time.NewTicker(h.PollInterval)
-	defer ticker.Stop()
-	for {
-		if panes, err := h.listPanes(ctx); err == nil {
-			for _, p := range panes {
-				st := normalizeState(p.AgentStatus)
-				if prev, ok := last[p.PaneID]; !ok || prev != st {
-					last[p.PaneID] = st
-					select {
-					case ch <- Event{PaneID: p.PaneID, State: st}:
-					case <-ctx.Done():
-						return
-					}
-				}
-			}
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-	}
+	return h.hub.subscribe(ctx), nil
 }
 
 // Resolve maps a durable workspace label (= Spawn.TaskID) back to its current

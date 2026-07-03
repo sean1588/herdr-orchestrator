@@ -217,6 +217,29 @@ func (s *Store) AppendAudit(ctx context.Context, e AuditEntry) error {
 	return nil
 }
 
+// StateEntryTime returns the timestamp of the most recent transition INTO state
+// from a DIFFERENT state — i.e. when the task genuinely entered it. Self-loop rows
+// (from == to, e.g. a blocked_on_gate resuspend) are excluded so they cannot reset
+// the wait clock. The bool is false when no such transition is recorded.
+func (s *Store) StateEntryTime(ctx context.Context, taskID, state string) (time.Time, bool, error) {
+	var tsStr string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT ts FROM audit
+		WHERE task_id = ? AND to_state = ? AND from_state != ?
+		ORDER BY id DESC LIMIT 1`, taskID, state, state).Scan(&tsStr)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("store: state entry time for %q/%q: %w", taskID, state, err)
+	}
+	ts, err := time.Parse(timeLayout, tsStr)
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("store: state entry time for %q/%q: parse ts %q: %w", taskID, state, tsStr, err)
+	}
+	return ts, true, nil
+}
+
 // Audit returns the task's audit rows in chronological (insertion) order.
 func (s *Store) Audit(ctx context.Context, taskID string) ([]AuditEntry, error) {
 	rows, err := s.db.QueryContext(ctx, `

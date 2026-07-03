@@ -233,6 +233,62 @@ func TestAppendAuditOrder(t *testing.T) {
 	}
 }
 
+// StateEntryTime returns when a task genuinely entered a state (the most recent
+// transition INTO it from a different state), ignoring self-loop rows so a
+// blocked_on_gate resuspend does not reset the wait clock.
+func TestStateEntryTime(t *testing.T) {
+	ctx := context.Background()
+	st := newStore(t)
+	if err := st.CreateTask(ctx, sampleTask("issue-7")); err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	// The genuine entry comes first; a LATER self-loop (higher id, so the most
+	// recent row) must be ignored — otherwise an unfiltered ORDER BY id DESC would
+	// return the self-loop and reset the wait clock.
+	rows := []AuditEntry{
+		{TaskID: "issue-7", TS: time.Unix(100, 0).UTC(), FromState: "approved", ToState: "blocked_on_gate", Trigger: "status.changed", Result: "fail"},
+		{TaskID: "issue-7", TS: time.Unix(200, 0).UTC(), FromState: "blocked_on_gate", ToState: "blocked_on_gate", Trigger: "status.changed", Result: "fail"}, // later self-loop: must be ignored
+	}
+	// A different task at the same state must not leak in.
+	if err := st.AppendAudit(ctx, AuditEntry{TaskID: "other", TS: time.Unix(999, 0).UTC(), FromState: "approved", ToState: "blocked_on_gate", Trigger: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range rows {
+		if err := st.AppendAudit(ctx, e); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, ok, err := st.StateEntryTime(ctx, "issue-7", "blocked_on_gate")
+	if err != nil {
+		t.Fatalf("StateEntryTime: %v", err)
+	}
+	if !ok {
+		t.Fatal("want ok=true for a recorded entry")
+	}
+	if !got.Equal(time.Unix(100, 0).UTC()) {
+		t.Errorf("entry = %v, want the genuine entry (100), not the more recent self-loop (200)", got)
+	}
+}
+
+func TestStateEntryTime_NotFound(t *testing.T) {
+	ctx := context.Background()
+	st := newStore(t)
+	if err := st.CreateTask(ctx, sampleTask("issue-8")); err != nil {
+		t.Fatal(err)
+	}
+	// Only a self-loop row exists — no genuine entry.
+	if err := st.AppendAudit(ctx, AuditEntry{TaskID: "issue-8", TS: time.Unix(1, 0).UTC(), FromState: "blocked_on_gate", ToState: "blocked_on_gate", Trigger: "status.changed"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := st.StateEntryTime(ctx, "issue-8", "blocked_on_gate"); err != nil {
+		t.Fatalf("StateEntryTime: %v", err)
+	} else if ok {
+		t.Error("want ok=false when only self-loop rows exist (no genuine entry)")
+	}
+}
+
 func TestRetryCountsNilAndEmpty(t *testing.T) {
 	ctx := context.Background()
 	st := newStore(t)

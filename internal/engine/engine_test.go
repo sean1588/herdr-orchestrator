@@ -70,11 +70,8 @@ type fakeGH struct {
 	pr    *github.PR
 	issue *github.Issue
 
-	// merge-gate inputs (M9/M10): a single status, or a sequence consumed one per
-	// PRStatus call to simulate a PR whose state changes across polls.
-	status    *github.PRStatus
-	statusSeq []*github.PRStatus
-	statusIdx int
+	// merge-gate input: the PR status each PRStatus call returns.
+	status *github.PRStatus
 
 	merged   bool
 	mergeErr error
@@ -107,11 +104,6 @@ func (g *fakeGH) PRStatus(ctx context.Context, repoDir string, pr int) (*github.
 			state = "MERGED"
 		}
 		return &github.PRStatus{State: state}, nil
-	}
-	if len(g.statusSeq) > 0 {
-		i := min(g.statusIdx, len(g.statusSeq)-1)
-		g.statusIdx++
-		return g.statusSeq[i], nil
 	}
 	if g.status != nil {
 		return g.status, nil

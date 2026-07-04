@@ -13,9 +13,9 @@ A control-plane daemon that turns GitHub issues into pull requests by driving
 > (CI + approvals + mergeable) is polled over GitHub → `merge_pr` squash-merges
 > → `merged`. The real merge is gated on `policies.dry_run` (default-on), so the
 > shipped config halts at `merging` and logs the intended merge until you set
-> `dry_run: false`. Triage/intake, the scheduler (concurrency > 1), the MCP
-> surface, and cross-task memory remain **out of scope** — the engine parses and
-> validates the full pipeline but does not yet execute those.
+> `dry_run: false`. Triage/intake and the concurrent scheduler daemon now ship
+> (R2). The **MCP surface** and **cross-task memory** remain deferred — tracked in
+> [ROADMAP.md](ROADMAP.md).
 
 ## Design in one paragraph
 
@@ -183,8 +183,10 @@ rejected):
 **`policies`** — `max_concurrent_tasks`, `dry_run`, `circuit_breaker`,
 `retry_caps` (a per-state cap map, `state_name: N`), and `execution`
 (`backend: herdr|local|container`, `run_as: root|non_root`, `sandbox: bool`).
-Phase 1 reads these but only `retry_caps` affects validation; the rest gate
-merge/scheduler/concurrency machinery that is out of scope.
+The engine reads these: `retry_caps` bounds per-state retries and is validated,
+`dry_run` gates the real merge, and `max_concurrent_tasks` bounds the daemon's
+concurrency (R2). `circuit_breaker` and the finer `execution` knobs (`sandbox`)
+are parsed but not yet enforced.
 
 **`roles`** — each has `launch` (argv, required, e.g. `["claude"]`),
 `task_delivery` (`context_file` | `inline`), `workspace` (`per_task` | `shared`),

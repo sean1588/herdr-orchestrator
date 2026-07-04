@@ -7,6 +7,8 @@ package scheduler
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -30,6 +32,65 @@ type Scheduler struct {
 	Interval time.Duration
 	Workers  int
 	Log      *slog.Logger
+
+	// Control seam (nil unless EnableControl): the MCP server submits commands
+	// here and Serve processes them in the poller goroutine. cancelCause is the
+	// cause an operator cancel carries (the daemon wires engine.ErrOperatorCancel).
+	commands    chan command
+	cancelCause error
+}
+
+type cmdKind int
+
+const (
+	cmdEnqueue cmdKind = iota
+	cmdCancel
+)
+
+type command struct {
+	kind  cmdKind
+	issue int
+	reply chan error // buffered(1); the poller never blocks replying
+}
+
+// EnableControl turns on the external control surface: Enqueue/Cancel become
+// live and Serve processes their commands. cancelCause is the cause an operator
+// cancel carries (the daemon passes engine.ErrOperatorCancel).
+func (s *Scheduler) EnableControl(cancelCause error) {
+	s.commands = make(chan command)
+	s.cancelCause = cancelCause
+}
+
+// Enqueue re-drives an issue by number. Idempotent: a no-op if the issue is
+// already in flight. Satisfies the MCP control surface.
+func (s *Scheduler) Enqueue(ctx context.Context, issue int) error {
+	return s.submit(ctx, command{kind: cmdEnqueue, issue: issue})
+}
+
+// Cancel cancels the running drive for an issue, erroring if none is running.
+// Satisfies the MCP control surface.
+func (s *Scheduler) Cancel(ctx context.Context, issue int) error {
+	return s.submit(ctx, command{kind: cmdCancel, issue: issue})
+}
+
+// submit sends a command to the poller and waits for its reply, honoring ctx so
+// a caller (an MCP request) is never wedged if the daemon is shutting down.
+func (s *Scheduler) submit(ctx context.Context, c command) error {
+	if s.commands == nil {
+		return errors.New("scheduler control not enabled")
+	}
+	c.reply = make(chan error, 1)
+	select {
+	case s.commands <- c:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case err := <-c.reply:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // Serve seeds in-flight work, starts the worker pool, then polls until ctx is
@@ -48,6 +109,7 @@ func (s *Scheduler) Serve(ctx context.Context) error {
 	}
 	work := make(chan int, queueDepth)
 	inflight := &inflightSet{m: map[int]bool{}}
+	cancels := newCancelRegistry()
 
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
@@ -55,9 +117,17 @@ func (s *Scheduler) Serve(ctx context.Context) error {
 		go func() {
 			defer wg.Done()
 			for issue := range work {
-				if err := s.RunTask(ctx, issue); err != nil {
+				// Derive a per-issue context so a control cancel can interrupt this
+				// one drive (register before RunTask, deregister after). Cancelling
+				// with ErrOperatorCancel makes the drive settle; the parent ctx
+				// cancels it too on daemon shutdown.
+				runCtx, cancel := context.WithCancelCause(ctx)
+				cancels.register(issue, cancel)
+				if err := s.RunTask(runCtx, issue); err != nil {
 					s.Log.Warn("run task failed", "issue", issue, "err", err)
 				}
+				cancel(nil) // release the context
+				cancels.deregister(issue)
 				inflight.remove(issue) // allow re-discovery (retry on a later poll)
 			}
 		}()
@@ -77,6 +147,8 @@ func (s *Scheduler) Serve(ctx context.Context) error {
 			close(work) // Serve is the only sender; safe to close
 			wg.Wait()
 			return nil
+		case c := <-s.commands: // nil channel when control is disabled: never ready
+			s.handleCommand(ctx, c, work, inflight, cancels)
 		case <-ticker.C:
 			if issues, err := s.List(ctx); err != nil {
 				s.Log.Warn("poll failed", "err", err)
@@ -132,6 +204,26 @@ func (s *Scheduler) enqueue(ctx context.Context, work chan int, inflight *inflig
 		default:
 			inflight.remove(issue) // channel full; retry next poll
 		}
+	}
+}
+
+// handleCommand processes an external control command in the poller goroutine —
+// so an enqueue keeps Serve the single sender on the work channel, and a cancel
+// reads the registry without a second owner. The reply channel is buffered, so
+// this never blocks on a caller that has already given up (a cancelled request).
+func (s *Scheduler) handleCommand(ctx context.Context, c command, work chan int, inflight *inflightSet, cancels *cancelRegistry) {
+	switch c.kind {
+	case cmdEnqueue:
+		s.enqueue(ctx, work, inflight, []int{c.issue})
+		c.reply <- nil
+	case cmdCancel:
+		if cancels.cancel(c.issue, s.cancelCause) {
+			c.reply <- nil
+		} else {
+			c.reply <- fmt.Errorf("issue %d is not currently running", c.issue)
+		}
+	default:
+		c.reply <- fmt.Errorf("unknown command kind %d", c.kind)
 	}
 }
 

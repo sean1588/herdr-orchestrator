@@ -247,12 +247,20 @@ func (e *Engine) drive(ctx context.Context, task *store.Task) (string, error) {
 	return e.reclassifyCancel(ctx, task, state, err)
 }
 
-// reclassifyCancel converts a cancellation caused by an operator cancel into a
+// reclassifyCancel converts a drive error caused by an operator cancel into a
 // settle to CancelState; any other error (including a daemon-shutdown cancel,
 // whose cause is not ErrOperatorCancel) is returned unchanged for recovery. It
 // runs at every drive/reconcile exit so the settle is not tied to one wait site.
+//
+// The guard keys off the CONTEXT's cancellation cause, not the error's shape: a
+// cancel that lands mid-subprocess (gh/herdr/git killed by SIGKILL via
+// exec.CommandContext) surfaces as an *exec.ExitError ("signal: killed"), NOT
+// context.Canceled — so requiring context.Canceled would miss exactly the
+// reconcile/spawn/gate-read windows this wrapper exists to cover. Requiring only
+// err != nil keeps a drive that completed (err == nil) from being force-settled
+// when a cancel arrived too late.
 func (e *Engine) reclassifyCancel(ctx context.Context, task *store.Task, state string, err error) (string, error) {
-	if err != nil && errors.Is(err, context.Canceled) && errors.Is(context.Cause(ctx), ErrOperatorCancel) {
+	if err != nil && errors.Is(context.Cause(ctx), ErrOperatorCancel) {
 		return e.settleCancelled(ctx, task)
 	}
 	return state, err

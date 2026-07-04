@@ -188,10 +188,17 @@ func (e *Engine) settleCancelled(ctx context.Context, task *store.Task) (string,
 	if err := e.advance(sctx, task, CancelState, "operator.cancel", ""); err != nil {
 		return task.CurrentState, err
 	}
-	e.maybeCleanup(sctx, task)   // tear down the worktree (no-PR case), best-effort
 	return CancelState, nil
 }
 ```
+
+**Cancel preserves the worktree** (no `maybeCleanup`). The automated no-PR
+terminals (triage-reject → `closed`, escalate) tear their worktree down because
+*the system* decided the task is finished. An operator cancel is a *human*
+intervening on a possibly-runaway agent and may want to inspect its uncommitted
+work — destroying it would contradict the very guards `spawn`/`reconcile` use to
+protect a live worktree. The worktree persists for manual inspection/removal
+(named debt below), consistent with how PR-bearing terminals already keep theirs.
 
 `advance` does **not** gate on FSM-legality (verified: engine.go:693 just appends
 audit + writes state), so `implementing → cancelled` is a valid write. This keeps
@@ -363,4 +370,7 @@ Built, noting what's deferred within it (pause/resume, auth, SSE).
   unification remains the ROADMAP backlog item.
 - **No pagination on `list_tasks`.** Returns all tasks; fine at current scale.
   Add a filter/limit if the settled backlog ever makes output noisy.
+- **A cancelled task leaves its worktree/workspace registered** (deliberate — see
+  above). Same as PR-bearing terminals today. A future `cleanup`/`discard` tool
+  or manual `git worktree remove` reclaims it.
 ```

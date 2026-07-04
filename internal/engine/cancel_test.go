@@ -64,3 +64,43 @@ func TestDriveOperatorCancelSettles(t *testing.T) {
 		})
 	}
 }
+
+// An operator cancel that lands outside the agent-wait select — here the ctx is
+// already cancelled when the drive tries its first advance (queued->implementing)
+// — must still settle to CancelState, not surface a raw context.Canceled. This
+// covers the reclassify-at-the-drive-boundary path, not just the await site.
+func TestDriveOperatorCancelOutsideAgentWaitSettles(t *testing.T) {
+	st := newStore(t)
+	b := &fakeBackend{pane: "w1:p1"}
+	e := newEngine(t, st, b, &fakeGH{}, 5*time.Second)
+
+	bg := context.Background()
+	if err := st.CreateTask(bg, &store.Task{
+		ID: "issue-3", Issue: 3, Repo: "owner/repo",
+		Branch: "agent/issue-3", CurrentState: "queued",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	task, _ := st.GetTask(bg, "issue-3")
+
+	ctx, cancel := context.WithCancelCause(bg)
+	cancel(ErrOperatorCancel) // cancelled before the drive begins
+
+	done := make(chan string, 1)
+	go func() {
+		final, _ := e.drive(ctx, task)
+		done <- final
+	}()
+	select {
+	case final := <-done:
+		if final != CancelState {
+			t.Fatalf("final = %q, want %q", final, CancelState)
+		}
+		got, _ := st.GetTask(bg, "issue-3")
+		if got.CurrentState != CancelState {
+			t.Fatalf("persisted state = %q, want %q", got.CurrentState, CancelState)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("drive did not settle a pre-cancelled operator context")
+	}
+}

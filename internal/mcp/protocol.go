@@ -46,9 +46,9 @@ func (h *handler) handle(ctx context.Context, raw []byte) ([]byte, bool) {
 	case "initialize":
 		resp = okResp(req.ID, initializeResult())
 	case "notifications/initialized", "ping":
-		resp = okResp(req.ID, map[string]interface{}{})
+		resp = okResp(req.ID, map[string]any{})
 	case "tools/list":
-		resp = okResp(req.ID, map[string]interface{}{"tools": toolDefs()})
+		resp = okResp(req.ID, map[string]any{"tools": toolDefs()})
 	case "tools/call":
 		resp = h.callTool(ctx, req)
 	default:
@@ -61,10 +61,10 @@ func (h *handler) handle(ctx context.Context, raw []byte) ([]byte, bool) {
 	return mustMarshal(resp), false
 }
 
-func initializeResult() map[string]interface{} {
-	return map[string]interface{}{
+func initializeResult() map[string]any {
+	return map[string]any{
 		"protocolVersion": "2024-11-05",
-		"capabilities":    map[string]interface{}{"tools": map[string]interface{}{}},
-		"serverInfo":      map[string]interface{}{"name": "herdr-orchestrator", "version": "1"},
+		"capabilities":    map[string]any{"tools": map[string]any{}},
+		"serverInfo":      map[string]any{"name": "herdr-orchestrator", "version": "1"},
 	}
 }

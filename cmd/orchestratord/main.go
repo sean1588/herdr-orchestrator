@@ -431,7 +431,6 @@ func cmdDaemon(args []string) int {
 		return 2
 	}
 	settled := settledStates(w.wf)
-	settled[engine.CancelState] = true // an operator-cancelled task is terminal
 	workers := w.wf.Policies.MaxConcurrentTasks
 	if workers < 1 {
 		workers = 1
@@ -525,7 +524,8 @@ func terminalStates(wf *config.Workflow) map[string]bool {
 // merge gate ("merging"), a NON-terminal state; without treating that as settled,
 // a completed issue would be re-driven on every poll (unbounded audit growth).
 func settledStates(wf *config.Workflow) map[string]bool {
-	out := terminalStates(wf) // fresh map; safe to extend
+	out := terminalStates(wf)      // fresh map; safe to extend
+	out[engine.CancelState] = true // an operator-cancelled task is terminal (daemon-owned)
 	if wf.Policies.DryRunEnabled() {
 		for name, s := range wf.States {
 			if s.Entry != nil && s.Entry.Action == "merge_pr" {

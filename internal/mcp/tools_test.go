@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -116,6 +117,26 @@ func TestCancelTool(t *testing.T) {
 	miss, _ := call(h2, "cancel_task", 9)
 	if !miss.IsError || !strings.Contains(miss.Content[0].Text, "not currently running") {
 		t.Fatalf("cancel of non-running issue should be a tool error carrying the message: %+v", miss)
+	}
+}
+
+func TestMissingIssueArg(t *testing.T) {
+	fc := &fakeController{}
+	h := newTestHandler(fakeReader{tasks: sampleTasks()}, fc)
+	// arguments with no "issue" must NOT silently act on issue 0.
+	raw, _ := h.handle(context.Background(),
+		[]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"cancel_task","arguments":{}}}`))
+	var out struct {
+		Result callResult `json:"result"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !out.Result.IsError || !strings.Contains(out.Result.Content[0].Text, "issue") {
+		t.Fatalf("missing issue should be a tool error, got: %+v", out.Result)
+	}
+	if len(fc.calls) != 0 {
+		t.Fatalf("controller must not be called for a missing issue, calls=%v", fc.calls)
 	}
 }
 

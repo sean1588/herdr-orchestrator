@@ -75,20 +75,21 @@ func toAuditView(a store.AuditEntry) AuditEntryView {
 type callParams struct {
 	Name      string `json:"name"`
 	Arguments struct {
-		Issue int `json:"issue"`
+		Issue *int `json:"issue"` // pointer so a missing arg is distinguishable from 0
 	} `json:"arguments"`
 }
 
 // callTool dispatches a tools/call. Tool-execution problems (not found, not
-// running) return a successful result with isError:true carrying a message; only
-// malformed params are a JSON-RPC protocol error.
+// running, a missing required arg) return a successful result with isError:true
+// carrying a message; only malformed params are a JSON-RPC protocol error.
 func (h *handler) callTool(ctx context.Context, req request) response {
 	var p callParams
 	if err := json.Unmarshal(req.Params, &p); err != nil {
 		return errResp(req.ID, codeInvalidPar, "invalid params: "+err.Error())
 	}
-	switch p.Name {
-	case "list_tasks":
+
+	// list_tasks is the only tool without an issue argument.
+	if p.Name == "list_tasks" {
 		tasks, err := h.reader.List(ctx)
 		if err != nil {
 			return okResp(req.ID, h.toolErr("list tasks: "+err.Error()))
@@ -98,16 +99,26 @@ func (h *handler) callTool(ctx context.Context, req request) response {
 			views = append(views, toTaskView(t))
 		}
 		return okResp(req.ID, h.toolJSON(views))
+	}
+
+	// Every other tool requires a positive issue number; a missing int must not
+	// silently become issue 0 and drive/cancel a bogus task.
+	if p.Arguments.Issue == nil || *p.Arguments.Issue <= 0 {
+		return okResp(req.ID, h.toolErr("missing or invalid required argument: issue (positive integer)"))
+	}
+	issue := *p.Arguments.Issue
+
+	switch p.Name {
 	case "get_task":
-		t, err := h.reader.GetTask(ctx, h.taskID(p.Arguments.Issue))
+		t, err := h.reader.GetTask(ctx, h.taskID(issue))
 		if err != nil {
-			return okResp(req.ID, h.toolErr(fmt.Sprintf("issue %d not found", p.Arguments.Issue)))
+			return okResp(req.ID, h.toolErr(fmt.Sprintf("issue %d not found", issue)))
 		}
 		return okResp(req.ID, h.toolJSON(toTaskView(*t)))
 	case "get_audit":
-		aud, err := h.reader.Audit(ctx, h.taskID(p.Arguments.Issue))
+		aud, err := h.reader.Audit(ctx, h.taskID(issue))
 		if err != nil {
-			return okResp(req.ID, h.toolErr(fmt.Sprintf("issue %d audit: %s", p.Arguments.Issue, err.Error())))
+			return okResp(req.ID, h.toolErr(fmt.Sprintf("issue %d audit: %s", issue, err.Error())))
 		}
 		views := make([]AuditEntryView, 0, len(aud))
 		for _, a := range aud {
@@ -115,15 +126,15 @@ func (h *handler) callTool(ctx context.Context, req request) response {
 		}
 		return okResp(req.ID, h.toolJSON(views))
 	case "cancel_task":
-		if err := h.ctrl.Cancel(ctx, p.Arguments.Issue); err != nil {
+		if err := h.ctrl.Cancel(ctx, issue); err != nil {
 			return okResp(req.ID, h.toolErr(err.Error()))
 		}
-		return okResp(req.ID, h.toolText(fmt.Sprintf("cancel dispatched for issue %d", p.Arguments.Issue)))
+		return okResp(req.ID, h.toolText(fmt.Sprintf("cancel dispatched for issue %d", issue)))
 	case "enqueue_task":
-		if err := h.ctrl.Enqueue(ctx, p.Arguments.Issue); err != nil {
+		if err := h.ctrl.Enqueue(ctx, issue); err != nil {
 			return okResp(req.ID, h.toolErr(err.Error()))
 		}
-		return okResp(req.ID, h.toolText(fmt.Sprintf("enqueued issue %d", p.Arguments.Issue)))
+		return okResp(req.ID, h.toolText(fmt.Sprintf("enqueued issue %d", issue)))
 	default:
 		return okResp(req.ID, h.toolErr("unknown tool: "+p.Name))
 	}
@@ -131,17 +142,17 @@ func (h *handler) callTool(ctx context.Context, req request) response {
 
 // An MCP tool result is a list of typed content blocks; isError flags a
 // tool-level failure (distinct from a JSON-RPC protocol error).
-func (h *handler) toolText(s string) map[string]interface{} {
-	return map[string]interface{}{"content": []map[string]string{{"type": "text", "text": s}}}
+func (h *handler) toolText(s string) map[string]any {
+	return map[string]any{"content": []map[string]string{{"type": "text", "text": s}}}
 }
 
-func (h *handler) toolErr(s string) map[string]interface{} {
+func (h *handler) toolErr(s string) map[string]any {
 	r := h.toolText(s)
 	r["isError"] = true
 	return r
 }
 
-func (h *handler) toolJSON(v interface{}) map[string]interface{} {
+func (h *handler) toolJSON(v any) map[string]any {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return h.toolErr("marshal: " + err.Error())

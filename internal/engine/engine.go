@@ -158,7 +158,7 @@ func (e *Engine) Run(ctx context.Context, issue int) (string, error) {
 	}
 	if !created {
 		if err := e.reconcile(ctx, task); err != nil {
-			return task.CurrentState, err
+			return e.reclassifyCancel(ctx, task, task.CurrentState, err)
 		}
 	}
 	return e.drive(ctx, task)
@@ -238,8 +238,28 @@ func (e *Engine) ensureTask(ctx context.Context, issue int) (*store.Task, bool, 
 	return task, true, nil
 }
 
-// drive runs the interpreter loop until a halt state (goal or terminal).
+// drive runs the interpreter loop until a halt state, then reclassifies an
+// operator cancellation observed anywhere in the loop into a settle (see
+// reclassifyCancel) — so the cancel sticks whether it landed in the agent wait,
+// a gate read, a spawn, or the advance write.
 func (e *Engine) drive(ctx context.Context, task *store.Task) (string, error) {
+	state, err := e.driveLoop(ctx, task)
+	return e.reclassifyCancel(ctx, task, state, err)
+}
+
+// reclassifyCancel converts a cancellation caused by an operator cancel into a
+// settle to CancelState; any other error (including a daemon-shutdown cancel,
+// whose cause is not ErrOperatorCancel) is returned unchanged for recovery. It
+// runs at every drive/reconcile exit so the settle is not tied to one wait site.
+func (e *Engine) reclassifyCancel(ctx context.Context, task *store.Task, state string, err error) (string, error) {
+	if err != nil && errors.Is(err, context.Canceled) && errors.Is(context.Cause(ctx), ErrOperatorCancel) {
+		return e.settleCancelled(ctx, task)
+	}
+	return state, err
+}
+
+// driveLoop runs the interpreter loop until a halt state (goal or terminal).
+func (e *Engine) driveLoop(ctx context.Context, task *store.Task) (string, error) {
 	// transitioned guards the escalated notification: fire only when this drive
 	// actually moved the task into the alert terminal state, not when it was
 	// re-entered already there (a re-run of an escalated issue must stay quiet).
@@ -262,13 +282,7 @@ func (e *Engine) drive(ctx context.Context, task *store.Task) (string, error) {
 			return task.CurrentState, nil
 		}
 		if err != nil {
-			// An operator cancel (the scheduler cancelled this drive's per-issue
-			// context with ErrOperatorCancel) settles to CancelState so the cancel
-			// sticks; any other cancellation (daemon shutdown) aborts and leaves the
-			// state for recovery.
-			if errors.Is(context.Cause(ctx), ErrOperatorCancel) {
-				return e.settleCancelled(ctx, task)
-			}
+			// Cancellation is reclassified by the drive wrapper; other errors surface.
 			return task.CurrentState, err
 		}
 		if next == "" {

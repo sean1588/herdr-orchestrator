@@ -28,8 +28,8 @@ type request struct {
 
 type response struct {
 	JSONRPC string          `json:"jsonrpc"`
-	ID      json.RawMessage `json:"id,omitempty"`
-	Result  interface{}     `json:"result,omitempty"`
+	ID      json.RawMessage `json:"id"` // always emitted (null when the request id is unknown), per JSON-RPC 2.0
+	Result  any             `json:"result,omitempty"`
 	Error   *rpcError       `json:"error,omitempty"`
 }
 
@@ -38,7 +38,7 @@ type rpcError struct {
 	Message string `json:"message"`
 }
 
-func okResp(id json.RawMessage, result interface{}) response {
+func okResp(id json.RawMessage, result any) response {
 	return response{JSONRPC: "2.0", ID: id, Result: result}
 }
 
@@ -48,7 +48,7 @@ func errResp(id json.RawMessage, code int, msg string) response {
 
 // mustMarshal marshals a response, falling back to an internal-error envelope if
 // marshalling somehow fails (it should not for these types).
-func mustMarshal(v interface{}) []byte {
+func mustMarshal(v any) []byte {
 	b, err := json.Marshal(v)
 	if err != nil {
 		b, _ = json.Marshal(errResp(nil, codeInternal, "marshal error"))

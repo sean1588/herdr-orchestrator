@@ -108,8 +108,7 @@ func (s *Scheduler) Serve(ctx context.Context) error {
 		workers = 1
 	}
 	work := make(chan int, queueDepth)
-	inflight := &inflightSet{m: map[int]bool{}}
-	cancels := newCancelRegistry()
+	inflight := &inflightSet{m: map[int]context.CancelCauseFunc{}}
 
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
@@ -117,18 +116,17 @@ func (s *Scheduler) Serve(ctx context.Context) error {
 		go func() {
 			defer wg.Done()
 			for issue := range work {
-				// Derive a per-issue context so a control cancel can interrupt this
-				// one drive (register before RunTask, deregister after). Cancelling
-				// with ErrOperatorCancel makes the drive settle; the parent ctx
-				// cancels it too on daemon shutdown.
+				// Derive a per-issue context and arm the inflight entry with its
+				// cancel func, so a control cancel can interrupt this one drive.
+				// Cancelling with ErrOperatorCancel makes the drive settle; the
+				// parent ctx cancels it too on daemon shutdown.
 				runCtx, cancel := context.WithCancelCause(ctx)
-				cancels.register(issue, cancel)
+				inflight.arm(issue, cancel)
 				if err := s.RunTask(runCtx, issue); err != nil {
 					s.Log.Warn("run task failed", "issue", issue, "err", err)
 				}
-				cancel(nil) // release the context
-				cancels.deregister(issue)
-				inflight.remove(issue) // allow re-discovery (retry on a later poll)
+				cancel(nil)            // release the context
+				inflight.remove(issue) // clears the cancel func; allows re-discovery next poll
 			}
 		}()
 	}
@@ -148,7 +146,7 @@ func (s *Scheduler) Serve(ctx context.Context) error {
 			wg.Wait()
 			return nil
 		case c := <-s.commands: // nil channel when control is disabled: never ready
-			s.handleCommand(ctx, c, work, inflight, cancels)
+			s.handleCommand(ctx, c, work, inflight)
 		case <-ticker.C:
 			if issues, err := s.List(ctx); err != nil {
 				s.Log.Warn("poll failed", "err", err)
@@ -209,15 +207,14 @@ func (s *Scheduler) enqueue(ctx context.Context, work chan int, inflight *inflig
 
 // handleCommand processes an external control command in the poller goroutine —
 // so an enqueue keeps Serve the single sender on the work channel, and a cancel
-// reads the registry without a second owner. The reply channel is buffered, so
-// this never blocks on a caller that has already given up (a cancelled request).
-func (s *Scheduler) handleCommand(ctx context.Context, c command, work chan int, inflight *inflightSet, cancels *cancelRegistry) {
+// reads the inflight set without a second owner. The reply channel is buffered,
+// so this never blocks on a caller that has already given up (a cancelled request).
+func (s *Scheduler) handleCommand(ctx context.Context, c command, work chan int, inflight *inflightSet) {
 	switch c.kind {
 	case cmdEnqueue:
-		s.enqueue(ctx, work, inflight, []int{c.issue})
-		c.reply <- nil
+		c.reply <- s.enqueueOne(ctx, work, inflight, c.issue)
 	case cmdCancel:
-		if cancels.cancel(c.issue, s.cancelCause) {
+		if inflight.cancel(c.issue, s.cancelCause) {
 			c.reply <- nil
 		} else {
 			c.reply <- fmt.Errorf("issue %d is not currently running", c.issue)
@@ -227,21 +224,77 @@ func (s *Scheduler) handleCommand(ctx context.Context, c command, work chan int,
 	}
 }
 
-// inflightSet tracks issues currently enqueued or being driven, so a poll never
-// hands the same non-terminal issue to a second worker.
-type inflightSet struct {
-	mu sync.Mutex
-	m  map[int]bool
+// enqueueOne places a single operator-requested issue on the work channel,
+// returning a descriptive error when it was NOT actually queued — so the MCP
+// caller is never told an issue was enqueued when it was skipped. Unlike the
+// poller's batch enqueue (fire-and-forget: a labelled issue is re-discovered next
+// poll), a manual enqueue has no such backstop, so its disposition must be honest.
+// An already-in-flight issue is a benign success (it is being driven).
+func (s *Scheduler) enqueueOne(ctx context.Context, work chan int, inflight *inflightSet, issue int) error {
+	if inflight.has(issue) {
+		return nil // already being driven
+	}
+	if s.Done != nil {
+		done, err := s.Done(ctx, issue)
+		if err != nil {
+			return fmt.Errorf("issue %d: readiness check failed: %w", issue, err)
+		}
+		if done {
+			return fmt.Errorf("issue %d has already settled; not re-driven", issue)
+		}
+	}
+	if !inflight.add(issue) {
+		return nil // raced another claim; being driven
+	}
+	select {
+	case work <- issue:
+		return nil
+	default:
+		inflight.remove(issue)
+		return fmt.Errorf("issue %d not enqueued: work queue full, retry", issue)
+	}
 }
 
-func (s *inflightSet) add(issue int) bool { // true if newly added
+// inflightSet tracks issues currently enqueued or being driven, so a poll never
+// hands the same non-terminal issue to a second worker. It also holds each
+// driving issue's cancel func (nil while claimed-but-not-yet-running), so a
+// control cancel can interrupt exactly one drive — the cancel handle lives and
+// dies with the same per-issue claim, needing no second structure. Per-issue
+// registration is serialized (one worker per issue at a time), so a mutex-guarded
+// map is race-free.
+type inflightSet struct {
+	mu sync.Mutex
+	m  map[int]context.CancelCauseFunc
+}
+
+func (s *inflightSet) add(issue int) bool { // true if newly claimed
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.m[issue] {
+	if _, ok := s.m[issue]; ok {
 		return false
 	}
-	s.m[issue] = true
+	s.m[issue] = nil
 	return true
+}
+
+// arm records the running drive's cancel func for an already-claimed issue.
+func (s *inflightSet) arm(issue int, cancel context.CancelCauseFunc) {
+	s.mu.Lock()
+	s.m[issue] = cancel
+	s.mu.Unlock()
+}
+
+// cancel invokes the issue's cancel func with cause, returning false if the issue
+// is not currently being driven (unclaimed, or claimed but not yet armed).
+func (s *inflightSet) cancel(issue int, cause error) bool {
+	s.mu.Lock()
+	cancel := s.m[issue]
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel(cause)
+		return true
+	}
+	return false
 }
 
 func (s *inflightSet) remove(issue int) {
@@ -253,5 +306,6 @@ func (s *inflightSet) remove(issue int) {
 func (s *inflightSet) has(issue int) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.m[issue]
+	_, ok := s.m[issue]
+	return ok
 }

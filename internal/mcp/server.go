@@ -36,7 +36,13 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/mcp", s.handleHTTP)
 	mux.HandleFunc("/", s.handleHTTP)
-	srv := &http.Server{Handler: mux}
+	// Derive request contexts from the daemon ctx so a shutdown cancels in-flight
+	// handlers — otherwise a handler blocked submitting a scheduler command (its
+	// only escape watches the request ctx) would wedge until the client hangs up.
+	srv := &http.Server{
+		Handler:     mux,
+		BaseContext: func(net.Listener) context.Context { return ctx },
+	}
 
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(ln) }()
@@ -59,6 +65,13 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 // recover-wrapped so a handler panic never crosses back into the daemon ("no
 // panics in the daemon path").
 func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
+	// MCP client->server messages are POSTed; GET is reserved for the SSE stream
+	// we do not serve. Reject anything else rather than parse an empty body.
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	defer func() {
 		if rec := recover(); rec != nil {

@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -32,6 +33,10 @@ func TestHandleParseError(t *testing.T) {
 	}
 	if out.Error == nil || out.Error.Code != codeParse {
 		t.Fatalf("want parse error %d, got %+v", codeParse, out.Error)
+	}
+	// JSON-RPC 2.0: an error response MUST carry id (null when unknown), not omit it.
+	if !strings.Contains(string(raw), `"id":null`) {
+		t.Fatalf("error response must include \"id\":null, got %s", raw)
 	}
 }
 

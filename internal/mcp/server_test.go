@@ -71,6 +71,20 @@ func TestServeNotification(t *testing.T) {
 	}
 }
 
+func TestServeRejectsNonPost(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(testServer().handleHTTP))
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("GET status = %d, want 405", resp.StatusCode)
+	}
+}
+
 // Serve runs on a real listener and returns nil once its context is cancelled.
 func TestServeLifecycle(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

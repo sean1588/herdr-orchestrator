@@ -14,8 +14,9 @@ A control-plane daemon that turns GitHub issues into pull requests by driving
 > → `merged`. The real merge is gated on `policies.dry_run` (default-on), so the
 > shipped config halts at `merging` and logs the intended merge until you set
 > `dry_run: false`. Triage/intake and the concurrent scheduler daemon now ship
-> (R2). The **MCP surface** and **cross-task memory** remain deferred — tracked in
-> [ROADMAP.md](ROADMAP.md).
+> (R2), and the daemon exposes an optional loopback **MCP control surface**
+> ([below](#mcp-control-surface)). **Cross-task memory** remains deferred —
+> tracked in [ROADMAP.md](ROADMAP.md).
 
 ## Design in one paragraph
 
@@ -30,12 +31,15 @@ GitHub. The engine is the **single writer** of durable task state (SQLite).
 ## Architecture
 
 ```
-cmd/orchestratord/      CLI: validate | run | recover
+cmd/orchestratord/      CLI: validate | plan | run | recover | daemon | version
 internal/config/        workflow types, JSON-Schema validation, the 7 safety invariants
-internal/engine/        the state-graph executor (Phase 1 slice)
+internal/engine/        the state-graph executor
+internal/scheduler/     the daemon loop: one poller, N workers, single-writer store
 internal/store/         SQLite task store + per-transition audit log (single writer)
 internal/exec/          ExecutionBackend interface + herdr implementation
 internal/github/        Client interface + gh CLI implementation (PR detection)
+internal/mcp/           loopback MCP control server (read state + cancel/enqueue)
+internal/notify/        out-of-band escalation/alert notifier (webhook)
 internal/proc/          mockable os/exec runner (the seam under herdr + gh)
 ```
 
@@ -133,9 +137,7 @@ Exit code is `0` when the task reaches `merged` (a real merge) or halts at
 Task state and a per-transition audit log persist in the `--db` SQLite file. Two
 more optional flags are accepted: `--worktrees-dir` (parent dir for the per-task
 git worktrees; defaults to the repo's sibling) and `--task-dir` (where task
-context files are written; defaults to the system temp dir). Two more optional flags are accepted: `--worktrees-dir` (parent dir
-for the per-task git worktrees; defaults to the repo's sibling) and `--task-dir`
-(where task context files are written; defaults to the system temp dir).
+context files are written; defaults to the system temp dir).
 
 Reconcile and resume in-flight tasks after a restart (crash recovery) — keys on
 the deterministic `agent/issue-<n>` branch and the durable task id, never the
@@ -143,6 +145,52 @@ volatile herdr pane id:
 
 ```sh
 orchestratord recover --config <c> --repo /abs/path/to/checkout
+```
+
+## MCP control surface
+
+The `daemon` can expose an optional **MCP server** so an operator or a
+supervising agent can observe its tasks and intervene per-task. It is
+**off by default**; enable it with `--mcp-listen`:
+
+```sh
+orchestratord daemon --config <c> --repo /abs/path/to/checkout \
+  --mcp-listen 127.0.0.1:7777
+```
+
+The server runs in-process (sharing the daemon's single store handle and its
+scheduler), speaks hand-rolled **JSON-RPC 2.0 over HTTP** (the request/response
+subset of MCP's Streamable HTTP transport) on a single `/mcp` endpoint, and adds
+**zero dependencies**.
+
+**Posture:** bind **loopback only**. There is **no auth** — the bind address is
+the trust boundary, so any local process can drive it (including the control
+tools). Run it only where you trust every local process; do not bind a
+non-loopback address.
+
+**Tools:**
+
+| Tool | Args | Does |
+| --- | --- | --- |
+| `list_tasks` | — | list every task with its state, branch, PR, retries |
+| `get_task` | `issue` | one task's current view |
+| `get_audit` | `issue` | a task's state-transition history |
+| `cancel_task` | `issue` | cancel the running drive; it settles to `cancelled` |
+| `enqueue_task` | `issue` | (re-)drive an issue by number (idempotent) |
+
+**Control semantics.** `cancel_task` / `enqueue_task` are
+**dispatch-acknowledged, not completion-acknowledged**: the tool confirms the
+command reached the scheduler and was actionable, then returns. Observe the
+result — a `cancelled` state, a new PR — via `get_task` / `get_audit`. A
+cancelled task **settles to the reserved `cancelled` terminal** (its worktree is
+left in place for inspection, not torn down) and is neither re-driven nor
+re-listed. `cancel_task` on an issue with no active drive is a tool error.
+
+Smoke-test the endpoint with `curl`:
+
+```sh
+curl -s 127.0.0.1:7777/mcp -d \
+  '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_tasks","arguments":{}}}'
 ```
 
 ## The workflow config

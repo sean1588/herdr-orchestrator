@@ -26,20 +26,19 @@ get lost. Update it as phases land.
     suspends (frees its worker) instead of pinning a slot for a 30m in-process poll;
     the scheduler re-drives it each poll; the timeout is audit-anchored (survives
     restarts).
+- **MCP control surface** — the `daemon`'s optional loopback MCP server
+  (`--mcp-listen`): hand-rolled JSON-RPC 2.0 over HTTP (zero new deps), 3 read
+  tools (`list_tasks`/`get_task`/`get_audit`) on the store's single-writer-safe
+  reads + 2 control tools (`cancel_task`/`enqueue_task`) routed through a new
+  scheduler command seam. Cancel cancels a per-issue context; the owning drive
+  settles to a reserved `cancelled` terminal on a detached context, preserving
+  the single-writer invariant. *Deferred within it:* `pause`/`resume`, auth
+  (loopback is the boundary today), and Streamable-HTTP SSE/server-push.
 
 ## Deferred subsystems
 
 Each is its own brainstorm → spec → plan (they carry real design forks — brainstorm
 first). Listed in rough priority.
-
-### MCP server surface
-- **Scope:** expose orchestrator state/control (list tasks, inspect audit, nudge/cancel)
-  over MCP, so an operator or a supervising agent can drive it.
-- **Lands on:** `*store.Store` reads (tasks + audit) + a small command surface; the
-  engine stays the single writer of task state.
-- **Hard questions:** read-only vs control; which mutations are safe to expose;
-  auth/loopback posture (localhost-only with optional OAuth is the model to adopt).
-- **Reference:** CAO's `mcp_server/` (FastMCP) + REST.
 
 ### Cross-task memory / context
 - **Scope:** durable context shared across tasks (repo conventions, prior triage

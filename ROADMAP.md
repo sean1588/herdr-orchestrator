@@ -83,8 +83,103 @@ so they aren't rediscovered from scratch.
   (e.g. `Bash(gh pr view:*)`) aren't deliverable — the launch argv is space-joined into
   the pane shell unquoted, so validation rejects shell-unsafe tokens. Needs quoting at
   delivery to support arg-scoping.
-- **README "out of scope" drift:** the README overview still lists the scheduler /
-  concurrency as out of scope, though R2 shipped them. Small living-doc cleanup.
+- **README "out of scope" drift:** addressed by PR #24 for the README prose. The
+  residual drift is in *code* comments a maintainer reads — tracked under
+  "Phase-stamped comment drift" in the assessment backlog below.
+
+## Code-quality backlog — from the 2026-07-03 assessment
+
+An 8-lens engineering-philosophy assessment (each finding adversarially verified by a
+facts skeptic + a philosophy-fit skeptic, then hand-adjudicated against the source)
+surfaced these. Nothing is on fire — the daemon works and was dogfooded; this is
+pay-down-before-the-next-subsystem work, ordered by priority within tiers.
+
+### Correctness gaps (close before more lands on top)
+
+- **Webhook notifier can block a drive worker forever** — `internal/notify/notify.go:57`.
+  A nil `Client` falls back to `http.DefaultClient` (no `Timeout`), and the daemon ctx
+  (`signal.NotifyContext`) carries no deadline, so a hung webhook endpoint pins that
+  worker's drive loop until SIGINT — at escalation time, in an unattended daemon,
+  contradicting the package's own "must never block the drive loop" contract (line 6).
+  Since #23 made workers the concurrency budget, that's a stuck slot. **Fix:** default
+  the fallback to `&http.Client{Timeout: 10 * time.Second}` (2 lines). Only bites when a
+  real webhook is wired (default notifier is `Nop`).
+- **The decision seam over-trusts the temp-dir verdict file** — `internal/engine/decision.go`.
+  Two facets of one gap: (a) `verdictPath` is keyed only on `task.ID` and never cleared
+  before a new round (line 24), so a round-2 reviewer that reaches herdr's heuristic
+  `done` *without writing* (a dead-pane failure this repo has seen) lets `evaluateDecision`
+  silently re-consume the round-1 verdict → wrong branch with legitimate-looking audit
+  rows; (b) `feedbackTask:130` swallows a missing-file read → implementer resumes with
+  empty feedback, burning a capped retry, and it's the one un-logged swallow in an engine
+  that logs every other. **Fix:** `os.Remove(vp)` before spawning a decision agent (turns
+  done-without-writing into a loud read error) + log the read failure. This is the
+  silent-wrong-judgment class — worth prioritizing on principle.
+
+### Structural cleanup (natural first step of the MCP / second-backend work)
+
+- **`ExecutionBackend` carries 3 dead methods** — `internal/exec/backend.go:57/59/68`
+  (`WaitState`, `Read`, `Close`). Zero production callers (engine uses only
+  `Spawn`/`Events`/`Resolve`/`Cleanup`); pre-Events and pre-#20 leftovers. Every test
+  fake stubs them and the roadmapped container backend would have to implement them, on
+  the one interface `CLAUDE.md` explicitly calls "small." Dead code, no failure mode.
+  **Fix:** delete from the interface + `Herdr` (keep `Read` as a concrete `*Herdr` method
+  if wanted for debugging).
+- **"Settled/resume" semantics are forked between the engine and `main`/daemon, and the
+  forks already disagree** — `cmd/orchestratord/main.go:502` + `internal/engine/engine.go:138`.
+  (a) `main.settledStates` re-derives engine halt knowledge (dry-run halts at `merging`
+  without transitioning), while `engine.Recover`'s `isHalt` omits that halt — so
+  `orchestratord recover` re-drives every dry-run-completed task and appends a redundant
+  `merging→merging` audit row each run. (b) `WorkflowSnapshot` (persisted so recovery
+  "resumes against this, never a possibly-edited --config", `store/task.go:23`) is
+  consumed *only* in `Recover`; the daemon's own restart path `Run`→`ensureTask` drives
+  against live `e.wf` and never reads it, so the documented safety invariant is false in
+  the primary operating mode (and a renamed state makes the daemon error every poll
+  forever, never escalating). **Fix:** one engine-owned `Settled(state)` predicate + a
+  single snapshot-honoring resume path, consumed by `Recover`, `doneChecker`, `SeedFrom`,
+  and `cmdRun`'s exit switch. Small blast radius today, but it's the core seam and
+  already drifting.
+
+### Tests
+
+- **The concurrency-isolation seam is untested** — `internal/engine/engine.go:411`. Since
+  #22's shared hub broadcasts every pane's events to every subscriber,
+  `if ev.PaneID != task.PaneID { continue }` is the only thing isolating concurrent
+  drives — yet deleting that line passes the entire suite (the fakes replay a single-pane
+  stream, more forgiving than the real hub). **Fix:** one interleaving-event test (a
+  foreign pane's `done` before the task's own, with a mutable `fakeGH`) asserting the
+  drive still lands correctly and evaluates the gate exactly once.
+
+### Minor / docs (fold into the next docs touch)
+
+- **Phase-stamped comment drift:** PR #24 corrected the README prose but left stale phase
+  stamps in code comments — `internal/config/types.go:24` ("R2 deferred"),
+  `internal/scheduler/scheduler.go:27` (`Done` documented as "terminal", actually
+  *settled*), `internal/exec/backend.go:24` and `internal/engine/engine.go:67` ("Phase 1").
+- **Gate params `head` / `all_passing` are typed and documented as thresholds but
+  `gatePass` ignores them** — `internal/config/types.go:77`. A silent no-op on the
+  merge-safety gates (`all_passing: false` fails closed by accident, not design).
+  **Fix:** delete the fields + correct the comment, or consume them.
+- **Small pure-deletion duplication:** `cycleBounded` re-implements the validator's cycle
+  classification (`cmd/orchestratord/main.go:234`); two hand-rolled `contains()` vs
+  `slices.Contains` (`internal/config/helpers.go:23`, `internal/engine/decision.go:163`);
+  the verdict-protocol string duplicated verbatim (`internal/engine/decision.go:90`).
+
+### Considered and declined (recorded so they aren't re-opened)
+
+- **A store single-writer concurrency test** — a naive N-goroutine test would be
+  tautological: `busy_timeout(5000)` absorbs distinct-row (row-partitioned) write
+  contention *regardless* of `SetMaxOpenConns(1)`, so it would pass with or without the
+  contract it claims to pin — false confidence. The path already runs under `go test -race`.
+- **Converging the two state-timeout mechanisms** (`internal/engine/engine.go:390`) —
+  same-shape/different-reasons: `blocked_on_gate` is audit-anchored *because* it suspends
+  (no in-process continuity); `implementing` uses an in-process `time.NewTimer` *because*
+  it blocks in-process. Converging adds a fallible store read to the hot path to defend a
+  rare compound edge (repeated restarts while an agent hangs).
+- **`reconcile` hardcoding `"implementing"`** (`internal/engine/engine.go:657`) — a form
+  nit, not a bug. Under the shipped config it is correct: the only other agent-state,
+  `changes_requested`, already has `PRNumber != nil` and so needs no PR short-circuit.
+  Only renamed/alternate configs (out of scope per `CLAUDE.md`) would lose it; `line 667`
+  is a free `task.CurrentState` swap if the block is ever touched.
 
 ## Pointers
 

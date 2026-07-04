@@ -114,19 +114,55 @@ Open `internal/config/testdata/default-pipeline.yaml`. Five sections matter:
   `needs_human`, `review` → `approve` / `request_changes` / `escalate`.
 - **`gates`** — authoritative GitHub checks: `pr_exists`, `ci_green`,
   `approvals`, `no_conflicts`. Only a gate can unlock the merge.
-- **`states`** — the graph itself. The default pipeline is:
+- **`states`** — the graph itself. The default pipeline (from
+  `default-pipeline.yaml`) is:
 
-```
-intake ──(triage)──► queued ──► implementing ──(pr_exists gate)──► pr_open
-  │ reject                                                             │ (review decision)
-  ▼                                          ┌── request_changes ◄─────┤
-closed                          changes_requested ──► pr_open          │ approve
-                                                                       ▼
-                            merged ◄── merging ◄──(merge gate)── approved
+```mermaid
+stateDiagram-v2
+    direction TB
+    [*] --> intake
+
+    intake --> queued: triage = accept
+    intake --> closed: triage = reject
+    intake --> escalated: triage = needs_human / timeout
+
+    queued --> implementing: scheduled
+
+    implementing --> pr_open: agent.done + pr_exists ✓
+    implementing --> escalated: pr_exists ✗ / timeout
+
+    pr_open --> approved: review = approve
+    pr_open --> changes_requested: review = request_changes
+    pr_open --> escalated: review = escalate
+
+    changes_requested --> pr_open: agent.done + pr_exists ✓
+    changes_requested --> escalated: pr_exists ✗ / retry_exhausted
+
+    approved --> merging: merge gate ✓
+    approved --> blocked_on_gate: merge gate ✗
+    blocked_on_gate --> merging: merge gate ✓
+    blocked_on_gate --> escalated: timeout
+
+    merging --> merged: pr.merged
+    merged --> [*]
+    closed --> [*]
+    escalated --> [*]
+
+    classDef agent fill:#e3f2fd,stroke:#1565c0,color:#0d47a1
+    classDef terminal fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20
+    classDef sideeffect fill:#fff3e0,stroke:#e65100,color:#bf360c
+
+    class intake,implementing,pr_open,changes_requested agent
+    class merging sideeffect
+    class merged,closed,escalated terminal
 ```
 
-with `escalated` (needs a human) and `blocked_on_gate` (waiting on CI/approvals)
-as the off-ramps.
+Blue states spawn (or resume) an agent; orange `merging` is the one
+side-effecting state (the real merge, gated on `dry_run`); green states are
+terminal — `merged` (success), `closed` (rejected), `escalated` (needs a human).
+`blocked_on_gate` is the wait state: while the merge gate is failing it stays put
+and re-checks each cycle, exiting to `merging` when the gate clears or to
+`escalated` on timeout.
 
 ### The verdict-file protocol (important if you write your own rubrics)
 

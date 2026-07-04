@@ -24,6 +24,7 @@ type fakeBackend struct {
 	resolveErr error
 	spawns     int
 	spawnLog   []exec.Spawn
+	spawnErr   error    // if set, Spawn fails with it (models a SIGKILL'd subprocess error)
 	cleanups   []string // taskIDs Cleanup was called with
 	cleanupErr error
 }
@@ -31,6 +32,9 @@ type fakeBackend struct {
 func (f *fakeBackend) Spawn(ctx context.Context, s exec.Spawn) (exec.Handle, error) {
 	f.spawns++
 	f.spawnLog = append(f.spawnLog, s)
+	if f.spawnErr != nil {
+		return exec.Handle{}, f.spawnErr
+	}
 	return exec.Handle{PaneID: f.pane, Workdir: "/wt"}, nil
 }
 func (f *fakeBackend) WaitState(ctx context.Context, h exec.Handle, target exec.AgentState) (exec.AgentState, error) {

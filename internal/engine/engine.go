@@ -44,6 +44,22 @@ var autoFiredEvents = map[string]bool{"scheduled": true}
 // in drive; never surfaced to callers.
 var errSuspended = errors.New("suspended: awaiting merge gate")
 
+// ErrOperatorCancel is the cancellation cause an operator cancel carries: the
+// scheduler cancels a drive's per-issue context with this cause, and a drive that
+// observes it settles the task to CancelState instead of aborting, so the cancel
+// sticks. Any other cause (daemon shutdown via SIGINT) aborts the drive and
+// leaves the state untouched for recovery. Exported so the scheduler can cancel
+// with it without importing engine (the daemon injects it).
+var ErrOperatorCancel = errors.New("operator cancel")
+
+// CancelState is the reserved terminal a task lands in when an operator cancels
+// it. It is never a workflow state (never in the YAML or workflow.schema.json);
+// the store accepts it as an opaque current_state, and isHalt plus the daemon's
+// settledStates recognize it as terminal so the task is neither re-driven nor
+// re-listed. A workflow that declares a non-terminal state named "cancelled"
+// would see it force-halted; the default pipeline does not.
+const CancelState = "cancelled"
+
 // Config wires the engine's dependencies and tunables.
 type Config struct {
 	Workflow *config.Workflow
@@ -142,7 +158,7 @@ func (e *Engine) Run(ctx context.Context, issue int) (string, error) {
 	}
 	if !created {
 		if err := e.reconcile(ctx, task); err != nil {
-			return task.CurrentState, err
+			return e.reclassifyCancel(ctx, task, task.CurrentState, err)
 		}
 	}
 	return e.drive(ctx, task)
@@ -222,8 +238,36 @@ func (e *Engine) ensureTask(ctx context.Context, issue int) (*store.Task, bool, 
 	return task, true, nil
 }
 
-// drive runs the interpreter loop until a halt state (goal or terminal).
+// drive runs the interpreter loop until a halt state, then reclassifies an
+// operator cancellation observed anywhere in the loop into a settle (see
+// reclassifyCancel) — so the cancel sticks whether it landed in the agent wait,
+// a gate read, a spawn, or the advance write.
 func (e *Engine) drive(ctx context.Context, task *store.Task) (string, error) {
+	state, err := e.driveLoop(ctx, task)
+	return e.reclassifyCancel(ctx, task, state, err)
+}
+
+// reclassifyCancel converts a drive error caused by an operator cancel into a
+// settle to CancelState; any other error (including a daemon-shutdown cancel,
+// whose cause is not ErrOperatorCancel) is returned unchanged for recovery. It
+// runs at every drive/reconcile exit so the settle is not tied to one wait site.
+//
+// The guard keys off the CONTEXT's cancellation cause, not the error's shape: a
+// cancel that lands mid-subprocess (gh/herdr/git killed by SIGKILL via
+// exec.CommandContext) surfaces as an *exec.ExitError ("signal: killed"), NOT
+// context.Canceled — so requiring context.Canceled would miss exactly the
+// reconcile/spawn/gate-read windows this wrapper exists to cover. Requiring only
+// err != nil keeps a drive that completed (err == nil) from being force-settled
+// when a cancel arrived too late.
+func (e *Engine) reclassifyCancel(ctx context.Context, task *store.Task, state string, err error) (string, error) {
+	if err != nil && errors.Is(context.Cause(ctx), ErrOperatorCancel) {
+		return e.settleCancelled(ctx, task)
+	}
+	return state, err
+}
+
+// driveLoop runs the interpreter loop until a halt state (goal or terminal).
+func (e *Engine) driveLoop(ctx context.Context, task *store.Task) (string, error) {
 	// transitioned guards the escalated notification: fire only when this drive
 	// actually moved the task into the alert terminal state, not when it was
 	// re-entered already there (a re-run of an escalated issue must stay quiet).
@@ -246,6 +290,7 @@ func (e *Engine) drive(ctx context.Context, task *store.Task) (string, error) {
 			return task.CurrentState, nil
 		}
 		if err != nil {
+			// Cancellation is reclassified by the drive wrapper; other errors surface.
 			return task.CurrentState, err
 		}
 		if next == "" {
@@ -778,7 +823,24 @@ func (e *Engine) checkRetryCap(task *store.Task, st config.State) (target string
 }
 
 func (e *Engine) isHalt(state string) bool {
-	return state == e.goal || e.isTerminal(state)
+	return state == e.goal || state == CancelState || e.isTerminal(state)
+}
+
+// settleCancelled records an operator cancel as a terminal transition to
+// CancelState. The drive's context is already cancelled and the store's writes
+// are ctx-aware, so it runs on a context detached from that cancellation (with a
+// bound); otherwise the settle write would itself fail with context.Canceled and
+// the cancel would not stick. The worktree is deliberately NOT torn down: unlike
+// an automated no-PR terminal, an operator cancel is a human intervening on a
+// possibly-runaway agent who may want to inspect its uncommitted work.
+func (e *Engine) settleCancelled(ctx context.Context, task *store.Task) (string, error) {
+	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer cancel()
+	if err := e.advance(sctx, task, CancelState, "operator.cancel", ""); err != nil {
+		return task.CurrentState, fmt.Errorf("settle cancelled: %w", err)
+	}
+	e.log.Info("task cancelled by operator", "task", task.ID)
+	return CancelState, nil
 }
 
 func (e *Engine) isTerminal(state string) bool {

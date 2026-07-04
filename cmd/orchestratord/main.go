@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -39,6 +40,7 @@ import (
 	"github.com/sean1588/herdr-orchestrator/internal/engine"
 	"github.com/sean1588/herdr-orchestrator/internal/exec"
 	"github.com/sean1588/herdr-orchestrator/internal/github"
+	"github.com/sean1588/herdr-orchestrator/internal/mcp"
 	"github.com/sean1588/herdr-orchestrator/internal/notify"
 	"github.com/sean1588/herdr-orchestrator/internal/proc"
 	"github.com/sean1588/herdr-orchestrator/internal/scheduler"
@@ -100,6 +102,7 @@ run/recover/daemon flags:
   --task-dir PATH        dir for task context files (default: temp dir)
   --notify-webhook URL   POST escalation/alert events as JSON (default: none)
   --poll-interval DUR    daemon source poll cadence (default 30s)
+  --mcp-listen ADDR      daemon MCP control server address, e.g. 127.0.0.1:7777 (default: off)
 `)
 }
 
@@ -404,6 +407,7 @@ func cmdDaemon(args []string) int {
 	var cf commonFlags
 	registerCommon(fs, &cf)
 	pollInterval := fs.Duration("poll-interval", 30*time.Second, "source poll cadence")
+	mcpListen := fs.String("mcp-listen", "", "MCP control server listen address, e.g. 127.0.0.1:7777 (default: off)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -461,6 +465,26 @@ func cmdDaemon(args []string) int {
 		Log:      slog.Default(),
 	}
 
+	// Optional loopback MCP control server: shares the daemon's store handle
+	// (reads) and the scheduler command seam (control), on the same signal ctx so
+	// SIGINT tears both down. Binding is done synchronously so a misconfigured
+	// address fails startup rather than silently running without the surface.
+	if *mcpListen != "" {
+		sched.EnableControl(engine.ErrOperatorCancel)
+		ln, err := net.Listen("tcp", *mcpListen)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "daemon: mcp listen %q: %v\n", *mcpListen, err)
+			return 1
+		}
+		srv := mcp.New(w.store, sched, engine.TaskID, slog.Default())
+		go func() {
+			if err := srv.Serve(ctx, ln); err != nil {
+				slog.Error("mcp server stopped", "err", err)
+			}
+		}()
+		slog.Info("mcp control server listening", "addr", *mcpListen)
+	}
+
 	slog.Info("daemon starting", "label", label, "workers", workers, "poll", pollInterval.String())
 	if err := sched.Serve(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "daemon: %v\n", err)
@@ -500,7 +524,8 @@ func terminalStates(wf *config.Workflow) map[string]bool {
 // merge gate ("merging"), a NON-terminal state; without treating that as settled,
 // a completed issue would be re-driven on every poll (unbounded audit growth).
 func settledStates(wf *config.Workflow) map[string]bool {
-	out := terminalStates(wf) // fresh map; safe to extend
+	out := terminalStates(wf)      // fresh map; safe to extend
+	out[engine.CancelState] = true // an operator-cancelled task is terminal (daemon-owned)
 	if wf.Policies.DryRunEnabled() {
 		for name, s := range wf.States {
 			if s.Entry != nil && s.Entry.Action == "merge_pr" {

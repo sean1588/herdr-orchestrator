@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -18,15 +19,16 @@ import (
 // --- fakes ---
 
 type fakeBackend struct {
-	pane       string
-	events     []exec.Event
-	resolve    bool
-	resolveErr error
-	spawns     int
-	spawnLog   []exec.Spawn
-	spawnErr   error    // if set, Spawn fails with it (models a SIGKILL'd subprocess error)
-	cleanups   []string // taskIDs Cleanup was called with
-	cleanupErr error
+	pane           string
+	events         []exec.Event
+	resolve        bool
+	resolveErr     error
+	spawns         int
+	spawnLog       []exec.Spawn
+	spawnErr       error             // if set, Spawn fails with it (models a SIGKILL'd subprocess error)
+	verdictOnSpawn map[string]string // role -> verdict JSON the spawned agent "writes" (see Spawn)
+	cleanups       []string          // taskIDs Cleanup was called with
+	cleanupErr     error
 }
 
 func (f *fakeBackend) Spawn(ctx context.Context, s exec.Spawn) (exec.Handle, error) {
@@ -34,6 +36,13 @@ func (f *fakeBackend) Spawn(ctx context.Context, s exec.Spawn) (exec.Handle, err
 	f.spawnLog = append(f.spawnLog, s)
 	if f.spawnErr != nil {
 		return exec.Handle{}, f.spawnErr
+	}
+	// Model a decision agent (triager/reviewer) writing its verdict during its
+	// run: it lands in the task dir *after* the engine cleared any stale verdict
+	// at spawn, exactly as a real agent would. The task file lives in the task
+	// dir, so its parent is where the verdict belongs.
+	if body, ok := f.verdictOnSpawn[s.Role]; ok {
+		_ = os.WriteFile(verdictPath(filepath.Dir(s.TaskFile), s.TaskID), []byte(body), 0o644)
 	}
 	return exec.Handle{PaneID: f.pane, Workdir: "/wt"}, nil
 }

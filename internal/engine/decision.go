@@ -25,6 +25,19 @@ func verdictPath(taskDir, taskID string) string {
 	return filepath.Join(taskDir, "verdict-"+taskID+".json")
 }
 
+// clearVerdict removes any verdict left from a prior round before a fresh
+// decision agent (triager/reviewer) is spawned. Without it, a reviewer that
+// reaches herdr's heuristic "done" WITHOUT writing (a dead pane) would let
+// evaluateDecision silently re-consume the previous round's verdict — a wrong
+// branch with legitimate-looking audit rows. Clearing turns that into a loud
+// read error instead. A missing file is success (the common first-round case).
+func clearVerdict(taskDir, taskID string) error {
+	if err := os.Remove(verdictPath(taskDir, taskID)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("clear stale verdict: %w", err)
+	}
+	return nil
+}
+
 func readVerdict(taskDir, taskID string) (*verdict, error) {
 	b, err := os.ReadFile(verdictPath(taskDir, taskID))
 	if err != nil {
@@ -86,6 +99,9 @@ func (e *Engine) reviewerTask(task *store.Task, decisionName string) (taskFile, 
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		return "", "", fmt.Errorf("write review task file: %w", err)
 	}
+	if err := clearVerdict(e.taskDir, task.ID); err != nil {
+		return "", "", fmt.Errorf("decision %q: %w", decisionName, err)
+	}
 	vp := verdictPath(e.taskDir, task.ID)
 	kickoff = fmt.Sprintf(
 		"Review PR #%d (branch %s) following the rubric in %s. When done, write your verdict as JSON {\"verdict\": one of %v, \"feedback\": \"...\"} to %s. Stop when the verdict file is written.",
@@ -112,6 +128,9 @@ func (e *Engine) triageTask(ctx context.Context, task *store.Task, decisionName 
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		return "", "", fmt.Errorf("write triage task file: %w", err)
 	}
+	if err := clearVerdict(e.taskDir, task.ID); err != nil {
+		return "", "", fmt.Errorf("decision %q: %w", decisionName, err)
+	}
 	vp := verdictPath(e.taskDir, task.ID)
 	kickoff = fmt.Sprintf(
 		"Triage issue #%d following the rubric in %s. When done, write your verdict as JSON {\"verdict\": one of %v, \"feedback\": \"...\"} to %s. Stop when the verdict file is written.",
@@ -129,6 +148,11 @@ func (e *Engine) feedbackTask(task *store.Task, with string) (taskFile, kickoff 
 	if with == "review_feedback" {
 		if v, verr := readVerdict(e.taskDir, task.ID); verr == nil {
 			feedback = v.Feedback
+		} else {
+			// evaluateDecision read this file moments ago, so a failure here is
+			// anomalous. Resume with empty feedback rather than wedge the loop, but
+			// log it — otherwise it's the one silent swallow in the drive path.
+			e.log.Warn("resuming implementer with empty feedback: verdict unreadable", "task", task.ID, "err", verr)
 		}
 	}
 	path := filepath.Join(e.taskDir, "feedback-task-"+task.ID+".md")

@@ -23,10 +23,11 @@ func fullLoopBackend() *fakeBackend {
 func TestE2E_IssueToMerged(t *testing.T) {
 	st := newStore(t)
 	gh := &fakeGH{pr: &github.PR{Number: 42, State: "OPEN"}, status: greenStatus()}
-	e := newEngine(t, st, fullLoopBackend(), gh, 5*time.Second)
+	b := fullLoopBackend()
+	b.verdictOnSpawn = map[string]string{"reviewer": `{"verdict":"approve","feedback":""}`}
+	e := newEngine(t, st, b, gh, 5*time.Second)
 	dryOff := false
 	e.wf.Policies.DryRun = &dryOff // opt into a real merge
-	writeVerdict(t, e.taskDir, "issue-7", `{"verdict":"approve","feedback":""}`)
 
 	final, err := e.Run(context.Background(), 7)
 	if err != nil {
@@ -57,8 +58,9 @@ func TestE2E_IssueToMerged(t *testing.T) {
 func TestE2E_DryRun_HaltsAtMerging(t *testing.T) {
 	st := newStore(t)
 	gh := &fakeGH{pr: &github.PR{Number: 42, State: "OPEN"}, status: greenStatus()}
-	e := newEngine(t, st, fullLoopBackend(), gh, 5*time.Second)
-	writeVerdict(t, e.taskDir, "issue-7", `{"verdict":"approve","feedback":""}`)
+	b := fullLoopBackend()
+	b.verdictOnSpawn = map[string]string{"reviewer": `{"verdict":"approve","feedback":""}`}
+	e := newEngine(t, st, b, gh, 5*time.Second)
 
 	final, err := e.Run(context.Background(), 7)
 	if err != nil {

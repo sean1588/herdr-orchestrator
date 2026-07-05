@@ -31,9 +31,9 @@ func TestDrive_NoPRTerminal_Cleans(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			st := newStore(t)
 			b := agentDoneBackend()
+			b.verdictOnSpawn = map[string]string{"triager": `{"verdict":"` + tt.verdict + `","feedback":""}`}
 			e := newEngine(t, st, b, &fakeGH{}, 5*time.Second)
 			task := newIntakeTask(t, st)
-			writeVerdict(t, e.taskDir, task.ID, `{"verdict":"`+tt.verdict+`","feedback":""}`)
 
 			final, err := e.drive(context.Background(), task)
 			if err != nil {
@@ -58,9 +58,9 @@ func TestDrive_CleanupError_DoesNotFailDrive(t *testing.T) {
 	st := newStore(t)
 	b := agentDoneBackend()
 	b.cleanupErr = errors.New("herdr momentarily unavailable")
+	b.verdictOnSpawn = map[string]string{"triager": `{"verdict":"reject","feedback":""}`}
 	e := newEngine(t, st, b, &fakeGH{}, 5*time.Second)
 	task := newIntakeTask(t, st)
-	writeVerdict(t, e.taskDir, task.ID, `{"verdict":"reject","feedback":""}`)
 
 	final, err := e.drive(context.Background(), task)
 	if err != nil {
@@ -80,9 +80,9 @@ func TestDrive_CleanupError_DoesNotFailDrive(t *testing.T) {
 func TestDrive_TerminalWithPR_DoesNotClean(t *testing.T) {
 	st := newStore(t)
 	b := agentDoneBackend()
+	b.verdictOnSpawn = map[string]string{"reviewer": `{"verdict":"escalate","feedback":""}`}
 	e := newEngine(t, st, b, &fakeGH{}, 5*time.Second)
 	task := seedPROpen(t, st, 42)
-	writeVerdict(t, e.taskDir, task.ID, `{"verdict":"escalate","feedback":""}`)
 
 	final, err := e.drive(context.Background(), task)
 	if err != nil {

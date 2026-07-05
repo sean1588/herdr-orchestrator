@@ -5,6 +5,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -151,6 +152,23 @@ func TestClearVerdict(t *testing.T) {
 	}
 	if _, err := os.Stat(verdictPath(dir, "issue-1")); !os.IsNotExist(err) {
 		t.Fatalf("verdict file still present after clearVerdict (stat err = %v)", err)
+	}
+}
+
+// A non-ENOENT remove failure must surface, not be swallowed — otherwise a
+// clearVerdict that silently no-ops would reintroduce the stale-verdict bug
+// uncaught. A non-empty directory at the verdict path makes os.Remove fail.
+func TestClearVerdict_RemoveError_IsReported(t *testing.T) {
+	dir := t.TempDir()
+	vp := verdictPath(dir, "issue-1")
+	if err := os.Mkdir(vp, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(vp, "child"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := clearVerdict(dir, "issue-1"); err == nil {
+		t.Fatal("clearVerdict on a non-removable path = nil, want the remove error surfaced")
 	}
 }
 

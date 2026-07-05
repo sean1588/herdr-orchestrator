@@ -12,7 +12,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"time"
 )
+
+// defaultClient bounds a nil-Client webhook with a request timeout. The daemon's
+// context lives for the whole process and carries no deadline, so without a
+// client timeout a hung endpoint would block the calling drive loop forever —
+// violating this package's "must never block the drive loop" contract. It is
+// package-level so calls share one connection pool. An operator that wires their
+// own Client owns its timeout.
+var defaultClient = &http.Client{Timeout: 10 * time.Second}
 
 // Event is an out-of-band signal worth surfacing to an operator.
 type Event struct {
@@ -37,7 +46,7 @@ func (Nop) Notify(context.Context, Event) error { return nil }
 // Webhook POSTs each Event as JSON to URL.
 type Webhook struct {
 	URL    string
-	Client *http.Client // nil => http.DefaultClient
+	Client *http.Client // nil => a bounded default client (see defaultClient)
 }
 
 // Notify marshals ev to JSON and POSTs it to w.URL with a JSON content type. A
@@ -55,7 +64,7 @@ func (w Webhook) Notify(ctx context.Context, ev Event) error {
 
 	client := w.Client
 	if client == nil {
-		client = http.DefaultClient
+		client = defaultClient
 	}
 	resp, err := client.Do(req)
 	if err != nil {

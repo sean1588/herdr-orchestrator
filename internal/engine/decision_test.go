@@ -1,7 +1,9 @@
 package engine
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"os"
 	"strings"
 	"testing"
@@ -57,12 +59,12 @@ func TestPROpen_ReviewVerdict_Branches(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			st := newStore(t)
 			b := agentDoneBackend()
+			b.verdictOnSpawn = map[string]string{"reviewer": `{"verdict":"` + tt.verdict + `","feedback":"do X"}`}
 			e := newEngine(t, st, b, &fakeGH{}, 5*time.Second)
 			if tt.halt != "" {
 				e.goal = tt.halt
 			}
 			task := seedPROpen(t, st, 42)
-			writeVerdict(t, e.taskDir, task.ID, `{"verdict":"`+tt.verdict+`","feedback":"do X"}`)
 
 			final, err := e.drive(context.Background(), task)
 			if err != nil {
@@ -84,10 +86,10 @@ func TestPROpen_ReviewVerdict_Branches(t *testing.T) {
 func TestPROpen_ReviewerTask_CarriesRubricAndVerdictInstruction(t *testing.T) {
 	st := newStore(t)
 	b := agentDoneBackend()
+	b.verdictOnSpawn = map[string]string{"reviewer": `{"verdict":"approve","feedback":""}`}
 	e := newEngine(t, st, b, &fakeGH{}, 5*time.Second)
 	e.goal = "approved"
 	task := seedPROpen(t, st, 42)
-	writeVerdict(t, e.taskDir, task.ID, `{"verdict":"approve","feedback":""}`)
 
 	if _, err := e.drive(context.Background(), task); err != nil {
 		t.Fatalf("drive: %v", err)
@@ -113,10 +115,10 @@ func TestPROpen_ReviewerTask_CarriesRubricAndVerdictInstruction(t *testing.T) {
 func TestPROpen_InvalidVerdict_IsError(t *testing.T) {
 	st := newStore(t)
 	b := agentDoneBackend()
+	b.verdictOnSpawn = map[string]string{"reviewer": `{"verdict":"lgtm","feedback":""}`} // not a declared verdict
 	e := newEngine(t, st, b, &fakeGH{}, 5*time.Second)
 	e.goal = "approved"
 	task := seedPROpen(t, st, 42)
-	writeVerdict(t, e.taskDir, task.ID, `{"verdict":"lgtm","feedback":""}`) // not a declared verdict
 
 	if _, err := e.drive(context.Background(), task); err == nil {
 		t.Fatal("drive should error on a verdict outside the decision's declared set")
@@ -136,6 +138,78 @@ func TestPROpen_MissingVerdictFile_IsError(t *testing.T) {
 	}
 }
 
+func TestClearVerdict(t *testing.T) {
+	dir := t.TempDir()
+	// A no-op (no error) when there is nothing to clear.
+	if err := clearVerdict(dir, "issue-1"); err != nil {
+		t.Fatalf("clearVerdict on an absent file = %v, want nil", err)
+	}
+	// Removes an existing verdict.
+	writeVerdict(t, dir, "issue-1", `{"verdict":"approve","feedback":""}`)
+	if err := clearVerdict(dir, "issue-1"); err != nil {
+		t.Fatalf("clearVerdict = %v, want nil", err)
+	}
+	if _, err := os.Stat(verdictPath(dir, "issue-1")); !os.IsNotExist(err) {
+		t.Fatalf("verdict file still present after clearVerdict (stat err = %v)", err)
+	}
+}
+
+// A reviewer that reaches "done" WITHOUT writing a verdict (a dead pane) must not
+// let the engine re-consume a stale verdict left from a prior round: spawning the
+// reviewer clears the slate, so the missing write surfaces as a read error rather
+// than a silent, legitimate-looking branch on the old verdict.
+func TestPROpen_StaleVerdictNotReconsumed_IsError(t *testing.T) {
+	st := newStore(t)
+	b := agentDoneBackend() // reviewer reaches done but writes nothing (no verdictOnSpawn)
+	e := newEngine(t, st, b, &fakeGH{}, 5*time.Second)
+	e.goal = "approved"
+	task := seedPROpen(t, st, 42)
+	// A stale verdict from a prior round sits on disk.
+	writeVerdict(t, e.taskDir, task.ID, `{"verdict":"approve","feedback":"STALE prior round"}`)
+
+	if _, err := e.drive(context.Background(), task); err == nil {
+		t.Fatal("drive must error when the reviewer reached done without writing (a stale verdict must not be re-consumed)")
+	}
+}
+
+// The same guarantee at the pipeline entry: a triager that reaches done without
+// writing must not re-consume a stale triage verdict.
+func TestIntake_StaleVerdictNotReconsumed_IsError(t *testing.T) {
+	st := newStore(t)
+	b := agentDoneBackend() // triager reaches done but writes nothing
+	e := newEngine(t, st, b, &fakeGH{}, 5*time.Second)
+	e.goal = "queued"
+	task := &store.Task{ID: "issue-9", Issue: 9, Branch: "agent/issue-9", CurrentState: "intake"}
+	if err := st.CreateTask(context.Background(), task); err != nil {
+		t.Fatal(err)
+	}
+	writeVerdict(t, e.taskDir, task.ID, `{"verdict":"accept","feedback":"STALE prior round"}`)
+
+	if _, err := e.drive(context.Background(), task); err == nil {
+		t.Fatal("drive must error when the triager reached done without writing (a stale verdict must not be re-consumed)")
+	}
+}
+
+// A resumed implementer with an unreadable verdict file must still proceed (empty
+// feedback), but the swallowed read must be logged — it is otherwise the one
+// silent failure in an engine that logs every other.
+func TestFeedbackTask_MissingVerdict_LogsWarning(t *testing.T) {
+	st := newStore(t)
+	e := newEngine(t, st, agentDoneBackend(), &fakeGH{}, 5*time.Second)
+	var buf bytes.Buffer
+	e.log = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	pr := 42
+	task := &store.Task{ID: "issue-5", Issue: 5, Branch: "agent/issue-5", CurrentState: "changes_requested", PRNumber: &pr}
+	// no verdict file present -> the read fails
+
+	if _, _, err := e.feedbackTask(task, "review_feedback"); err != nil {
+		t.Fatalf("feedbackTask must not fail on a missing verdict: %v", err)
+	}
+	if !strings.Contains(buf.String(), "verdict") {
+		t.Errorf("expected a warning mentioning the unreadable verdict; logs: %q", buf.String())
+	}
+}
+
 // Driving from intake spawns the triager and branches on its verdict.
 func TestIntake_TriageVerdict_Branches(t *testing.T) {
 	tests := []struct{ name, verdict, goal, wantTo string }{
@@ -150,13 +224,13 @@ func TestIntake_TriageVerdict_Branches(t *testing.T) {
 				{PaneID: "w1:p1", State: exec.StateWorking},
 				{PaneID: "w1:p1", State: exec.StateDone},
 			}}
+			b.verdictOnSpawn = map[string]string{"triager": `{"verdict":"` + tt.verdict + `","feedback":""}`}
 			e := newEngine(t, st, b, &fakeGH{}, 5*time.Second)
 			e.goal = tt.goal
 			task := &store.Task{ID: "issue-9", Issue: 9, Branch: "agent/issue-9", CurrentState: "intake"}
 			if err := st.CreateTask(context.Background(), task); err != nil {
 				t.Fatal(err)
 			}
-			writeVerdict(t, e.taskDir, task.ID, `{"verdict":"`+tt.verdict+`","feedback":""}`)
 
 			final, err := e.drive(context.Background(), task)
 			if err != nil {
@@ -182,6 +256,7 @@ func TestIntake_TriagerTask_CarriesRubricAndIssueNoPR(t *testing.T) {
 	b := &fakeBackend{pane: "w1:p1", events: []exec.Event{
 		{PaneID: "w1:p1", State: exec.StateDone},
 	}}
+	b.verdictOnSpawn = map[string]string{"triager": `{"verdict":"accept","feedback":""}`}
 	gh := &fakeGH{issue: &github.Issue{Number: 9, Title: "Add feature", Body: "the details"}}
 	e := newEngine(t, st, b, gh, 5*time.Second)
 	e.goal = "queued"
@@ -189,7 +264,6 @@ func TestIntake_TriagerTask_CarriesRubricAndIssueNoPR(t *testing.T) {
 	if err := st.CreateTask(context.Background(), task); err != nil {
 		t.Fatal(err)
 	}
-	writeVerdict(t, e.taskDir, task.ID, `{"verdict":"accept","feedback":""}`)
 
 	if _, err := e.drive(context.Background(), task); err != nil {
 		t.Fatalf("drive: %v", err)

@@ -135,6 +135,16 @@ func cmdValidate(args []string) int {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		return 2
 	}
+	// Beyond schema+semantic validity, verify every state is drivable by the
+	// interpreter — a state with only a decision/gate/timeout trigger dead-ends
+	// at runtime, which the graph-shape checks above do not catch.
+	if xerrs := engine.CheckExecutable(wf); len(xerrs) > 0 {
+		for _, e := range xerrs {
+			fmt.Printf("  ERROR %s\n", e)
+		}
+		fmt.Printf("\nFAIL: %d error(s), %d warning(s)\n", len(xerrs), len(warnings))
+		return 1
+	}
 	fmt.Printf("\nOK: %q valid (%d warning(s))\n", wf.Name, len(warnings))
 	return 0
 }
@@ -283,6 +293,12 @@ func (cf commonFlags) wire(ctx context.Context) (*wired, error) {
 	}
 	for _, w := range warnings {
 		fmt.Fprintf(os.Stderr, "  WARN  %s\n", w)
+	}
+	// Fail fast: a config that passes schema+semantic validation can still have a
+	// state the engine cannot drive (a runtime dead-end). Refuse to start rather
+	// than silently re-drive-and-fail it every poll.
+	if xerrs := engine.CheckExecutable(wf); len(xerrs) > 0 {
+		return nil, fmt.Errorf("workflow not executable:\n  %s", strings.Join(xerrs, "\n  "))
 	}
 
 	absRepo, err := filepath.Abs(cf.repo)

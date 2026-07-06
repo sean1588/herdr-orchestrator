@@ -299,6 +299,50 @@ func TestRun_Timeout_Escalates(t *testing.T) {
 	}
 }
 
+func seedImplementingEntry(t *testing.T, st *store.Store, id string, ts time.Time) {
+	t.Helper()
+	if err := st.AppendAudit(context.Background(), store.AuditEntry{
+		TaskID: id, TS: ts, FromState: "queued", ToState: "implementing", Trigger: "scheduled",
+	}); err != nil {
+		t.Fatalf("seed implementing entry: %v", err)
+	}
+}
+
+// The implementing timeout is audit-anchored to the state's entry time, so it
+// survives a daemon restart / re-drive: a task already past its deadline
+// escalates immediately instead of getting a fresh full-duration budget. Without
+// this a stuck agent evades the timeout by outliving restarts. Mirrors the
+// blocked_on_gate audit anchor.
+func TestRun_ImplementingTimeout_AuditAnchored_EscalatesPastDeadline(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+	entry := time.Unix(1000, 0).UTC()
+	task := &store.Task{ID: "issue-7", Issue: 7, Branch: "agent/issue-7", CurrentState: "implementing"}
+	if err := st.CreateTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	seedImplementingEntry(t, st, task.ID, entry)
+
+	b := &fakeBackend{pane: "w1:p1"}                                       // no events: only the anchored timeout can fire
+	e := newEngine(t, st, b, &fakeGH{}, time.Hour)                         // a fresh full-duration timer would not fire in-test
+	e.now = func() time.Time { return entry.Add(time.Hour + time.Minute) } // elapsed 1h1m >= 1h
+
+	// Bound the drive so the pre-fix behavior (a fresh 1h timer) fails fast rather
+	// than hanging; the fix escalates immediately, well inside the bound.
+	dctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	final, err := e.drive(dctx, task)
+	if err != nil {
+		t.Fatalf("drive: %v (past its audit-anchored deadline it must escalate, not wait on a fresh timer)", err)
+	}
+	if final != "escalated" {
+		t.Fatalf("final = %q, want escalated", final)
+	}
+	if !hasAudit(auditFor(t, st, task.ID), "implementing", "escalated", "timeout", "") {
+		t.Error("missing implementing->escalated timeout audit")
+	}
+}
+
 // A transient Resolve error must NOT be treated as "no live agent": doing so
 // would re-spawn over a possibly-live worktree, force-removing it and destroying
 // uncommitted work.

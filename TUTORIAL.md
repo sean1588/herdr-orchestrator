@@ -19,6 +19,7 @@ You'll go from zero to:
 3. Driving one issue end-to-end with `run`.
 4. Running the `daemon` to poll a label and drive many issues concurrently.
 5. Observing and steering a live daemon over the MCP control surface.
+6. Handing it to an autonomous supervisor — the `operate-orchestrator` skill.
 
 ---
 
@@ -367,7 +368,55 @@ curl -s 127.0.0.1:7777/mcp -d \
 
 ---
 
-## 9. Recover after a crash
+## 9. Autonomous supervision: the `operate-orchestrator` skill
+
+The MCP surface (§8) lets *you* steer a daemon by hand. The bundled
+**`operate-orchestrator` Claude Code skill** turns a Claude Code session into an
+**autonomous operator** that watches the daemon for you — keeping the pipeline
+flowing and calling a human only when the pipeline genuinely needs one. It ships
+in the repo at `.claude/skills/operate-orchestrator/SKILL.md`, so any clone (or
+Claude Code session opened in this repo) can use it.
+
+**Set it up** — run the daemon with its MCP server on (§8), then register that
+endpoint as a Claude Code MCP server **once** so the control tools are native:
+
+```bash
+claude mcp add --transport http orchestrator http://127.0.0.1:7777/mcp
+claude mcp list   # expect: "orchestrator: ... ✔ Connected"
+```
+
+**Run it** — drive the skill on a cadence with `/loop` (or just say "operate the
+orchestrator" and let it self-pace):
+
+```
+/loop 5m operate the orchestrator
+```
+
+Each tick it observes `list_tasks` and:
+
+- **daemon down** → restarts it in its pane; on startup the daemon re-seeds and
+  resumes every in-flight task itself, so this is the one recovery lever the
+  daemon can't pull for itself;
+- **a runaway task** (retry churn, an externally-closed PR, a dead pane) →
+  `cancel_task` to stop it, then surfaces it — `cancel` is one-way (it settles to
+  `cancelled`), so restarting settled work is a human call;
+- **a healthy, in-flight task** → leaves it alone (a quiet pipeline is a working
+  one);
+- **an escalation** (`escalated`, or a `needs_human` triage verdict) or a broken
+  environment (herdr down, `gh` unauthenticated, an invalid config) → surfaces a
+  `⚠️ ESCALATION` block with the cause and a recommended action, and logs every
+  autonomous action it took.
+
+The guiding principle is **don't fight the daemon**: it already times work out,
+re-drives non-settled tasks, and re-seeds on restart, so the skill only does the
+meta-layer the daemon structurally can't — restart the process, diagnose and
+explain escalations, and judge pathological patterns. The daemon's own
+`--notify-webhook` is the complementary always-on alert channel for when no
+session is watching. See the skill file for the full per-tick procedure.
+
+---
+
+## 10. Recover after a crash
 
 Task state is durable (SQLite), so a killed daemon or `run` loses no ground. To
 reconcile and resume everything in-flight:
@@ -385,7 +434,7 @@ does the same on startup, so in practice you just restart the daemon.
 
 ---
 
-## 10. Troubleshooting & gotchas
+## 11. Troubleshooting & gotchas
 
 - **"not running inside a herdr-managed pane" / backend errors** — you launched
   `run`/`daemon` outside herdr. Start it from a herdr pane so `HERDR_ENV=1` and

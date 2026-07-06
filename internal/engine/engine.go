@@ -432,7 +432,22 @@ func (e *Engine) awaitAgentState(ctx context.Context, task *store.Task, st confi
 		if perr != nil {
 			return "", "", "", fmt.Errorf("parse timeout %q: %w", timeoutT.When.Timeout, perr)
 		}
-		t := time.NewTimer(d)
+		// Anchor the deadline to the audit-recorded state entry, not to now, so it
+		// survives a daemon restart / re-drive (mirrors evaluateGateOrSuspend). A
+		// fresh full-duration timer on every entry would let a stuck agent evade
+		// the timeout by outliving restarts; a task already past its deadline
+		// escalates immediately (remaining clamps to 0).
+		remaining := d
+		entry, ok, eerr := e.store.StateEntryTime(ctx, task.ID, task.CurrentState)
+		if eerr != nil {
+			return "", "", "", fmt.Errorf("state entry time: %w", eerr)
+		}
+		if ok {
+			if remaining = entry.Add(d).Sub(e.now()); remaining < 0 {
+				remaining = 0
+			}
+		}
+		t := time.NewTimer(remaining)
 		defer t.Stop()
 		timer = t.C
 	}

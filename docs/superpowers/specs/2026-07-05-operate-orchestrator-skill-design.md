@@ -119,3 +119,31 @@ documents it.
   confirm it (a) restarts+recovers a killed daemon, (b) surfaces a seeded
   escalation with a correct diagnosis, (c) leaves legitimately-working tasks
   alone. Capture the run in the skill's examples.
+
+### Validated — 2026-07-05 dogfood run
+
+Ran against a live daemon (`--mcp-listen 127.0.0.1:7801`) driving a real backlog
+issue (#29, a ROADMAP comment-drift fix). All three criteria confirmed, plus the
+setup path and the corrected tool semantics:
+
+- **Setup:** `daemon --mcp-listen` + `claude mcp add --transport http … → ✔ Connected`;
+  `list_tasks`/`get_task`/`get_audit` returned real data (via the curl fallback,
+  since tools registered mid-session don't load natively — the documented path).
+- **(c) leave-alone:** issue-29 in `implementing` with a working implementer →
+  supervisor did nothing.
+- **(a) restart+reseed:** killed the daemon mid-flight → `list_tasks` errored
+  (down signal) → restarted in its pane → issue-29 re-seeded, still `implementing`,
+  a fresh implementer re-spawned. No `recover` needed.
+- **(b) surface:** implementer overran its (shortened) 5m timeout → real
+  `implementing→escalated (timeout)` → supervisor read the audit and surfaced a
+  correct diagnosis + recommendation.
+- **Corrected semantics live:** on the settled task, `enqueue_task` →
+  "already settled; not re-driven"; `cancel_task` → "not currently running";
+  state unchanged. Confirms stop-and-escalate ≠ restart.
+
+**Gotcha found:** the daemon executes only `agent.done`/`status.changed` triggers.
+An `intake` written as a bare `{ when: { decision: triage } }` (the
+spec-appendix/reference form) is **not executable** — it needs the testdata form
+(`entry: { spawn: triager }` + `agent.done` → `evaluate: { decision: triage }`).
+The supervisor correctly surfaced the resulting stuck task as an operational
+dead-end. Worth aligning the reference config, or documenting the difference.

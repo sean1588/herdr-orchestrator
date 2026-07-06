@@ -182,6 +182,27 @@ Drive this skill on a cadence:
 Or omit the interval to self-pace. Between ticks there is usually nothing to do —
 that is the healthy state. Do not invent work; a quiet pipeline is a working one.
 
+## Worked example (from a real run)
+
+```
+# tick — task working, within timeout → leave it alone
+list_tasks → [{issue:29, state:"implementing"}]
+
+# a later tick — the daemon process has died
+list_tasks → connection error                → daemon DOWN
+  action: restart it in its pane; on startup it re-seeds issue-29
+          (still implementing) and resumes. No `recover`.
+
+# a later tick — the implementer overran its deadline
+get_audit 29 → … implementing → escalated (trigger=timeout)
+  ⚠️ ESCALATION — issue #29 (escalated)
+  Cause: implementer ran past its deadline without opening a PR
+  Audit: implementing→escalated (timeout); queued→implementing (scheduled)
+  Recommended: inspect the agent's worktree / issue scope, or raise the
+  state's timeout, then open a fresh issue to retry — a settled task
+  cannot be re-driven (enqueue_task 29 → "already settled; not re-driven").
+```
+
 ## Safety
 
 - **Idempotency:** before acting, re-check state — never double-cancel or

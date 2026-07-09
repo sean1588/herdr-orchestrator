@@ -26,9 +26,9 @@ const defaultInterval = 30 * time.Second
 // injected as funcs so it is unit-testable without the engine, store, or gh.
 type Scheduler struct {
 	List     func(ctx context.Context) ([]int, error)           // discover candidate issues
-	Done     func(ctx context.Context, issue int) (bool, error) // true iff a TERMINAL task exists
+	Done     func(ctx context.Context, issue int) (bool, error) // true iff a SETTLED task exists (terminal or cancelled)
 	RunTask  func(ctx context.Context, issue int) error         // drive one issue to completion
-	SeedFrom func(ctx context.Context) ([]int, error)           // non-terminal issues to resume at startup
+	SeedFrom func(ctx context.Context) ([]int, error)           // non-settled issues to resume at startup
 	Interval time.Duration
 	Workers  int
 	Log      *slog.Logger

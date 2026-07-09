@@ -21,7 +21,7 @@ const (
 // Spawn is everything needed to launch one agent in an isolated worktree.
 type Spawn struct {
 	TaskID   string   // durable task id; also the herdr workspace label, e.g. "issue-5"
-	Role     string   // "implementer" (Phase 1)
+	Role     string   // e.g. "implementer" or "reviewer"
 	Branch   string   // deterministic: agent/issue-<n>
 	RepoDir  string   // main checkout (absolute)
 	Base     string   // base branch, e.g. "main"

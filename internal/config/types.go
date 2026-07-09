@@ -19,14 +19,13 @@ type Workflow struct {
 	States     map[string]State    `yaml:"states"`
 }
 
-// Policies holds workflow-wide policy knobs. retry_caps and dry_run are enforced
-// (retry_caps bounds the changes_requested loop; dry_run gates the real merge —
-// see DryRunEnabled). max_concurrent_tasks is parsed but not yet enforced: the
-// scheduler that would honor it is deferred (roadmap R2), so today one issue is
-// driven per run. circuit_breaker and execution are likewise recorded but not
-// yet acted on.
+// Policies holds workflow-wide policy knobs. retry_caps, dry_run, and
+// max_concurrent_tasks are enforced (retry_caps bounds the changes_requested
+// loop; dry_run gates the real merge — see DryRunEnabled; max_concurrent_tasks
+// caps the daemon scheduler's concurrent workers). circuit_breaker and execution
+// are recorded but not yet acted on.
 type Policies struct {
-	MaxConcurrentTasks int            `yaml:"max_concurrent_tasks"` // parsed; scheduler that enforces it is deferred (R2)
+	MaxConcurrentTasks int            `yaml:"max_concurrent_tasks"` // caps the daemon scheduler's concurrent workers
 	DryRun             *bool          `yaml:"dry_run"`              // gates the real merge; nil => default-on
 	CircuitBreaker     bool           `yaml:"circuit_breaker"`
 	RetryCaps          map[string]int `yaml:"retry_caps"` // keyed by state name
@@ -45,7 +44,7 @@ type Execution struct {
 	Sandbox bool   `yaml:"sandbox"`
 }
 
-// Source is a place work originates (Phase 1: github_issues, not yet polled).
+// Source is a place work originates; currently only github_issues, polled by the daemon.
 type Source struct {
 	ID      string         `yaml:"id"`
 	Type    string         `yaml:"type"`

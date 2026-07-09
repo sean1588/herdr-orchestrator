@@ -80,7 +80,7 @@ type Config struct {
 	// Optional; sensible defaults applied by New.
 	TaskDir      string                              // where task files are written; default os.TempDir()
 	Goal         string                              // halt-on-enter success state; default "pr_open"
-	StartState   string                              // where Phase 1 enqueues issues; default "queued"
+	StartState   string                              // where the daemon enqueues discovered issues; default "queued"
 	DurationFunc func(string) (time.Duration, error) // default time.ParseDuration
 	Logger       *slog.Logger
 	// Notifier forwards escalation/alert events out-of-band; default notify.Nop.

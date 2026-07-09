@@ -189,7 +189,7 @@ func (h *Herdr) Resolve(ctx context.Context, label string) (Handle, bool, error)
 }
 
 // Close tears down the agent's herdr workspace (best-effort). The on-disk git
-// worktree is intentionally left for review continuation in Phase 1.
+// worktree is left in place for inspection; Cleanup removes it on the settled path.
 func (h *Herdr) Close(ctx context.Context, hd Handle) error {
 	wsID, err := h.workspaceForPane(ctx, hd.PaneID)
 	if err != nil {

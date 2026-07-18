@@ -117,8 +117,8 @@ orchestratord validate internal/config/testdata/default-pipeline.yaml
   `claude`). Agents run **non-root** with no `--dangerously-skip-permissions`; on
   a brand-new worktree the agent TUI may prompt to trust the folder.
 - An issue to work — for the shipped `default-pipeline.yaml` that means an issue
-  in `sean1588/minicode` (Phase 1 enqueues the `--issue` number directly; the
-  source `select:` label is not yet polled).
+  in `sean1588/minicode`. `run` drives the `--issue` number you pass directly; the
+  `daemon` instead polls the source `select:` label (`agent-ready`).
 
 Drive one issue through the pipeline (to `merged`, or `merging` under the shipped
 `dry_run: true`):
@@ -222,7 +222,7 @@ rejected):
 | `name` | Workflow name (non-empty). |
 | `entry_state` | The state a new task starts in (used for reachability checks). |
 | `policies` | Workflow-wide knobs (below). |
-| `sources` | Where work originates — Phase 1: `github_issues` (validated, not yet polled). |
+| `sources` | Where work originates — `github_issues`, polled by the `daemon` on the `select:` label. |
 | `roles` | Agent profiles a state can `spawn`/`resume`. |
 | `gates` | Deterministic predicates over **authoritative** sources (GitHub). |
 | `decisions` | Constrained judgment hooks with a closed set of `verdicts`. |

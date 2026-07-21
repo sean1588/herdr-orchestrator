@@ -139,6 +139,55 @@ func TestPROpen_MissingVerdictFile_IsError(t *testing.T) {
 	}
 }
 
+// A decision agent (Claude Code) often finishes by landing at an idle prompt
+// rather than reporting "done". If the verdict file is present, idle must be
+// treated as done so the task doesn't hang at pr_open (which has no timeout).
+func TestPROpen_IdleWithVerdict_TreatedAsDone(t *testing.T) {
+	st := newStore(t)
+	b := &fakeBackend{pane: "w1:p1", events: []exec.Event{
+		{PaneID: "w1:p1", State: exec.StateWorking},
+		{PaneID: "w1:p1", State: exec.StateIdle}, // never reports done
+	}}
+	b.verdictOnSpawn = map[string]string{"reviewer": `{"verdict":"approve","feedback":""}`}
+	e := newEngine(t, st, b, &fakeGH{}, 5*time.Second)
+	e.goal = "approved"
+	task := seedPROpen(t, st, 42)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	final, err := e.drive(ctx, task)
+	if err != nil {
+		t.Fatalf("drive: %v (idle-with-verdict should transition, not hang)", err)
+	}
+	if final != "approved" {
+		t.Fatalf("final = %q, want approved", final)
+	}
+	if !hasAudit(auditFor(t, st, task.ID), "pr_open", "approved", "agent.done", "approve") {
+		t.Errorf("missing audit pr_open->approved from idle-with-verdict")
+	}
+}
+
+// The idle shortcut must not mask the "dead pane wrote nothing" case: an idle with
+// no verdict keeps waiting, and a subsequent real done with still no verdict is the
+// loud error the pipeline relies on (mirrors TestPROpen_MissingVerdictFile_IsError).
+func TestPROpen_IdleWithoutVerdict_DoesNotMaskMissingVerdict(t *testing.T) {
+	st := newStore(t)
+	b := &fakeBackend{pane: "w1:p1", events: []exec.Event{
+		{PaneID: "w1:p1", State: exec.StateIdle}, // idle, but nothing written
+		{PaneID: "w1:p1", State: exec.StateDone}, // then done, still nothing
+	}}
+	// no verdictOnSpawn: the agent writes nothing at all
+	e := newEngine(t, st, b, &fakeGH{}, 5*time.Second)
+	e.goal = "approved"
+	task := seedPROpen(t, st, 42)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := e.drive(ctx, task); err == nil {
+		t.Fatal("drive should error when the reviewer idles then finishes without a verdict")
+	}
+}
+
 func TestClearVerdict(t *testing.T) {
 	dir := t.TempDir()
 	// A no-op (no error) when there is nothing to clear.

@@ -20,12 +20,16 @@ func newIntakeTask(t *testing.T, st *store.Store) *store.Task {
 	return task
 }
 
-// A task that settles at a no-PR terminal state (a triage reject -> closed, or an
-// intake needs_human -> escalated) has its worktree + workspace cleaned up.
-func TestDrive_NoPRTerminal_Cleans(t *testing.T) {
-	tests := []struct{ name, verdict, wantTo string }{
-		{"reject -> closed", "reject", "closed"},
-		{"needs_human -> escalated", "needs_human", "escalated"},
+// A clean reject (triage -> closed) tears down its worktree; a needs_human
+// escalation is PRESERVED, since it may hold uncommitted work a human wants to
+// inspect (force-removing it is the data loss dogfood #34 flagged).
+func TestDrive_NoPRTerminal_Cleanup(t *testing.T) {
+	tests := []struct {
+		name, verdict, wantTo string
+		wantClean             bool
+	}{
+		{"reject -> closed tears down", "reject", "closed", true},
+		{"needs_human -> escalated preserves worktree", "needs_human", "escalated", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -45,8 +49,15 @@ func TestDrive_NoPRTerminal_Cleans(t *testing.T) {
 			if task.PRNumber != nil {
 				t.Fatalf("precondition: task should have no PR, got %v", task.PRNumber)
 			}
-			if len(b.cleanups) != 1 || b.cleanups[0] != task.ID {
-				t.Errorf("want Cleanup called once with %q, got %v", task.ID, b.cleanups)
+			wantN := 0
+			if tt.wantClean {
+				wantN = 1
+			}
+			if len(b.cleanups) != wantN {
+				t.Fatalf("cleanups = %v, want %d", b.cleanups, wantN)
+			}
+			if tt.wantClean && b.cleanups[0] != task.ID {
+				t.Errorf("want Cleanup with %q, got %v", task.ID, b.cleanups)
 			}
 		})
 	}

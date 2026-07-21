@@ -127,6 +127,13 @@ func New(c Config) *Engine {
 	if e.taskDir == "" {
 		e.taskDir = os.TempDir()
 	}
+	// Task/verdict files are handed to agents by path in their kickoff, but the
+	// agent runs in its own worktree (a different cwd), so a relative taskDir would
+	// resolve against the wrong directory and the agent couldn't find its rubric or
+	// write its verdict where the engine reads it. Anchor it absolutely once.
+	if abs, err := filepath.Abs(e.taskDir); err == nil {
+		e.taskDir = abs
+	}
 	if e.goal == "" {
 		e.goal = "merged"
 	}
@@ -478,16 +485,43 @@ func (e *Engine) awaitAgentState(ctx context.Context, task *store.Task, st confi
 					return "", "", "", derr
 				}
 				return doneT.Branch[verdict], "agent.done", verdict, nil
+			case exec.StateIdle:
+				// A decision agent (Claude Code) commonly lands at an idle prompt
+				// after writing its verdict rather than reporting "done", which would
+				// otherwise hang the state (pr_open has no timeout). Treat
+				// idle-with-verdict as done for decision states. An idle without a
+				// verdict yet — or in a non-decision (gate) state — keeps waiting,
+				// exactly as before, so the "dead pane wrote nothing" case still
+				// surfaces loudly on a real done rather than being masked here.
+				if dec := decisionRefOf(doneT); dec != "" {
+					v, found, derr := e.tryDecisionVerdict(task, dec)
+					if derr != nil {
+						return "", "", "", derr
+					}
+					if found {
+						return doneT.Branch[v], "agent.done", v, nil
+					}
+				}
 			case exec.StateBlocked:
 				if blockedT != nil && blockedT.Action != nil {
 					e.alert(ctx, task, blockedT.Action.Alert)
 				}
 				// stay in the state and keep waiting
 			default:
-				// working / idle / unknown: keep waiting
+				// working / unknown: keep waiting
 			}
 		}
 	}
+}
+
+// decisionRefOf returns a transition's decision name, or "" if the transition is
+// nil or gate-based. Lets the wait loop ask "is this a decision state?" without a
+// nil-deref when an agent reports done/idle in a state that has no such transition.
+func decisionRefOf(t *config.Transition) string {
+	if t == nil {
+		return ""
+	}
+	return t.DecisionRef()
 }
 
 // evaluateDone resolves the outcome of an agent.done transition: a decision
@@ -877,6 +911,13 @@ func (e *Engine) isTerminal(state string) bool {
 // does not repeat the teardown.
 func (e *Engine) maybeCleanup(ctx context.Context, task *store.Task) {
 	if task.PRNumber != nil || !e.isTerminal(task.CurrentState) {
+		return
+	}
+	// A needs_human escalation (an alerting terminal) can hold uncommitted work a
+	// human wants to inspect — force-removing the worktree here is the data loss
+	// that destroyed a completed-but-uncommitted task. Preserve it (mirrors
+	// settleCancelled); only a clean reject (closed) is torn down.
+	if e.wf.States[task.CurrentState].Alert {
 		return
 	}
 	if err := e.backend.Cleanup(ctx, task.ID); err != nil {

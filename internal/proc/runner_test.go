@@ -43,6 +43,26 @@ func TestRunner_ErrorWrapsStderr(t *testing.T) {
 	_ = out
 }
 
+func TestNewScrubbed_RemovesNamedEnv(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "pat-secret")
+	// A plain runner inherits the parent environment.
+	out, err := New().Run(context.Background(), "", "sh", "-c", `printf %s "$GITHUB_TOKEN"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(out)) != "pat-secret" {
+		t.Fatalf("plain runner should inherit GITHUB_TOKEN, got %q", out)
+	}
+	// A scrubbed runner drops it, so `gh` falls back to its stored OAuth token.
+	out, err = NewScrubbed("GITHUB_TOKEN").Run(context.Background(), "", "sh", "-c", `printf %s "$GITHUB_TOKEN"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(out)) != "" {
+		t.Fatalf("scrubbed runner should drop GITHUB_TOKEN, got %q", out)
+	}
+}
+
 func TestFake_RecordsCallsAndScriptsResponses(t *testing.T) {
 	f := &Fake{Responder: func(c Call) ([]byte, error) {
 		if c.Name == "herdr" && len(c.Args) > 0 && c.Args[0] == "workspace" {

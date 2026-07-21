@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -62,6 +63,12 @@ func (h *Herdr) Spawn(ctx context.Context, s Spawn) (Handle, error) {
 
 	// Best-effort cleanup of any prior attempt's worktree (ignore errors).
 	_, _ = h.r.Run(ctx, "", h.GitBin, "-C", s.RepoDir, "worktree", "remove", wt, "--force")
+	// A prior attempt (e.g. an escalation/re-drive) can leave the worktree path as a
+	// stray directory git no longer tracks, so the `worktree remove` above is a no-op
+	// on it. Clear the dir and prune the registry so the `worktree add` below doesn't
+	// fail with "already exists" and retry forever.
+	_ = os.RemoveAll(wt)
+	_, _ = h.r.Run(ctx, "", h.GitBin, "-C", s.RepoDir, "worktree", "prune")
 	if !s.PreserveBranch {
 		// Fresh task: discard any stale branch so we recreate a clean slate. A
 		// re-spawn (PreserveBranch) must keep the branch — it carries the PR.
@@ -125,7 +132,11 @@ func (h *Herdr) addWorktree(ctx context.Context, s Spawn, wt string) error {
 		}
 		return nil
 	}
-	if _, err := h.r.Run(ctx, "", h.GitBin, "-C", s.RepoDir, "worktree", "add", "-b", s.Branch, wt, s.Base); err != nil {
+	// Fetch the base and branch from origin/<base>, not the local base: a fresh task
+	// must start from the just-merged tip, or a worktree created after an earlier
+	// task merged would miss those commits (a stale-base merge conflict later).
+	_, _ = h.r.Run(ctx, "", h.GitBin, "-C", s.RepoDir, "fetch", "origin", s.Base)
+	if _, err := h.r.Run(ctx, "", h.GitBin, "-C", s.RepoDir, "worktree", "add", "-b", s.Branch, wt, "origin/"+s.Base); err != nil {
 		return fmt.Errorf("create worktree %s: %w", wt, err)
 	}
 	return nil

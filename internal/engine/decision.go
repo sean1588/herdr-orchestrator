@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -55,24 +56,43 @@ func readVerdict(taskDir, taskID string) (*verdict, error) {
 // validated against the closed verdict set — the engine reads a verdict, it never
 // judges. `exec` decisions are out of Phase 2a scope.
 func (e *Engine) evaluateDecision(task *store.Task, name string) (string, error) {
+	v, found, err := e.tryDecisionVerdict(task, name)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return "", fmt.Errorf("decision %q: read verdict file: %w", name, os.ErrNotExist)
+	}
+	return v, nil
+}
+
+// tryDecisionVerdict is the found-aware core of evaluateDecision. found=false with
+// a nil error means the verdict file is not present yet — the agent reported
+// done/idle but hasn't written it, so the caller should keep waiting rather than
+// fail the drive. A non-nil error means the file is present but malformed or names
+// an undeclared verdict (a hard failure). This lets the wait loop (a) re-read after
+// a "done" that narrowly preceded the file write, and (b) treat a decision agent
+// that finished at an idle prompt (verdict present) as done.
+func (e *Engine) tryDecisionVerdict(task *store.Task, name string) (string, bool, error) {
 	d, ok := e.wf.Decisions[name]
 	if !ok {
-		return "", fmt.Errorf("decision %q not declared", name)
+		return "", false, fmt.Errorf("decision %q not declared", name)
 	}
-	switch d.Impl.Type {
-	case "llm":
-		v, err := readVerdict(e.taskDir, task.ID)
-		if err != nil {
-			return "", fmt.Errorf("decision %q: %w", name, err)
-		}
-		if !contains(d.Verdicts, v.Verdict) {
-			return "", fmt.Errorf("decision %q: verdict %q is not one of the declared verdicts %v", name, v.Verdict, d.Verdicts)
-		}
-		e.log.Info("decision", "task", task.ID, "decision", name, "verdict", v.Verdict)
-		return v.Verdict, nil
-	default:
-		return "", fmt.Errorf("decision %q: impl type %q not supported (Phase 2a implements llm)", name, d.Impl.Type)
+	if d.Impl.Type != "llm" {
+		return "", false, fmt.Errorf("decision %q: impl type %q not supported (Phase 2a implements llm)", name, d.Impl.Type)
 	}
+	v, err := readVerdict(e.taskDir, task.ID)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("decision %q: %w", name, err)
+	}
+	if !contains(d.Verdicts, v.Verdict) {
+		return "", false, fmt.Errorf("decision %q: verdict %q is not one of the declared verdicts %v", name, v.Verdict, d.Verdicts)
+	}
+	e.log.Info("decision", "task", task.ID, "decision", name, "verdict", v.Verdict)
+	return v.Verdict, true, nil
 }
 
 // decisionForState returns the decision a state's agent.done transition evaluates

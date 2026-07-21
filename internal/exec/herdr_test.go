@@ -87,9 +87,11 @@ func TestSpawn_ConstructsCommandsAndParsesPane(t *testing.T) {
 	}
 
 	calls := f.Snapshot()
-	// Fresh task: clean slate — delete any stale branch and branch from base.
+	// Fresh task: clean slate — delete any stale branch, fetch the base, and branch
+	// from origin/<base> so it starts at the just-merged tip, not a stale local base.
 	hasExactCall(t, calls, "git", "-C", "/home/u/repo", "branch", "-D", "agent/issue-5")
-	hasExactCall(t, calls, "git", "-C", "/home/u/repo", "worktree", "add", "-b", "agent/issue-5", "/home/u/wt-issue-5", "main")
+	hasExactCall(t, calls, "git", "-C", "/home/u/repo", "fetch", "origin", "main")
+	hasExactCall(t, calls, "git", "-C", "/home/u/repo", "worktree", "add", "-b", "agent/issue-5", "/home/u/wt-issue-5", "origin/main")
 	// herdr workspace labeled with the durable task id.
 	hasExactCall(t, calls, "herdr", "workspace", "create", "--cwd", "/home/u/wt-issue-5", "--label", "issue-5", "--no-focus")
 

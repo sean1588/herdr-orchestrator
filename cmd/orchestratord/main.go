@@ -332,7 +332,10 @@ func (cf commonFlags) wire(ctx context.Context) (*wired, error) {
 		start = *wf.EntryState
 	}
 
-	gh := github.New(runner)
+	// gh runs with GITHUB_TOKEN/GH_TOKEN scrubbed so it uses its stored OAuth token:
+	// a PAT lacking checks:read 403s the check-runs API and breaks the ci_green gate.
+	// The exec backend keeps the full env (agent launches may need it).
+	gh := github.New(proc.NewScrubbed("GITHUB_TOKEN", "GH_TOKEN"))
 	eng := engine.New(engine.Config{
 		Workflow:       wf,
 		WorkflowSource: raw,

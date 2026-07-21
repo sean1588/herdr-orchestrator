@@ -156,7 +156,12 @@ transition's `from → to (trigger/result)`:
   - from `implementing` on `agent.done` (`fail`) → the agent finished but opened
     **no PR**. Human should check the agent's work / the issue's clarity.
   - from `implementing` on `timeout` → the agent ran past its deadline (often a
-    too-large task, or a slow/blocked agent).
+    too-large task or a slow agent — but also a **permission wedge**: a tool not in
+    `permissions.allow` pops an interactive prompt the agent can't answer, and the
+    daemon keeps reading the pane as "working" until the timeout fires. Read the
+    pane read-only (`herdr pane read <pane>`) to tell them apart; a prompt means fix
+    the allow-list, then open a fresh issue to retry — never type into the pane, and
+    a settled task can't be re-driven).
   - from `pr_open` on a `review` verdict of `escalate` → the reviewer punted.
   - from `changes_requested` on `retry_exhausted` → the change cap was hit.
   - from `blocked_on_gate` on `timeout` → the merge gate never cleared (CI red,

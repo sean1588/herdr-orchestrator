@@ -62,6 +62,15 @@ re-driving them and removes the source label. Under `dry_run: true` (the shipped
 default) the real merge is withheld and the task halts at `merging` — that is a
 *success* halt, not a failure.
 
+> **Single-account repos — drop the `approvals` gate.** The shipped default merge
+> gate is `[ci_green, approvals, no_conflicts]`, but GitHub forbids approving your
+> own PR, so on a solo repo `approvals` (`min_approved: 1`) can *never* clear —
+> every task stalls at `blocked_on_gate` and times out to `escalated`. Remove
+> `approvals` from the `approved` / `blocked_on_gate` gate lists in your config;
+> the reviewer `decision` already *is* the review. (The daemon scrubs
+> `GITHUB_TOKEN` / `GH_TOKEN` before calling `gh`, so a PAT in the environment no
+> longer 403s the `ci_green` checks read — you don't need to unset it at launch.)
+
 ---
 
 ## 2. How work flows in: GitHub issues & labels
@@ -117,8 +126,23 @@ Operating implications:
 
 **Arming unattended permissions:** agents run **non-root, without**
 `--dangerously-skip-permissions`, so for hands-off operation pre-authorize them:
-a `permissions.allow` list (`Bash`, `Edit`, `Write`, `Read`, `Glob`, `Grep`) in
-`~/.claude/settings.json`, plus a pre-accepted trust entry for the worktree path.
+a `permissions.allow` list in `~/.claude/settings.json`, plus a pre-accepted trust
+entry for the worktree path. Make the list wide enough that no agent stalls on a
+prompt — at minimum `Bash`, `Edit`, `Write`, `Read`, `Glob`, `Grep`, `TodoWrite`,
+plus `BashOutput` and `KillShell` (implementers start background dev servers) and
+`Task`, **and any MCP server the agents use**, named `mcp__<server>` (e.g. a
+browser MCP for UI checks, or the orchestrator's own control tools under the name
+you registered them — `mcp__orchestrator` if agents ever call `get_task`).
+
+> **The narrow-list hazard (a silent wedge).** A tool *not* on the allow-list
+> triggers an interactive permission prompt the agent can't answer — and the
+> daemon still reads the pane as **"working"**, so the task makes no progress until
+> its state timeout fires and escalates it. It looks identical to a slow agent. If
+> a task sits with no audit movement, read its pane read-only (`herdr pane read
+> <pane>`); a prompt means a missing allow-list entry — add it, then let the task
+> re-drive. **Never send keystrokes into an agent pane** to answer the prompt: the
+> daemon can misread the keypress as `agent.done` and tear the task down.
+
 Treat this as temporary global state and **revert it after the run**. Full recipe
 in [TUTORIAL.md](TUTORIAL.md) §11.
 
@@ -252,7 +276,9 @@ When you're done operating:
 3. **Deregister the MCP server** — `claude mcp remove orchestrator`.
 4. **Clean up herdr** — close the workspaces/panes the daemon opened, and prune
    per-task worktrees (`git worktree prune`) if you want the checkout tidy.
-   Cancelled tasks intentionally leave their worktree for inspection.
+   **Cancelled and `needs_human`-escalated tasks intentionally keep their
+   worktree** so a human can recover uncommitted work; remove those by hand once
+   you've inspected them (`git worktree remove --force <path>`).
 5. **Revert temporary global settings** — undo the `~/.claude/settings.json`
    permission/trust entries you armed in §3.1.
 

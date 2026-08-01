@@ -66,7 +66,7 @@ read-only commands. They need no herdr, no `gh`, no network.
 A ready-to-read example config ships in the repo. Point the commands at it:
 
 ```bash
-CONFIG=internal/config/testdata/default-pipeline.yaml
+CONFIG=examples/default-pipeline.yaml
 
 # 1. Validate: JSON-Schema shape + the safety invariants (see below).
 ./orchestratord validate "$CONFIG"
@@ -100,11 +100,12 @@ half-way through driving a real issue.
 
 ## 4. Understand the workflow you're about to run
 
-Open `internal/config/testdata/default-pipeline.yaml`. Five sections matter:
+Open `examples/default-pipeline.yaml`. Five sections matter:
 
-- **`sources`** — where issues come from. The default polls the `github_issues`
-  source `sean1588/minicode` for the label `agent-ready`. (Used by `daemon`; for
-  a single `run` you name the issue directly.)
+- **`sources`** — where issues come from. The default polls a `github_issues`
+  source (the repo you name via `orchestratord init --repo`) for the label
+  `agent-ready`. (Used by `daemon`; for a single `run` you name the issue
+  directly.)
 - **`roles`** — the agents. Each has a `launch` command (`["claude"]`), a
   `task_delivery` (`context_file` — the task is written to a file the agent
   reads, never piped through the terminal), and a `workspace` (`per_task` — a
@@ -182,7 +183,7 @@ shipped `prompts/triage.md` and `prompts/review.md` are examples — a rubric is
 just the instructions your agent follows to reach one of the allowed verdicts.
 
 > **Rubric paths resolve relative to the config file's directory.** If your
-> config is `~/pipelines/default-pipeline.yaml` and references
+> config is `~/pipelines/pipeline.yaml` and references
 > `rubric: prompts/review.md`, the engine looks for
 > `~/pipelines/prompts/review.md`. Keep the `prompts/` folder next to your config.
 
@@ -195,17 +196,18 @@ the loop before turning on the daemon.
 
 ### 5.1 Set up a config with rubrics
 
-Copy the example next to a `prompts/` folder:
+Scaffold the shipped default, wired to your repo:
 
 ```bash
-mkdir -p ~/pipelines/prompts
-cp internal/config/testdata/default-pipeline.yaml ~/pipelines/
-cp internal/config/testdata/prompts/*.md ~/pipelines/prompts/
+./orchestratord init --repo your-org/your-repo --dir ~/pipelines
 ```
 
+That writes `~/pipelines/pipeline.yaml` and `~/pipelines/prompts/` (the same
+files you can read in `examples/`), with the `sources` repo already set.
+
 For a single `run` you name the issue on the command line, so the `sources`
-block isn't consulted here — but it's read by the `daemon` later (§7) and it must
-be valid, so set its `repo`/`label` to match your repo now:
+block isn't consulted here — but it's read by the `daemon` later (§7). `init`
+already set its `repo`; confirm it (and the `label`, if you passed `--label`):
 
 ```yaml
 sources:
@@ -231,7 +233,7 @@ From a herdr pane (`echo $HERDR_ENV` → `1`):
 
 ```bash
 ./orchestratord run \
-  --config ~/pipelines/default-pipeline.yaml \
+  --config ~/pipelines/pipeline.yaml \
   --repo   /path/to/your-repo-checkout \
   --issue  42 \
   --base   main \
@@ -283,14 +285,16 @@ halts at `merging` and logs the intended merge.
 
 When you've watched a few runs and trust the loop, set `dry_run: false` in your
 config. Now, once a task reaches `approved` and the merge gate
-(`ci_green` + `approvals` + `no_conflicts`) passes, the engine runs
+(`ci_green` + `no_conflicts` — plus `approvals` if you've added it) passes, the engine runs
 `gh pr merge --squash --delete-branch` and advances to `merged`. If the gate
 *doesn't* pass (CI still running, no approval yet, conflicts), the task goes to
 `blocked_on_gate` and is re-checked until it clears or times out.
 
-> Keep `min_approved: 1` under the `approvals` gate for real repos — it means the
-> orchestrator won't merge without a human (or another reviewer) approving on
-> GitHub. Set it to `0` only for throwaway experiments.
+> The `approvals` gate (`min_approved: 1`) ships **defined but unused**: GitHub
+> forbids approving your own PR, so on a single-account repo it could never
+> clear. On a repo with multiple accounts, add `approvals` to the gate lists in
+> the `approved` and `blocked_on_gate` states — then the orchestrator won't
+> merge without a human (or another reviewer) approving on GitHub.
 
 ---
 
@@ -302,7 +306,7 @@ single-writer store.
 
 ```bash
 ./orchestratord daemon \
-  --config ~/pipelines/default-pipeline.yaml \
+  --config ~/pipelines/pipeline.yaml \
   --repo   /path/to/your-repo-checkout \
   --db     ~/pipelines/orchestrator.db \
   --worktrees-dir ~/pipelines/worktrees \
@@ -328,7 +332,7 @@ default**; enable it with `--mcp-listen`:
 
 ```bash
 ./orchestratord daemon \
-  --config ~/pipelines/default-pipeline.yaml \
+  --config ~/pipelines/pipeline.yaml \
   --repo   /path/to/your-repo-checkout \
   --mcp-listen 127.0.0.1:7777
 ```
@@ -423,7 +427,7 @@ reconcile and resume everything in-flight:
 
 ```bash
 ./orchestratord recover \
-  --config ~/pipelines/default-pipeline.yaml \
+  --config ~/pipelines/pipeline.yaml \
   --repo   /path/to/your-repo-checkout \
   --db     ~/pipelines/orchestrator.db
 ```

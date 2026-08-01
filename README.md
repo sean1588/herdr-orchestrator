@@ -18,6 +18,49 @@ A control-plane daemon that turns GitHub issues into pull requests by driving
 > ([below](#mcp-control-surface)). **Cross-task memory** remains deferred —
 > tracked in [ROADMAP.md](ROADMAP.md).
 
+## Quick start: let Claude operate it against your repo
+
+You don't drive the orchestrator by hand — you hand it to a coding agent. The
+repo ships everything the agent needs: [`RUNBOOK.md`](RUNBOOK.md) is the
+end-to-end operator guide, and the
+[`operate-orchestrator` skill](.claude/skills/operate-orchestrator/SKILL.md) is
+the supervision loop.
+
+**Prerequisites:** Go 1.26+ · [herdr](https://herdr.dev) running ·
+[`gh`](https://cli.github.com) authenticated for your repo ·
+[Claude Code](https://claude.com/claude-code) (`claude`) installed.
+
+1. Clone this repo and, **from inside a herdr pane**, start a Claude session in
+   the checkout:
+
+   ```sh
+   git clone https://github.com/sean1588/herdr-orchestrator
+   cd herdr-orchestrator
+   claude
+   ```
+
+2. Tell it what to operate:
+
+   > Read RUNBOOK.md and operate the orchestrator against `<owner>/<repo>`.
+
+   The agent takes it from there: builds the binary, scaffolds a config wired to
+   your repo (`orchestratord init`), creates the source label, starts the
+   daemon, and supervises the pipeline — restarting it if it dies, diagnosing
+   stuck tasks, and surfacing anything that needs you.
+
+3. Feed it work: label a small, well-specified issue in your repo `agent-ready`.
+   The next poll picks it up and runs it through triage → implement → review →
+   merge-gate.
+
+The shipped default is `dry_run: true` — the pipeline stops just short of the
+real merge and halts each task at `merging` as a success. Watch one dry pass,
+then have the agent set `dry_run: false` and restart the daemon.
+
+Not using Claude? Any capable coding agent works — `RUNBOOK.md` §3.0 and the
+skill file are plain markdown, and the control surface is plain JSON-RPC over
+HTTP. Prefer to drive it yourself? The [Usage](#usage) section below has every
+command, and [TUTORIAL.md](TUTORIAL.md) is the human-paced walkthrough.
+
 ## Design in one paragraph
 
 A fixed engine (mechanism) interprets a per-team workflow (policy) supplied as

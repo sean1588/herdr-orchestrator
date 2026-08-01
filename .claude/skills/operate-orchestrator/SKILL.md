@@ -217,5 +217,5 @@ get_audit 29 → … implementing → escalated (trigger=timeout)
   settles the drive to `cancelled` through the engine, never behind its back.
   Don't edit the DB directly.
 - **Merges stay gated:** never try to force a merge. The merge gate
-  (CI + approvals + no-conflicts) is the only path to `merged`; a blocked merge
+  (CI + no-conflicts, plus approvals if configured) is the only path to `merged`; a blocked merge
   is a human decision, so surface it.

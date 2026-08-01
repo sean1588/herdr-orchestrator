@@ -10,7 +10,7 @@ A control-plane daemon that turns GitHub issues into pull requests by driving
 > one issue → spawn an implementer in an isolated git worktree via herdr → the
 > agent opens a PR → spawn a reviewer → the `review` decision branches
 > (approve / request_changes / escalate) → on approve, the merge gate
-> (CI + approvals + mergeable) is polled over GitHub → `merge_pr` squash-merges
+> (CI + mergeable, plus approvals if configured) is polled over GitHub → `merge_pr` squash-merges
 > → `merged`. The real merge is gated on `policies.dry_run` (default-on), so the
 > shipped config halts at `merging` and logs the intended merge until you set
 > `dry_run: false`. Triage/intake and the concurrent scheduler daemon now ship
@@ -95,11 +95,18 @@ through the toolchain, e.g. `go run ./cmd/orchestratord validate <config>`.
 
 ## Usage
 
+Scaffold a working config for your repo — writes `pipeline.yaml` + `prompts/`
+from the shipped default (readable copy in [`examples/`](examples/)):
+
+```sh
+orchestratord init --repo <owner>/<name> [--label agent-ready] [--dir .]
+```
+
 Validate a workflow config (JSON Schema + the safety invariants) — no external
 dependencies, safe to run anywhere:
 
 ```sh
-orchestratord validate internal/config/testdata/default-pipeline.yaml
+orchestratord validate examples/default-pipeline.yaml
 ```
 
 ### Prerequisites for `run` / `recover`
@@ -116,8 +123,8 @@ orchestratord validate internal/config/testdata/default-pipeline.yaml
 - The agent CLI named in the workflow's `roles.*.launch` on `PATH` (default
   `claude`). Agents run **non-root** with no `--dangerously-skip-permissions`; on
   a brand-new worktree the agent TUI may prompt to trust the folder.
-- An issue to work — for the shipped `default-pipeline.yaml` that means an issue
-  in `sean1588/minicode`. `run` drives the `--issue` number you pass directly; the
+- An issue to work — in the repo your config's `sources` block names (set by
+  `init --repo`). `run` drives the `--issue` number you pass directly; the
   `daemon` instead polls the source `select:` label (`agent-ready`).
 
 Drive one issue through the pipeline (to `merged`, or `merging` under the shipped
@@ -125,7 +132,7 @@ Drive one issue through the pipeline (to `merged`, or `merging` under the shippe
 
 ```sh
 orchestratord run \
-  --config internal/config/testdata/default-pipeline.yaml \
+  --config pipeline.yaml \
   --repo /abs/path/to/checkout \
   --base main \
   --issue 123 \
@@ -207,7 +214,7 @@ for shape, then seven semantic **safety invariants**. `validate` reports both;
 | `internal/config/workflow.schema.json` | JSON Schema (Draft 2020-12) for the config **shape**; embedded in the binary via `go:embed` and applied first. The authoritative shape contract. |
 | `internal/config/validate.go` | The runtime validator: applies the schema, then the seven invariants, returning errors + warnings. |
 | `validate_workflow.py` (repo root) | Reference spec for the invariants, kept behaviorally equivalent to `validate.go`. Runs standalone: `python3 validate_workflow.py <config> [--schema workflow.schema.json]`. |
-| `internal/config/testdata/default-pipeline.yaml` | The canonical **valid** example — copy this when authoring your own. |
+| `examples/default-pipeline.yaml` | The shipped default pipeline (with `prompts/` beside it) — what `orchestratord init` scaffolds, and the starting point when authoring your own. |
 | `internal/config/testdata/broken-pipeline.yaml` | A structurally-valid config that **violates** the invariants (merge reachable without a gate; an unbounded loop) — used to prove the validator bites. |
 | `spike0.sh` (repo root) | The proven herdr + `gh` command sequence the herdr backend wraps. |
 

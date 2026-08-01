@@ -4,6 +4,7 @@ You are operating **Herdr Orchestrator**: a daemon that turns labeled GitHub
 issues into merged pull requests, unattended. This runbook is your end-to-end
 map — bring the system up from cold, keep it flowing, recover it, and tear it
 down. It is written for an autonomous agent operator, but reads fine for a human.
+Starting from nothing but a fresh clone and a target repo? §3.0 is your path.
 
 Your moment-to-moment job — what to check each pass and how to react — lives in
 the **`operate-orchestrator` skill** (`.claude/skills/operate-orchestrator/SKILL.md`).
@@ -62,12 +63,14 @@ re-driving them and removes the source label. Under `dry_run: true` (the shipped
 default) the real merge is withheld and the task halts at `merging` — that is a
 *success* halt, not a failure.
 
-> **Single-account repos — drop the `approvals` gate.** The shipped default merge
-> gate is `[ci_green, approvals, no_conflicts]`, but GitHub forbids approving your
-> own PR, so on a solo repo `approvals` (`min_approved: 1`) can *never* clear —
-> every task stalls at `blocked_on_gate` and times out to `escalated`. Remove
-> `approvals` from the `approved` / `blocked_on_gate` gate lists in your config;
-> the reviewer `decision` already *is* the review. (The daemon scrubs
+> **Team repos — add the `approvals` gate back.** The shipped default merge gate
+> is `[ci_green, no_conflicts]`; the `approvals` gate (`min_approved: 1`) is
+> defined in the config but referenced by no state, because GitHub forbids
+> approving your own PR — on a single-account repo it could *never* clear, and
+> every task would stall at `blocked_on_gate` and time out to `escalated`. On a
+> repo with multiple accounts, add `approvals` to the `approved` /
+> `blocked_on_gate` gate lists to require a human review before merge; solo, the
+> reviewer `decision` already *is* the review. (The daemon scrubs
 > `GITHUB_TOKEN` / `GH_TOKEN` before calling `gh`, so a PAT in the environment no
 > longer 403s the `ci_green` checks read — you don't need to unset it at launch.)
 
@@ -85,7 +88,7 @@ Both the repo and the label live in the config's **`sources`** block:
 sources:
   - id: gh_issues
     type: github_issues
-    repo: sean1588/minicode      # which repo's issues to poll
+    repo: your-github-user/your-repo # which repo's issues to poll
     select:
       label: agent-ready         # only issues with THIS label are picked up
     emits_to: intake
@@ -112,6 +115,60 @@ Operating implications:
 ---
 
 ## 3. Bring-up (cold start)
+
+### 3.0 From a fresh clone (first-time setup)
+
+If all you were given is this file and a target repo — "operate the
+orchestrator for `<owner>/<name>`" — this is your path. Everything here is
+runnable by an agent; no human hands required.
+
+1. **Build the binary** (pure Go, no cgo — needs only a Go toolchain):
+
+   ```bash
+   go build -o orchestratord ./cmd/orchestratord   # from this repo's root
+   ```
+
+   Put it on `PATH` or call it by path; the rest of this runbook writes
+   `orchestratord`.
+
+2. **Scaffold your config** for the target repo:
+
+   ```bash
+   orchestratord init --repo <owner>/<name> --dir <workdir>
+   ```
+
+   That writes `<workdir>/pipeline.yaml` + `<workdir>/prompts/` — the shipped
+   default pipeline (readable copy in [`examples/`](examples/)) wired to your
+   repo. Pass `--label <name>` to poll a different label than `agent-ready`.
+   Edit nothing else to start; the defaults are chosen to work first-try
+   (`dry_run: true`, merge gate without `approvals` — see §1).
+
+3. **Create the source label** in the target repo (init is filesystem-only):
+
+   ```bash
+   gh label create agent-ready --repo <owner>/<name>
+   ```
+
+4. **Clone the target repo locally** if you don't have a checkout — the daemon
+   needs one (`--repo`, absolute path) and creates per-task worktrees beside it.
+
+5. **Validate**, then continue with §3.1 (prerequisites) and §3.2 (start the
+   daemon):
+
+   ```bash
+   orchestratord validate <workdir>/pipeline.yaml
+   ```
+
+Remember the shipped default is `dry_run: true`: the first run withholds the
+real merge and halts each task at `merging` as a *success*. Supervise one dry
+pass end-to-end, then set `dry_run: false` and restart the daemon.
+
+> **Non-Claude agents (Codex, etc.):** nothing here depends on Claude Code.
+> The per-tick supervision procedure in
+> `.claude/skills/operate-orchestrator/SKILL.md` is plain markdown — read it
+> directly and run its observe → classify → act → escalate → log loop yourself
+> on a cadence. The MCP surface is plain JSON-RPC over HTTP (§6 shows the
+> `curl` form) if your harness has no MCP client.
 
 ### 3.1 Prerequisites — verify all before starting
 
@@ -285,6 +342,9 @@ When you're done operating:
 ---
 
 ## 8. Quick reference
+
+**Scaffold:** `orchestratord init --repo <owner>/<name> [--label agent-ready]
+[--dir .]` → `pipeline.yaml` + `prompts/` (see §3.0).
 
 **Daemon flags:** `--config` · `--repo` · `--base` (main) · `--db`
 (orchestrator.db) · `--task-dir` · `--worktrees-dir` · `--poll-interval` (30s) ·

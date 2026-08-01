@@ -2,6 +2,10 @@
 //
 // Phase 1 subcommands:
 //
+//	orchestratord init --repo <owner/name> [--label agent-ready] [--dir .]
+//	    Scaffold pipeline.yaml + prompts/ from the embedded default, wired
+//	    to the given repo.
+//
 //	orchestratord validate <config.yaml>
 //	    Validate a workflow config (JSON Schema + safety invariants).
 //
@@ -59,6 +63,8 @@ func run(args []string) int {
 		return 2
 	}
 	switch args[0] {
+	case "init":
+		return cmdInit(args[1:])
 	case "validate":
 		return cmdValidate(args[1:])
 	case "plan":
@@ -85,6 +91,7 @@ func usage(w *os.File) {
 	fmt.Fprint(w, `usage: orchestratord <command> [args]
 
 commands:
+  init --repo <owner/name>                       scaffold pipeline.yaml + prompts/ for a repo
   validate <config.yaml>                         validate a workflow config
   plan <config.yaml>                             render the resolved graph + invariants
   run --config <c> --repo <dir> --issue <n>      drive one issue to merged
@@ -103,6 +110,11 @@ run/recover/daemon flags:
   --notify-webhook URL   POST escalation/alert events as JSON (default: none)
   --poll-interval DUR    daemon source poll cadence (default 30s)
   --mcp-listen ADDR      daemon MCP control server address, e.g. 127.0.0.1:7777 (default: off)
+
+init flags:
+  --repo OWNER/NAME      target GitHub repo whose issues to poll (required)
+  --label NAME           source label the daemon polls (default "agent-ready")
+  --dir PATH             directory to scaffold into (default ".")
 `)
 }
 

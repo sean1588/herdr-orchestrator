@@ -47,12 +47,12 @@ code — read the actual config for the workflow you run):
 | --- | --- | --- |
 | `intake` | triager agent triages the issue | `triage` decision → `queued` / `closed` / `escalated`; 15m timeout |
 | `queued` | accepted, awaiting a worker | auto `scheduled` → `implementing` |
-| `implementing` | implementer agent writing code in a worktree | `agent.done` + `pr_exists` gate → `pr_open` / `escalated`; 45m timeout |
+| `implementing` | implementer agent writing code in a worktree | `agent.done` + `pr_exists` gate → `pr_open` / `escalated`; 45m timeout; `blocked_timeout` → `escalated` |
 | `pr_open` | reviewer agent reviewing the PR | `review` decision → `approved` / `changes_requested` / `escalated` |
 | `changes_requested` | implementer resumes with review feedback | `agent.done` + `pr_exists` gate → `pr_open` / `escalated`; `retry_exhausted` → `escalated` |
 | `approved` | merge gate being evaluated | gate pass → `merging`, fail → `blocked_on_gate` |
 | `blocked_on_gate` | merge gate not green; **suspended**, re-checked each poll | gate pass → `merging`; 30m timeout → `escalated` |
-| `merging` | runs the `merge_pr` action (**withheld under `dry_run`**) | `pr.merged` → `merged` |
+| `merging` | runs the `merge_pr` action (**withheld under `dry_run`**), then closes the issue + deletes the remote branch | `pr.merged` → `merged` |
 | `merged` | ✅ terminal (success) | — |
 | `closed` | terminal (triage rejected) | — |
 | `escalated` | 🚨 terminal — **needs a human** | — |
@@ -62,6 +62,14 @@ code — read the actual config for the workflow you run):
 re-driving them and removes the source label. Under `dry_run: true` (the shipped
 default) the real merge is withheld and the task halts at `merging` — that is a
 *success* halt, not a failure.
+
+**A confirmed merge also settles the issue.** The engine closes the source issue
+and deletes the remote branch itself, because the default kickoff opens the PR
+with `gh pr create --fill` — which writes no `Closes #N` trailer, so GitHub would
+close nothing and every merged issue would need closing by hand. Both steps are
+**best-effort**: the merge is irreversible by then, so a bookkeeping failure is a
+log line (`close issue after merge failed` / `delete remote branch after merge
+failed`), never something that re-drives `merging`. A dry run does neither.
 
 > **Team repos — add the `approvals` gate back.** The shipped default merge gate
 > is `[ci_green, no_conflicts]`; the `approvals` gate (`min_approved: 1`) is
@@ -103,9 +111,10 @@ Operating implications:
 - **To feed work:** apply the source label (`agent-ready`) to an issue in that
   repo. The next poll picks it up and runs it through triage → implement →
   review → merge-gate.
-- **The label is auto-removed on settle.** When a task reaches a settled state,
-  the daemon drains the label so the poller stops re-listing it. A settled issue
-  is done from the daemon's point of view.
+- **The label is auto-removed on settle**, and on a confirmed merge the issue is
+  **closed** and its remote branch deleted (see §1). When a task reaches a settled
+  state the daemon drains the label so the poller stops re-listing it. A settled
+  issue is done from the daemon's point of view.
 - **To hold work back:** don't apply the label (or let triage `reject` /
   `needs_human` it). Removing the label from an *in-flight* issue does **not**
   stop the drive — use `cancel_task` for that (§5).
@@ -292,7 +301,11 @@ pipeline asking for a human. `get_audit {issue}` and read the last transition �
 the trigger tells you why:
 
 - `implementing → escalated` on `agent.done` (`fail`) → the agent finished but
-  opened **no PR**.
+  opened **no PR**. If its pane shows a push that failed with *"no upstream
+  branch"*, that is working as intended: task branches are created `--no-track`
+  so a bare `git push` can never retarget the base branch (an agent once landed a
+  commit straight on `main` that way). The agent should push with
+  `git push -u origin <branch>`, which both kickoffs now spell out.
 - `implementing → escalated` on `timeout` → the agent ran past its deadline.
 - `implementing → escalated` on `blocked_timeout` → the agent sat *continuously*
   blocked on an interactive prompt past `policies.blocked_timeout`. Distinct from
@@ -339,9 +352,12 @@ When you're done operating:
 3. **Deregister the MCP server** — `claude mcp remove orchestrator`.
 4. **Clean up herdr** — close the workspaces/panes the daemon opened, and prune
    per-task worktrees (`git worktree prune`) if you want the checkout tidy.
-   **Cancelled and `needs_human`-escalated tasks intentionally keep their
-   worktree** so a human can recover uncommitted work; remove those by hand once
-   you've inspected them (`git worktree remove --force <path>`).
+   **Expect most worktrees to still be there.** The engine only tears one down
+   for a terminal task that produced *no* PR and isn't an alerting terminal — so
+   cancelled tasks, `needs_human` escalations (which can hold uncommitted work a
+   human wants), **and every merged task** keep theirs. Only a clean triage
+   `reject` is auto-removed. Remove the rest by hand once you've looked at them:
+   `git worktree remove --force <path>`, then `git worktree prune`.
 5. **Revert temporary global settings** — undo the `~/.claude/settings.json`
    permission/trust entries you armed in §3.1.
 
@@ -355,6 +371,11 @@ When you're done operating:
 **Daemon flags:** `--config` · `--repo` · `--base` (main) · `--db`
 (orchestrator.db) · `--task-dir` · `--worktrees-dir` · `--poll-interval` (30s) ·
 `--notify-webhook` · `--mcp-listen` (off).
+
+**Key policies:** `dry_run` (default-on; withholds the real merge) ·
+`retry_caps.<state>` · `blocked_timeout` (caps *continuous* agent blocking;
+absent ⇒ unbounded, so a parked agent burns the whole state timeout) ·
+`max_concurrent_tasks`.
 
 **MCP posture:** loopback only, **no auth** — the bind address is the trust
 boundary. Never bind a non-loopback address.

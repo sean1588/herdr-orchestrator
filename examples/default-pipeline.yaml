@@ -16,6 +16,13 @@ policies:
   circuit_breaker: false
   retry_caps:
     changes_requested: 3
+  # How long an agent may sit *continuously* blocked on an interactive prompt
+  # before the engine gives up and takes the state's timeout transition. Blocking
+  # doesn't change state and a state timeout runs from state entry, so without
+  # this a parked agent burns the full state timeout doing nothing. Any "working"
+  # event clears the clock, so a prompt the agent resolves itself never counts.
+  # Remove the key for the old behavior (state timeout only).
+  blocked_timeout: 10m
   execution:
     backend: herdr
     run_as: non_root

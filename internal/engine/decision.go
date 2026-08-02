@@ -181,9 +181,13 @@ func (e *Engine) feedbackTask(task *store.Task, with string) (taskFile, kickoff 
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		return "", "", fmt.Errorf("write feedback task file: %w", err)
 	}
+	// `git push -u origin <branch>`, not a bare `git push`: task branches are created
+	// --no-track (so a bare push can never retarget the base branch), which leaves an
+	// agent that skipped the implementer kickoff's -u with no upstream at all.
+	// Spelling the refspec out here makes this round work regardless.
 	kickoff = fmt.Sprintf(
-		"Address the review feedback in %s on branch %s, then commit and run 'git push' so PR #%d updates. Stop when pushed.",
-		path, task.Branch, prNum(task))
+		"Address the review feedback in %s on branch %s, then commit and run 'git push -u origin %s' so PR #%d updates. Stop when pushed.",
+		path, task.Branch, task.Branch, prNum(task))
 	return path, kickoff, nil
 }
 

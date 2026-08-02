@@ -29,7 +29,12 @@ type Policies struct {
 	DryRun             *bool          `yaml:"dry_run"`              // gates the real merge; nil => default-on
 	CircuitBreaker     bool           `yaml:"circuit_breaker"`
 	RetryCaps          map[string]int `yaml:"retry_caps"` // keyed by state name
-	Execution          Execution      `yaml:"execution"`
+	// BlockedTimeout bounds how long an agent may sit *continuously* blocked
+	// (waiting on an interactive prompt nobody will answer) before the engine
+	// gives up on it. Empty => no bound, i.e. only the state timeout applies.
+	// See Engine.awaitAgentState for why this can't be expressed as a transition.
+	BlockedTimeout string    `yaml:"blocked_timeout"`
+	Execution      Execution `yaml:"execution"`
 }
 
 // DryRunEnabled reports whether auto-merge should be withheld. dry_run is

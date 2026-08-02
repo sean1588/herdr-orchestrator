@@ -33,6 +33,7 @@
         "dry_run": { "type": "boolean" },
         "circuit_breaker": { "type": "boolean" },
         "retry_caps": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
+        "blocked_timeout": { "$ref": "#/$defs/duration" },
         "execution": {
           "type": "object",
           "additionalProperties": false,

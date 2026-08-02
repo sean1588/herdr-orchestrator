@@ -260,7 +260,7 @@ tools are your surface:
 
 | Tool | Args | Use |
 | --- | --- | --- |
-| `list_tasks` | — | primary observe: every task + state, branch, PR, retries |
+| `list_tasks` | — | primary observe: every task + state, branch, PR, retries. **Cannot see a blocked agent** — blocking doesn't change state, so a task parked on an unanswerable prompt looks identical to one working. Check `get_audit` for an `agent.blocked` row, and set `policies.blocked_timeout` so the engine bounds it for you. |
 | `get_task` | `issue` | one task's current view |
 | `get_audit` | `issue` | primary diagnosis: a task's full transition history |
 | `enqueue_task` | `issue` | nudge a **non-settled** idle issue (refused if settled) |
@@ -294,6 +294,10 @@ the trigger tells you why:
 - `implementing → escalated` on `agent.done` (`fail`) → the agent finished but
   opened **no PR**.
 - `implementing → escalated` on `timeout` → the agent ran past its deadline.
+- `implementing → escalated` on `blocked_timeout` → the agent sat *continuously*
+  blocked on an interactive prompt past `policies.blocked_timeout`. Distinct from
+  `timeout` on purpose: parked, not slow. Read the pane read-only to see which
+  prompt, fix the environment that caused it, retry via a fresh issue.
 - `pr_open → escalated` → the reviewer returned `escalate`.
 - `changes_requested → escalated` on `retry_exhausted` → the change cap was hit.
 - `blocked_on_gate → escalated` on `timeout` → the merge gate never cleared
@@ -305,7 +309,9 @@ escalation format.
 
 **A dead daemon** is the one recovery lever the daemon can't pull for itself.
 If `list_tasks` errors or its pane shows the process exited, **restart it in its
-pane** with the same `daemon …` command. On startup it re-seeds and resumes every
+pane** with the same `daemon …` command. **Stop it by SIGINT-ing its pane, not
+with `pkill -f "orchestratord daemon"`** — that pattern also matches your own
+shell and any monitor script containing the string, so it kills them too. On startup it re-seeds and resumes every
 non-settled task on its own — do **not** also run `orchestratord recover` against
 a live daemon (two engines on one DB/repo). `recover` is only the one-shot for
 when no daemon is running:

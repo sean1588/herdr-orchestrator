@@ -105,6 +105,14 @@ Run this each pass. Keep it cheap — most ticks do nothing but observe.
 - Confirm the daemon is alive: if `list_tasks` errors or its pane shows the
   process exited, the daemon is down.
 
+> **`list_tasks` alone cannot see a blocked agent.** Blocking does not change
+> state, so a task parked on an unanswerable prompt looks byte-identical to one
+> making progress — a state-change watcher stays silent through the whole thing.
+> This has cost a real run 47 idle minutes. Also check, each tick:
+> `get_audit {issue}` for an `agent.blocked` row, or grep the daemon pane for
+> `agent blocked`. Configure `policies.blocked_timeout` so the engine bounds it
+> without you, and `--notify-webhook` so it reaches you when nobody is watching.
+
 ### 2. Classify & act (autonomous — then log every action)
 
 | Situation | Action |
@@ -162,6 +170,10 @@ transition's `from → to (trigger/result)`:
     pane read-only (`herdr pane read <pane>`) to tell them apart; a prompt means fix
     the allow-list, then open a fresh issue to retry — never type into the pane, and
     a settled task can't be re-driven).
+  - from `implementing` on `blocked_timeout` → the agent sat continuously blocked
+    past `policies.blocked_timeout`. Distinct from `timeout` on purpose: this one
+    means "parked on a prompt", not "legitimately slow". Read the pane read-only to
+    see *which* prompt, fix the environment that caused it, and open a fresh issue.
   - from `pr_open` on a `review` verdict of `escalate` → the reviewer punted.
   - from `changes_requested` on `retry_exhausted` → the change cap was hit.
   - from `blocked_on_gate` on `timeout` → the merge gate never cleared (CI red,

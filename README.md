@@ -283,12 +283,24 @@ rejected):
 | `states` | The nodes of the state graph (below). |
 
 **`policies`** — `max_concurrent_tasks`, `dry_run`, `circuit_breaker`,
-`retry_caps` (a per-state cap map, `state_name: N`), and `execution`
-(`backend: herdr|local|container`, `run_as: root|non_root`, `sandbox: bool`).
-The engine reads these: `retry_caps` bounds per-state retries and is validated,
-`dry_run` gates the real merge, and `max_concurrent_tasks` bounds the daemon's
-concurrency (R2). `circuit_breaker` and the finer `execution` knobs (`sandbox`)
-are parsed but not yet enforced.
+`retry_caps` (a per-state cap map, `state_name: N`), `blocked_timeout`, and
+`execution` (`backend: herdr|local|container`, `run_as: root|non_root`,
+`sandbox: bool`). The engine reads these: `retry_caps` bounds per-state retries
+and is validated, `dry_run` gates the real merge, `blocked_timeout` bounds
+blocking (below), and `max_concurrent_tasks` bounds the daemon's concurrency
+(R2). `circuit_breaker` and the finer `execution` knobs (`sandbox`) are parsed
+but not yet enforced.
+
+**`blocked_timeout`** (a duration, e.g. `10m`; absent ⇒ unbounded) caps how long
+an agent may sit *continuously* blocked before the engine takes the state's
+timeout transition, with trigger `blocked_timeout` in the audit. It exists
+because a blocked agent is parked on an interactive prompt nobody will answer —
+it will never report done — yet **blocking does not change state**, and a state
+timeout is anchored to state *entry*. Without this the only lever is shortening
+the whole state timeout, which would also kill legitimately long runs. Any
+`working` event clears the clock, so a prompt the agent resolves itself never
+counts; `idle` deliberately does **not** clear it, because a pane parked at an
+unanswerable prompt can report idle. The state timeout remains the hard backstop.
 
 **`roles`** — each has `launch` (argv, required, e.g. `["claude"]`),
 `task_delivery` (`context_file` | `inline`), `workspace` (`per_task` | `shared`),

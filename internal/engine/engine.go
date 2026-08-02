@@ -423,8 +423,16 @@ func (e *Engine) evaluateGateOrSuspend(ctx context.Context, task *store.Task, ga
 }
 
 // awaitAgentState implements the implementing-state wait: react to agent.done
-// (evaluate the gate, branch on pass/fail), alert on agent.blocked (stay), and
-// escalate on the state timeout.
+// (evaluate the gate, branch on pass/fail), alert on agent.blocked, bound how
+// long it may stay blocked (policies.blocked_timeout), and escalate on the state
+// timeout.
+//
+// Why blocked needs its own clock: a blocked agent is parked on an interactive
+// prompt nobody will answer, so it will never report done — but blocking does not
+// change state, and a state timeout is anchored to state *entry*. Without a
+// separate bound the only lever is shortening the whole state timeout, which
+// would also kill legitimately long implementations. Observed cost: an agent
+// blocked 47 minutes before its 60m implementing timeout fired.
 func (e *Engine) awaitAgentState(ctx context.Context, task *store.Task, st config.State) (next, trigger, result string, err error) {
 	doneT := findEventTransition(st, "agent.done")
 	blockedT := findEventTransition(st, "agent.blocked")
@@ -459,6 +467,31 @@ func (e *Engine) awaitAgentState(ctx context.Context, task *store.Task, st confi
 		timer = t.C
 	}
 
+	// The blocked bound only has somewhere to go if the state declares a timeout
+	// transition — its target is by definition "this state gave up". Reusing it
+	// keeps the escalation path single and adds no per-state config.
+	var blockedFor time.Duration
+	if timeoutT != nil && e.wf.Policies.BlockedTimeout != "" {
+		if blockedFor, err = e.parseDur(e.wf.Policies.BlockedTimeout); err != nil {
+			return "", "", "", fmt.Errorf("parse blocked_timeout %q: %w", e.wf.Policies.BlockedTimeout, err)
+		}
+	}
+	// Deliberately a live timer rather than an audit-anchored deadline (unlike the
+	// state timeout above): it must measure *continuous* blocking, so any non-blocked
+	// event clears it and a transient prompt the agent resolves itself never counts.
+	// A daemon restart therefore restarts this clock — acceptable because the
+	// audit-anchored state timeout is still the hard backstop, so the worst case is
+	// exactly today's behavior.
+	var blockedTimer *time.Timer
+	var blockedC <-chan time.Time
+	clearBlocked := func() {
+		if blockedTimer != nil {
+			blockedTimer.Stop()
+			blockedTimer, blockedC = nil, nil
+		}
+	}
+	defer clearBlocked()
+
 	events, err := e.backend.Events(waitCtx)
 	if err != nil {
 		return "", "", "", fmt.Errorf("subscribe to events: %w", err)
@@ -471,6 +504,10 @@ func (e *Engine) awaitAgentState(ctx context.Context, task *store.Task, st confi
 		case <-timer:
 			e.log.Warn("state timeout", "task", task.ID, "state", task.CurrentState)
 			return timeoutT.To, "timeout", "", nil
+		case <-blockedC:
+			e.log.Warn("blocked timeout", "task", task.ID, "state", task.CurrentState,
+				"blocked_for", e.wf.Policies.BlockedTimeout)
+			return timeoutT.To, "blocked_timeout", "", nil
 		case ev, ok := <-events:
 			if !ok {
 				return "", "", "", fmt.Errorf("event stream closed before agent settled")
@@ -506,9 +543,22 @@ func (e *Engine) awaitAgentState(ctx context.Context, task *store.Task, st confi
 				if blockedT != nil && blockedT.Action != nil {
 					e.alert(ctx, task, blockedT.Action.Alert)
 				}
-				// stay in the state and keep waiting
+				// Stay in the state and keep waiting, but start the clock on the
+				// first blocked event so a permanently-parked agent can't sit here
+				// until the state timeout. Repeat blocked events must not restart
+				// it, or a pane that re-reports blocked would extend forever.
+				if blockedFor > 0 && blockedTimer == nil {
+					blockedTimer = time.NewTimer(blockedFor)
+					blockedC = blockedTimer.C
+				}
 			default:
-				// working / unknown: keep waiting
+				// Only *working* counts as recovery, so the bound measures continuous
+				// blocking. Idle is deliberately not recovery: an agent parked at an
+				// unanswerable prompt can read as idle, which is precisely the case
+				// this bound exists to catch — clearing on it would reopen the hole.
+				if ev.State == exec.StateWorking {
+					clearBlocked()
+				}
 			}
 		}
 	}

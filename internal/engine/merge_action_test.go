@@ -3,6 +3,8 @@ package engine
 import (
 	"context"
 	"errors"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -54,6 +56,62 @@ func TestMerging_RealMerge_ReachesMerged(t *testing.T) {
 	}
 	if !hasAudit(auditFor(t, st, task.ID), "merging", "merged", "pr.merged", "") {
 		t.Error("missing audit merging->merged pr.merged")
+	}
+	// The orchestrator owns the merge, so it settles the issue too: the default
+	// kickoff's `gh pr create --fill` writes no "Closes #N" trailer, so nothing
+	// else ever closes the issue (it stayed open after a real run).
+	if !slices.Equal(gh.closedIssues, []int{5}) {
+		t.Errorf("closed issues = %v, want [5] (the task's source issue)", gh.closedIssues)
+	}
+	if len(gh.closeComments) != 1 || !strings.Contains(gh.closeComments[0], "#42") {
+		t.Errorf("close comment %q should reference the merged PR #42", gh.closeComments)
+	}
+	if !slices.Equal(gh.deletedBranches, []string{"agent/issue-5"}) {
+		t.Errorf("deleted branches = %v, want [agent/issue-5]", gh.deletedBranches)
+	}
+}
+
+// The merge is irreversible by the time the bookkeeping runs, so a failure to
+// close the issue or delete the branch must be a log line — never an error that
+// fails the action and re-drives merging.
+func TestMerging_BookkeepingFailuresDoNotFailTheMerge(t *testing.T) {
+	st := newStore(t)
+	gh := &fakeGH{
+		closeErr:  errors.New("issue close forbidden"),
+		deleteErr: errors.New("branch already gone"),
+	}
+	e := newEngine(t, st, &fakeBackend{}, gh, 5*time.Second)
+	dryRunOff := false
+	e.wf.Policies.DryRun = &dryRunOff
+	task := seedAt(t, st, "merging", 42, nil)
+
+	final, err := e.drive(context.Background(), task)
+	if err != nil {
+		t.Fatalf("drive: %v", err)
+	}
+	if final != "merged" {
+		t.Fatalf("final = %q, want merged despite bookkeeping errors", final)
+	}
+	if len(gh.closedIssues) != 1 || len(gh.deletedBranches) != 1 {
+		t.Errorf("both bookkeeping calls should still be attempted, got closes=%v deletes=%v",
+			gh.closedIssues, gh.deletedBranches)
+	}
+}
+
+// A dry run withholds every side effect, including the post-merge bookkeeping —
+// closing the issue would be as unrecoverable as the merge itself.
+func TestMerging_DryRun_DoesNotCloseIssueOrDeleteBranch(t *testing.T) {
+	st := newStore(t)
+	gh := &fakeGH{} // default-pipeline ships dry_run: true
+	e := newEngine(t, st, &fakeBackend{}, gh, 5*time.Second)
+	task := seedAt(t, st, "merging", 42, nil)
+
+	if _, err := e.drive(context.Background(), task); err != nil {
+		t.Fatalf("drive: %v", err)
+	}
+	if len(gh.closedIssues) != 0 || len(gh.deletedBranches) != 0 {
+		t.Errorf("dry run must not settle anything, got closes=%v deletes=%v",
+			gh.closedIssues, gh.deletedBranches)
 	}
 }
 

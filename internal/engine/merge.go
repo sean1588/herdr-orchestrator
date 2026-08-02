@@ -56,5 +56,25 @@ func (e *Engine) runMergeAction(ctx context.Context, task *store.Task, st config
 		return "", "", "", fmt.Errorf("state %q: no pr.merged transition", task.CurrentState)
 	}
 	e.log.Info("merged PR", "task", task.ID, "pr", pr)
+	e.settleMerged(ctx, task, pr)
 	return mt.To, "pr.merged", "", nil
+}
+
+// settleMerged finishes the bookkeeping a confirmed merge implies: close the
+// source issue and drop the remote branch. Both are best-effort — the merge has
+// already happened and is irreversible, so a bookkeeping failure must be a log
+// line, never an error that re-drives the merge action.
+//
+// The issue close is the orchestrator's job precisely because the merge is: the
+// default kickoff opens the PR with `gh pr create --fill`, which writes no
+// "Closes #N" trailer, so GitHub closes nothing on merge and the issue was left
+// open after a successful run.
+func (e *Engine) settleMerged(ctx context.Context, task *store.Task, pr int) {
+	comment := fmt.Sprintf("Merged in #%d by the orchestrator (task %s).", pr, task.ID)
+	if err := e.gh.CloseIssue(ctx, e.repoDir, task.Issue, comment); err != nil {
+		e.log.Warn("close issue after merge failed", "task", task.ID, "issue", task.Issue, "err", err)
+	}
+	if err := e.gh.DeleteRemoteBranch(ctx, e.repoDir, task.Branch); err != nil {
+		e.log.Warn("delete remote branch after merge failed", "task", task.ID, "branch", task.Branch, "err", err)
+	}
 }

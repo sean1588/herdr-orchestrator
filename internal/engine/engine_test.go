@@ -93,6 +93,14 @@ type fakeGH struct {
 	// Merge (default "MERGED"). Set to e.g. "OPEN" to simulate `gh pr merge`
 	// exiting 0 while the PR is not actually merged (a merge queue).
 	mergeResultState string
+
+	// Post-merge bookkeeping. The engine runs both best-effort, so the errors are
+	// injectable to prove neither can fail an already-irreversible merge.
+	closedIssues    []int
+	closeComments   []string
+	closeErr        error
+	deletedBranches []string
+	deleteErr       error
 }
 
 func (g *fakeGH) FindPR(ctx context.Context, repoDir, branch string) (*github.PR, error) {
@@ -122,6 +130,15 @@ func (g *fakeGH) PRStatus(ctx context.Context, repoDir string, pr int) (*github.
 		return g.status, nil
 	}
 	return &github.PRStatus{State: "OPEN"}, nil
+}
+func (g *fakeGH) DeleteRemoteBranch(ctx context.Context, repoDir, branch string) error {
+	g.deletedBranches = append(g.deletedBranches, branch)
+	return g.deleteErr
+}
+func (g *fakeGH) CloseIssue(ctx context.Context, repoDir string, number int, comment string) error {
+	g.closedIssues = append(g.closedIssues, number)
+	g.closeComments = append(g.closeComments, comment)
+	return g.closeErr
 }
 func (g *fakeGH) Merge(ctx context.Context, repoDir string, pr int) error {
 	g.merges++

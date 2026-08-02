@@ -114,10 +114,14 @@ Past `pr_open` the engine runs the rest of the pipeline:
   past it, the task escalates.
 - **Merge.** `merging` runs the `merge_pr` action — **gated on `policies.dry_run`
   (default-on)**. A dry run logs the intended merge and halts at `merging`; with
-  `dry_run: false` it `gh pr merge --squash --delete-branch`, verifies the PR is
-  `MERGED` (authoritative), and reaches `merged`. Merge is reachable only through
-  a gate (a safety invariant) and the side effect itself is gated again by
-  `dry_run`.
+  `dry_run: false` it `gh pr merge --squash`, verifies the PR is `MERGED`
+  (authoritative), and reaches `merged`. Merge is reachable only through a gate
+  (a safety invariant) and the side effect itself is gated again by `dry_run`.
+  Once the merge is confirmed the engine settles the task's bookkeeping: it
+  closes the source issue (the default kickoff's `gh pr create --fill` writes no
+  `Closes #N` trailer, so nothing else would) and deletes the remote branch.
+  Both are best-effort — the merge is already irreversible, so a bookkeeping
+  failure is logged rather than re-driven as a failed merge.
 
 ## Build, test
 

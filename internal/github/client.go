@@ -55,7 +55,16 @@ type Client interface {
 	// PRStatus reads the merge-gate inputs (state, checks, reviews, mergeability)
 	// for a PR in one call.
 	PRStatus(ctx context.Context, repoDir string, pr int) (*PRStatus, error)
-	// Merge squash-merges a PR and deletes its head branch. It is side-effecting;
-	// the engine calls it only from a gate-guarded, non-dry-run merge_pr action.
+	// Merge squash-merges a PR. It is side-effecting; the engine calls it only
+	// from a gate-guarded, non-dry-run merge_pr action. It does not touch the
+	// branch — see DeleteRemoteBranch.
 	Merge(ctx context.Context, repoDir string, pr int) error
+	// DeleteRemoteBranch removes a merged PR's head branch from the remote. The
+	// engine calls it best-effort after a confirmed merge, so a branch that
+	// cannot be deleted never fails the merge.
+	DeleteRemoteBranch(ctx context.Context, repoDir, branch string) error
+	// CloseIssue closes an issue with a comment. The orchestrator owns the merge,
+	// so it also settles the issue rather than relying on a "Closes #N" trailer
+	// the implementing agent may not have written.
+	CloseIssue(ctx context.Context, repoDir string, number int, comment string) error
 }

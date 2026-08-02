@@ -136,7 +136,13 @@ func (h *Herdr) addWorktree(ctx context.Context, s Spawn, wt string) error {
 	// must start from the just-merged tip, or a worktree created after an earlier
 	// task merged would miss those commits (a stale-base merge conflict later).
 	_, _ = h.r.Run(ctx, "", h.GitBin, "-C", s.RepoDir, "fetch", "origin", s.Base)
-	if _, err := h.r.Run(ctx, "", h.GitBin, "-C", s.RepoDir, "worktree", "add", "-b", s.Branch, wt, "origin/"+s.Base); err != nil {
+	// --no-track is a safety rail, not a preference. Branching from a remote-tracking
+	// ref otherwise sets branch.<b>.merge = refs/heads/<base>, and a user whose git
+	// has push.default = upstream (or tracking) turns a bare `git push` in the agent's
+	// worktree into a push straight to <base> — an agent landed a commit on main this
+	// way. Without an upstream, a bare push fails loudly with "use --set-upstream"
+	// instead, and the kickoff's explicit `git push -u origin <branch>` still works.
+	if _, err := h.r.Run(ctx, "", h.GitBin, "-C", s.RepoDir, "worktree", "add", "-b", s.Branch, "--no-track", wt, "origin/"+s.Base); err != nil {
 		return fmt.Errorf("create worktree %s: %w", wt, err)
 	}
 	return nil

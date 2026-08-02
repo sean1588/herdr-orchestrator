@@ -91,7 +91,10 @@ func TestSpawn_ConstructsCommandsAndParsesPane(t *testing.T) {
 	// from origin/<base> so it starts at the just-merged tip, not a stale local base.
 	hasExactCall(t, calls, "git", "-C", "/home/u/repo", "branch", "-D", "agent/issue-5")
 	hasExactCall(t, calls, "git", "-C", "/home/u/repo", "fetch", "origin", "main")
-	hasExactCall(t, calls, "git", "-C", "/home/u/repo", "worktree", "add", "-b", "agent/issue-5", "/home/u/wt-issue-5", "origin/main")
+	// --no-track: the branch must NOT inherit origin/<base> as its upstream, or a
+	// bare `git push` under push.default=upstream pushes the agent's work straight
+	// to the base branch (this happened — a commit landed on main).
+	hasExactCall(t, calls, "git", "-C", "/home/u/repo", "worktree", "add", "-b", "agent/issue-5", "--no-track", "/home/u/wt-issue-5", "origin/main")
 	// herdr workspace labeled with the durable task id.
 	hasExactCall(t, calls, "herdr", "workspace", "create", "--cwd", "/home/u/wt-issue-5", "--label", "issue-5", "--no-focus")
 

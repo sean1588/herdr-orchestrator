@@ -286,9 +286,10 @@ halts at `merging` and logs the intended merge.
 When you've watched a few runs and trust the loop, set `dry_run: false` in your
 config. Now, once a task reaches `approved` and the merge gate
 (`ci_green` + `no_conflicts` — plus `approvals` if you've added it) passes, the engine runs
-`gh pr merge --squash --delete-branch` and advances to `merged`. If the gate
-*doesn't* pass (CI still running, no approval yet, conflicts), the task goes to
-`blocked_on_gate` and is re-checked until it clears or times out.
+`gh pr merge --squash` and advances to `merged`, then closes the source issue and
+deletes the remote branch. If the gate *doesn't* pass (CI still running, no
+approval yet, conflicts), the task goes to `blocked_on_gate` and is re-checked
+until it clears or times out.
 
 > The `approvals` gate (`min_approved: 1`) ships **defined but unused**: GitHub
 > forbids approving your own PR, so on a single-account repo it could never

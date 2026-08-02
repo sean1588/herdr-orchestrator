@@ -46,6 +46,12 @@ func (f *fakeGH) PRStatus(ctx context.Context, repoDir string, pr int) (*github.
 	return nil, nil
 }
 func (f *fakeGH) Merge(ctx context.Context, repoDir string, pr int) error { return nil }
+func (f *fakeGH) DeleteRemoteBranch(ctx context.Context, repoDir, branch string) error {
+	return nil
+}
+func (f *fakeGH) CloseIssue(ctx context.Context, repoDir string, number int, comment string) error {
+	return nil
+}
 
 func newStore(t *testing.T) *store.Store {
 	t.Helper()

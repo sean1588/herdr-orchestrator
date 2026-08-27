@@ -207,7 +207,7 @@ func TestWaitState_Command(t *testing.T) {
 		t.Errorf("state = %q, want done", got)
 	}
 	// Default WaitTimeout is 45m = 2_700_000 ms.
-	hasExactCall(t, f.Snapshot(), "herdr", "wait", "agent-status", "w7:p1", "--status", "done", "--timeout", "2700000")
+	hasExactCall(t, f.Snapshot(), "herdr", "agent", "wait", "w7:p1", "--until", "done", "--timeout", "2700000")
 }
 
 func TestWaitState_RespectsContextDeadline(t *testing.T) {
@@ -220,7 +220,7 @@ func TestWaitState_RespectsContextDeadline(t *testing.T) {
 	}
 	// The --timeout should be <= 30s (30000ms), i.e. clamped to the deadline, not 45m.
 	for _, c := range f.Snapshot() {
-		if c.Name == "herdr" && len(c.Args) >= 2 && c.Args[0] == "wait" {
+		if c.Name == "herdr" && len(c.Args) >= 2 && c.Args[0] == "agent" && c.Args[1] == "wait" {
 			ms := c.Args[len(c.Args)-1]
 			if ms == "2700000" {
 				t.Errorf("timeout not clamped to ctx deadline: %s", ms)
@@ -231,8 +231,8 @@ func TestWaitState_RespectsContextDeadline(t *testing.T) {
 
 func TestWaitState_TimeoutReturnsCurrentStatus(t *testing.T) {
 	f := &proc.Fake{Responder: func(c proc.Call) ([]byte, error) {
-		if len(c.Args) >= 2 && c.Args[0] == "wait" {
-			return nil, fmt.Errorf("timeout") // herdr wait exits non-zero on timeout
+		if len(c.Args) >= 2 && c.Args[0] == "agent" && c.Args[1] == "wait" {
+			return nil, fmt.Errorf("timeout") // herdr agent wait exits non-zero on timeout
 		}
 		if len(c.Args) >= 2 && c.Args[0] == "pane" && c.Args[1] == "list" {
 			return []byte(`{"result":{"panes":[{"pane_id":"w7:p1","agent_status":"blocked","workspace_id":"w7"}]}}`), nil

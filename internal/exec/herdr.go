@@ -103,7 +103,7 @@ func (h *Herdr) Spawn(ctx context.Context, s Spawn) (Handle, error) {
 
 	// Readiness: wait for the prompt before sending the kickoff, instead of a
 	// fixed sleep (Spike 0). A timeout here is non-fatal — proceed to the kickoff.
-	_, _ = h.r.Run(ctx, "", h.HerdrBin, "wait", "output", pane, "--match", h.ReadyMatch, "--timeout", msString(h.ReadyTimeout))
+	_, _ = h.r.Run(ctx, "", h.HerdrBin, "pane", "wait-output", pane, "--match", h.ReadyMatch, "--timeout", msString(h.ReadyTimeout))
 
 	// Deliver the kickoff in two steps: type the text, let the TUI settle, then
 	// submit with a separate Enter. A single text+Enter (`pane run`) raced Claude
@@ -158,9 +158,9 @@ func (h *Herdr) WaitState(ctx context.Context, hd Handle, target AgentState) (Ag
 			timeout = rem
 		}
 	}
-	_, err := h.r.Run(ctx, "", h.HerdrBin, "wait", "agent-status", hd.PaneID, "--status", string(target), "--timeout", msString(timeout))
+	_, err := h.r.Run(ctx, "", h.HerdrBin, "agent", "wait", hd.PaneID, "--until", string(target), "--timeout", msString(timeout))
 	if err != nil {
-		return h.currentStatus(ctx, hd.PaneID), fmt.Errorf("wait agent-status %s on %s: %w", target, hd.PaneID, err)
+		return h.currentStatus(ctx, hd.PaneID), fmt.Errorf("agent wait %s on %s: %w", target, hd.PaneID, err)
 	}
 	return target, nil
 }

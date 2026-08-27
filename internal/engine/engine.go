@@ -523,19 +523,47 @@ func (e *Engine) awaitAgentState(ctx context.Context, task *store.Task, st confi
 				}
 				return doneT.Branch[verdict], "agent.done", verdict, nil
 			case exec.StateIdle:
-				// A decision agent (Claude Code) commonly lands at an idle prompt
-				// after writing its verdict rather than reporting "done", which would
-				// otherwise hang the state (pr_open has no timeout). Treat
-				// idle-with-verdict as done for decision states. An idle without a
-				// verdict yet — or in a non-decision (gate) state — keeps waiting,
-				// exactly as before, so the "dead pane wrote nothing" case still
-				// surfaces loudly on a real done rather than being masked here.
+				// Claude Code commonly lands at an idle prompt when it finishes
+				// instead of reporting "done": herdr's live_prompt_box rule reads
+				// any text left in the prompt box as idle. Without handling idle,
+				// a finished agent is indistinguishable from a slow one and the
+				// state rides to its timeout — observed on a real run, where an
+				// implementer had already opened its PR and would still have
+				// escalated at 45m.
+				//
+				// In both arms the authoritative *artifact* decides, never the pane
+				// status. An idle that has produced nothing keeps waiting, so the
+				// "dead pane wrote nothing" case still surfaces on the timeout
+				// rather than being masked here.
 				if dec := decisionRefOf(doneT); dec != "" {
+					// Decision state (intake, pr_open): the verdict file is the artifact.
 					v, found, derr := e.tryDecisionVerdict(task, dec)
 					if derr != nil {
 						return "", "", "", derr
 					}
 					if found {
+						return doneT.Branch[v], "agent.done", v, nil
+					}
+				} else if len(doneT.GateRefs()) > 0 && blockedTimer == nil {
+					// Gate state (implementing, changes_requested): GitHub is the
+					// artifact. Only a pass advances. A fail means the agent has not
+					// opened its PR yet — not a reason to escalate while the state
+					// timeout is still running — so we keep waiting exactly as before.
+					// A transient gh error is logged and waited through rather than
+					// failing the drive: idle fires once per status change (the event
+					// hub broadcasts only diffs), and the timeout still bounds us.
+					//
+					// The blockedTimer guard keeps this from reopening the hole the
+					// blocked bound exists to close: an agent parked on an
+					// unanswerable prompt can report idle rather than blocked, so
+					// inside an open blocked window idle stays non-recovery. Only
+					// *working* clears that window, so an agent that was blocked,
+					// recovered, then finished still takes the shortcut.
+					v, gerr := e.evaluateGate(ctx, task, doneT)
+					if gerr != nil {
+						e.log.Warn("idle gate check failed; still waiting",
+							"task", task.ID, "state", task.CurrentState, "err", gerr)
+					} else if v == "pass" {
 						return doneT.Branch[v], "agent.done", v, nil
 					}
 				}

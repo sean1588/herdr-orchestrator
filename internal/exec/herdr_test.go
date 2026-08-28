@@ -72,7 +72,8 @@ func TestSpawn_ConstructsCommandsAndParsesPane(t *testing.T) {
 		return nil, nil
 	}}
 	h := NewHerdr(f)
-	h.SubmitDelay = 0 // no real sleep in tests
+	h.SubmitDelay = 0       // no real sleep in tests
+	h.KickoffAckTimeout = 0 // kickoff-ack verification has its own tests below
 	s := testSpawn()
 
 	hd, err := h.Spawn(context.Background(), s)
@@ -141,6 +142,7 @@ func TestSpawn_ClosesPreexistingSameLabelWorkspace(t *testing.T) {
 	}}
 	h := NewHerdr(f)
 	h.SubmitDelay = 0
+	h.KickoffAckTimeout = 0
 
 	hd, err := h.Spawn(context.Background(), testSpawn()) // TaskID == "issue-5"
 	if err != nil {
@@ -165,6 +167,7 @@ func TestSpawn_PreserveBranch_KeepsExistingBranch(t *testing.T) {
 	}}
 	h := NewHerdr(f)
 	h.SubmitDelay = 0
+	h.KickoffAckTimeout = 0
 	s := testSpawn()
 	s.PreserveBranch = true
 
@@ -452,5 +455,109 @@ func TestParseRootPaneID(t *testing.T) {
 	}
 	if _, err := parseRootPaneID([]byte(`{"result":{}}`)); err == nil {
 		t.Error("expected error when pane id missing")
+	}
+}
+
+/* -------------------------------------------------------------------------- */
+/* Kickoff delivery                                                            */
+/*                                                                             */
+/* Both delivery methods have failed in production against different Claude    */
+/* Code builds, and a dropped kickoff is silent: the agent sits at an empty    */
+/* prompt while the engine waits out the whole blocked_timeout. These pin that */
+/* Spawn verifies delivery, falls back to the other method, and fails loudly   */
+/* when neither takes.                                                         */
+/* -------------------------------------------------------------------------- */
+
+// kickoffFake builds a runner whose `pane list` reports `status` until the
+// kickoff is delivered by `lands` ("send-text", "run", or "" for neither), after
+// which it reports "working". Also records every call for assertions.
+func kickoffFake(lands string) *proc.Fake {
+	var delivered atomic.Bool
+	return &proc.Fake{Responder: func(c proc.Call) ([]byte, error) {
+		if c.Name != "herdr" || len(c.Args) < 2 {
+			return nil, nil
+		}
+		switch {
+		case c.Args[0] == "workspace" && c.Args[1] == "create":
+			return []byte(`{"result":{"root_pane":{"pane_id":"w7:p1"}}}`), nil
+		case c.Args[0] == "pane" && c.Args[1] == "send-text":
+			if lands == "send-text" {
+				delivered.Store(true)
+			}
+		case c.Args[0] == "pane" && c.Args[1] == "run" && len(c.Args) > 2 && c.Args[2] == "w7:p1" &&
+			len(c.Args) > 3 && strings.HasPrefix(c.Args[3], "Read the task"):
+			if lands == "run" {
+				delivered.Store(true)
+			}
+		case c.Args[0] == "pane" && c.Args[1] == "list":
+			status := "idle"
+			if delivered.Load() {
+				status = "working"
+			}
+			return []byte(`{"result":{"panes":[{"pane_id":"w7:p1","agent_status":"` + status + `","workspace_id":"w7"}]}}`), nil
+		}
+		return nil, nil
+	}}
+}
+
+func kickoffHerdr(f *proc.Fake) *Herdr {
+	h := NewHerdr(f)
+	h.SubmitDelay = 0
+	h.KickoffAckTimeout = 50 * time.Millisecond
+	h.KickoffAckPoll = time.Millisecond
+	return h
+}
+
+// kickoffRunCalls returns the `pane run` calls that carried the kickoff text —
+// not the one that launched the agent binary.
+func kickoffRunCalls(calls []proc.Call) []proc.Call {
+	var out []proc.Call
+	for _, c := range paneRunCalls(calls) {
+		if len(c.Args) > 3 && strings.HasPrefix(c.Args[3], "Read the task") {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func TestSpawn_KickoffAccepted_DoesNotFallBack(t *testing.T) {
+	f := kickoffFake("send-text")
+	if _, err := kickoffHerdr(f).Spawn(context.Background(), testSpawn()); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	calls := f.Snapshot()
+	hasExactCall(t, calls, "herdr", "pane", "send-text", "w7:p1", testSpawn().Kickoff)
+	// The agent started working, so the one-shot fallback must never fire —
+	// re-sending would submit the kickoff a second time to a busy agent.
+	if n := len(kickoffRunCalls(calls)); n != 0 {
+		t.Errorf("kickoff re-sent via `pane run` %d time(s) after it was already accepted", n)
+	}
+}
+
+func TestSpawn_KickoffDropped_FallsBackToPaneRun(t *testing.T) {
+	// send-text silently fails to land (Claude Code v2.1.236): the agent stays
+	// idle at an empty prompt. `pane run` gets through.
+	f := kickoffFake("run")
+	if _, err := kickoffHerdr(f).Spawn(context.Background(), testSpawn()); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	calls := f.Snapshot()
+	hasExactCall(t, calls, "herdr", "pane", "send-text", "w7:p1", testSpawn().Kickoff)
+	hasExactCall(t, calls, "herdr", "pane", "run", "w7:p1", testSpawn().Kickoff)
+}
+
+func TestSpawn_KickoffNeverAccepted_FailsLoudly(t *testing.T) {
+	// Neither method lands. The spawn must error rather than return a handle to a
+	// mute agent — that silence previously cost a task its whole blocked_timeout.
+	f := kickoffFake("")
+	_, err := kickoffHerdr(f).Spawn(context.Background(), testSpawn())
+	if err == nil {
+		t.Fatal("Spawn succeeded despite the kickoff never being accepted")
+	}
+	if !strings.Contains(err.Error(), "kickoff") {
+		t.Errorf("error should name the kickoff, got: %v", err)
+	}
+	if n := len(kickoffRunCalls(f.Snapshot())); n != 1 {
+		t.Errorf("expected exactly one `pane run` fallback attempt, got %d", n)
 	}
 }

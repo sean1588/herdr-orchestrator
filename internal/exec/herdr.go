@@ -32,6 +32,12 @@ type Herdr struct {
 	// text + Enter must be separated; default 1s (0 in tests).
 	SubmitDelay time.Duration
 
+	// KickoffAckTimeout bounds how long Spawn waits for evidence that a delivered
+	// kickoff was actually accepted before trying the other delivery method;
+	// default 25s. KickoffAckPoll is that wait's polling cadence; default 1s.
+	KickoffAckTimeout time.Duration
+	KickoffAckPoll    time.Duration
+
 	// hub multiplexes one pane-list poller across all Events subscribers, reading
 	// PollInterval at poller start so a test-set interval still applies.
 	hub *eventHub
@@ -50,6 +56,9 @@ func NewHerdr(r proc.Runner) *Herdr {
 		WaitTimeout:  45 * time.Minute,
 		PollInterval: defaultEventPollInterval,
 		SubmitDelay:  1 * time.Second,
+
+		KickoffAckTimeout: 25 * time.Second,
+		KickoffAckPoll:    1 * time.Second,
 	}
 	h.hub = newEventHub(h.listPanes, func() time.Duration { return h.PollInterval })
 	return h
@@ -105,19 +114,103 @@ func (h *Herdr) Spawn(ctx context.Context, s Spawn) (Handle, error) {
 	// fixed sleep (Spike 0). A timeout here is non-fatal — proceed to the kickoff.
 	_, _ = h.r.Run(ctx, "", h.HerdrBin, "pane", "wait-output", pane, "--match", h.ReadyMatch, "--timeout", msString(h.ReadyTimeout))
 
-	// Deliver the kickoff in two steps: type the text, let the TUI settle, then
-	// submit with a separate Enter. A single text+Enter (`pane run`) raced Claude
-	// Code's Ink renderer, which swallowed the Enter and left the kickoff unsent.
-	if _, err := h.r.Run(ctx, "", h.HerdrBin, "pane", "send-text", pane, s.Kickoff); err != nil {
-		return hd, fmt.Errorf("send kickoff text on %s: %w", pane, err)
-	}
-	if h.SubmitDelay > 0 {
-		time.Sleep(h.SubmitDelay)
-	}
-	if _, err := h.r.Run(ctx, "", h.HerdrBin, "pane", "send-keys", pane, "Enter"); err != nil {
-		return hd, fmt.Errorf("submit kickoff on %s: %w", pane, err)
+	if err := h.deliverKickoff(ctx, pane, s.Kickoff); err != nil {
+		return hd, err
 	}
 	return hd, nil
+}
+
+// deliverKickoff gets the single-line kickoff into the agent's prompt and proves
+// it was accepted.
+//
+// Neither delivery method is reliable on its own, and both have failed in
+// production against different Claude Code builds:
+//
+//   - `pane run` (text + Enter in one call) raced Claude Code's Ink renderer,
+//     which swallowed the Enter and left the kickoff sitting unsent.
+//   - `pane send-text` + a separate `pane send-keys Enter` fixed that, then
+//     stopped landing entirely on Claude Code v2.1.236: the text never reached
+//     the prompt box at all.
+//
+// A dropped kickoff used to be silent — the agent sat at an empty prompt, herdr
+// reported it blocked, and the task burned its whole blocked_timeout before
+// escalating with nothing to show. So delivery is now *verified*: send, then
+// watch the agent's status leave its pre-kickoff state. An agent that received
+// its instruction starts working; one that didn't stays put. If the first method
+// doesn't take, try the other before giving up, and if neither does, fail the
+// spawn loudly rather than handing the engine a mute agent.
+func (h *Herdr) deliverKickoff(ctx context.Context, pane, kickoff string) error {
+	before := h.currentStatus(ctx, pane)
+
+	twoStep := func() error {
+		if _, err := h.r.Run(ctx, "", h.HerdrBin, "pane", "send-text", pane, kickoff); err != nil {
+			return fmt.Errorf("send kickoff text on %s: %w", pane, err)
+		}
+		if h.SubmitDelay > 0 {
+			time.Sleep(h.SubmitDelay)
+		}
+		if _, err := h.r.Run(ctx, "", h.HerdrBin, "pane", "send-keys", pane, "Enter"); err != nil {
+			return fmt.Errorf("submit kickoff on %s: %w", pane, err)
+		}
+		return nil
+	}
+	oneShot := func() error {
+		if _, err := h.r.Run(ctx, "", h.HerdrBin, "pane", "run", pane, kickoff); err != nil {
+			return fmt.Errorf("run kickoff on %s: %w", pane, err)
+		}
+		return nil
+	}
+
+	// Verification off (KickoffAckTimeout <= 0): deliver once and trust it. Used
+	// by tests, which drive a fake runner that models no pane status.
+	if h.KickoffAckTimeout <= 0 {
+		return twoStep()
+	}
+
+	var lastErr error
+	for i, send := range []func() error{twoStep, oneShot} {
+		if err := send(); err != nil {
+			lastErr = err
+			continue // the other method may still get through
+		}
+		if h.kickoffAccepted(ctx, pane, before) {
+			return nil
+		}
+		lastErr = fmt.Errorf("kickoff not accepted on %s (agent still %s after delivery attempt %d)", pane, before, i+1)
+	}
+	return fmt.Errorf("deliver kickoff on %s: %w", pane, lastErr)
+}
+
+// kickoffAccepted polls the agent's status for evidence the kickoff landed: an
+// agent that read its instruction moves off whatever it was doing before (a
+// freshly-launched one sits idle or blocked at an empty prompt and starts
+// working). Bounded by KickoffAckTimeout; a false here means "no evidence", not
+// "definitely dropped", which is why the caller tries the other method rather
+// than escalating on the first miss.
+func (h *Herdr) kickoffAccepted(ctx context.Context, pane string, before AgentState) bool {
+	deadline := time.Now().Add(h.KickoffAckTimeout)
+	for {
+		switch st := h.currentStatus(ctx, pane); st {
+		case StateWorking, StateDone:
+			return true
+		case before:
+			// no movement yet
+		default:
+			// Any other change (e.g. idle -> blocked on a permission prompt) still
+			// proves the agent read something.
+			if st != StateUnknown {
+				return true
+			}
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(h.KickoffAckPoll):
+		}
+	}
 }
 
 // addWorktree creates the isolated worktree for a spawn. A fresh task branches

@@ -115,3 +115,70 @@ func TestResolveNoProgressTimeout(t *testing.T) {
 		})
 	}
 }
+
+// Disabling the global liveness bound is allowed, but it may not leave an agent
+// state with nothing bounding it. That is the "unbounded by omission" shape this
+// whole change exists to remove: before, a config could opt out of every bound
+// simply by not writing a timeout key, and the validator only shrugged.
+func TestAgentStatesMustBeBounded(t *testing.T) {
+	spawning := State{
+		Entry:       &Entry{Spawn: "implementer"},
+		Transitions: []Transition{{When: Trigger{Event: "agent.done"}, To: "done"}},
+	}
+	spawningWithTimeout := State{
+		Entry: &Entry{Spawn: "implementer"},
+		Transitions: []Transition{
+			{When: Trigger{Event: "agent.done"}, To: "done"},
+			{When: Trigger{Timeout: "45m"}, To: "escalated"},
+		},
+	}
+
+	tests := []struct {
+		name         string
+		noProgress   string
+		states       map[string]State
+		wantErr      bool
+		wantWarnings int
+	}{
+		{
+			name:       "global bound on: a state without its own timeout is fine",
+			noProgress: "",
+			states:     map[string]State{"implementing": spawning},
+		},
+		{
+			name:         "global bound off: an unbounded agent state is an error",
+			noProgress:   "0s",
+			states:       map[string]State{"implementing": spawning},
+			wantErr:      true,
+			wantWarnings: 1,
+		},
+		{
+			name:         "global bound off: per-state timeouts make it safe again",
+			noProgress:   "0s",
+			states:       map[string]State{"implementing": spawningWithTimeout},
+			wantWarnings: 1,
+		},
+		{
+			name:       "global bound off: a state that runs no agent is irrelevant",
+			noProgress: "0s",
+			states: map[string]State{"queued": {Transitions: []Transition{
+				{When: Trigger{Event: "scheduled"}, To: "implementing"},
+			}}},
+			wantWarnings: 1,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var warnings, errs []string
+			wf := &Workflow{Policies: Policies{NoProgressTimeout: tc.noProgress}, States: tc.states}
+			checkAgentStatesBounded(wf, sortedKeys(tc.states), &warnings, &errs)
+
+			if got := len(errs) > 0; got != tc.wantErr {
+				t.Errorf("errors = %v, want error: %v", errs, tc.wantErr)
+			}
+			if len(warnings) != tc.wantWarnings {
+				t.Errorf("warnings = %v, want %d", warnings, tc.wantWarnings)
+			}
+		})
+	}
+}

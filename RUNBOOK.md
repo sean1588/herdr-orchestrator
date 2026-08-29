@@ -47,7 +47,7 @@ code — read the actual config for the workflow you run):
 | --- | --- | --- |
 | `intake` | triager agent triages the issue | `triage` decision → `queued` / `closed` / `escalated`; 15m timeout |
 | `queued` | accepted, awaiting a worker | auto `scheduled` → `implementing` |
-| `implementing` | implementer agent writing code in a worktree | `agent.done` + `pr_exists` gate → `pr_open` / `escalated`; 45m timeout; `blocked_timeout` → `escalated` |
+| `implementing` | implementer agent writing code in a worktree | `agent.done` + `pr_exists` gate → `pr_open` / `escalated`; 45m timeout; `blocked_timeout` / `no_progress` → `escalated` |
 | `pr_open` | reviewer agent reviewing the PR | `review` decision → `approved` / `changes_requested` / `escalated` |
 | `changes_requested` | implementer resumes with review feedback | `agent.done` + `pr_exists` gate → `pr_open` / `escalated`; `retry_exhausted` → `escalated` |
 | `approved` | merge gate being evaluated | gate pass → `merging`, fail → `blocked_on_gate` |
@@ -307,6 +307,15 @@ the trigger tells you why:
   commit straight on `main` that way). The agent should push with
   `git push -u origin <branch>`, which both kickoffs now spell out.
 - `implementing → escalated` on `timeout` → the agent ran past its deadline.
+- *any state* `→ escalated` on `no_progress` → the task produced no observable
+  signal for a whole `policies.no_progress_timeout` window, confirmed against the
+  pane's own bytes. Distinct from `timeout`: nothing happened at all, rather than
+  the state simply taking too long. Read the pane read-only to see where it died.
+- *any state* `→ escalated` on `drive_deadline` → the scheduler's reaper stopped
+  a drive that outlived `policies.drive_deadline`. This is the backstop for a
+  drive wedged where the engine has no timer armed (a spawn, a gate read, a
+  decision, a merge) — usually a hung `git`/`gh`/`herdr`. The audit `result`
+  names how the escalation target was chosen.
 - `implementing → escalated` on `blocked_timeout` → the agent sat *continuously*
   blocked on an interactive prompt past `policies.blocked_timeout`. Distinct from
   `timeout` on purpose: parked, not slow. Read the pane read-only to see which
@@ -373,9 +382,10 @@ When you're done operating:
 `--notify-webhook` · `--mcp-listen` (off).
 
 **Key policies:** `dry_run` (default-on; withholds the real merge) ·
-`retry_caps.<state>` · `blocked_timeout` (caps *continuous* agent blocking;
-absent ⇒ unbounded, so a parked agent burns the whole state timeout) ·
-`max_concurrent_tasks`.
+`retry_caps.<state>` · `no_progress_timeout` (global liveness bound; absent ⇒
+30m, `0s` disables) · `blocked_timeout` (caps *continuous* agent blocking) ·
+`drive_deadline` (hard per-drive ceiling, reaped from outside the drive; absent ⇒
+2× the longest state timeout, floored at 1h) · `max_concurrent_tasks`.
 
 **MCP posture:** loopback only, **no auth** — the bind address is the trust
 boundary. Never bind a non-loopback address.

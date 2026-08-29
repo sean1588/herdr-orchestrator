@@ -69,13 +69,8 @@ func semanticChecks(wf *Workflow) (warnings, errs []string) {
 	// Reachability (warnings, except an undeclared entry_state which is an error).
 	checkReachability(wf, stateNames, &warnings, &errs)
 
-	// Warning: agent-spawning states with no timeout transition.
-	for _, sname := range stateNames {
-		s := states[sname]
-		if s.Entry != nil && (s.Entry.Spawn != "" || s.Entry.Resume != "") && !s.HasTimeoutTransition() {
-			warnings = append(warnings, fmt.Sprintf("state %q spawns/resumes an agent but has no timeout transition", sname))
-		}
-	}
+	// Invariant 8: no agent state may be unbounded.
+	checkAgentStatesBounded(wf, stateNames, &warnings, &errs)
 
 	// An explicit drive_deadline below a declared state timeout would preempt it.
 	checkDriveDeadline(wf, &errs)
@@ -85,6 +80,42 @@ func semanticChecks(wf *Workflow) (warnings, errs []string) {
 	checkAllowedTools(wf, &errs)
 
 	return warnings, errs
+}
+
+// checkAgentStatesBounded enforces that every state running an agent is bounded
+// by something. It replaces the old blanket "spawns an agent but has no timeout
+// transition" warning, which fired on configs that were in fact perfectly safe —
+// including the shipped default pipeline, which warned about itself on every
+// startup and so trained operators to ignore the one warning that mattered.
+//
+// The global no-progress bound covers omission, so a missing per-state timeout is
+// no longer noteworthy on its own. What IS noteworthy is a config that opts out
+// of the global bound: disabling it is allowed, but only if every agent state
+// then declares its own timeout. Otherwise a config could opt out of every bound
+// by omission, which is exactly the shape this whole change exists to remove.
+func checkAgentStatesBounded(wf *Workflow, stateNames []string, warnings, errs *[]string) {
+	noProgress, err := wf.Policies.ResolveNoProgressTimeout()
+	if err != nil {
+		*errs = append(*errs, err.Error())
+		return
+	}
+	if noProgress > 0 {
+		return // the global bound covers every agent state
+	}
+	*warnings = append(*warnings, "policies.no_progress_timeout is 0s: the global liveness "+
+		"bound is disabled, so every agent state must declare its own timeout")
+	for _, sname := range stateNames {
+		s := wf.States[sname]
+		if s.Entry == nil || (s.Entry.Spawn == "" && s.Entry.Resume == "") {
+			continue
+		}
+		if !s.HasTimeoutTransition() {
+			*errs = append(*errs, fmt.Sprintf(
+				"state %q runs an agent with no timeout transition, and policies.no_progress_timeout "+
+					"is disabled: nothing would bound it (declare a timeout, or re-enable the global bound)",
+				sname))
+		}
+	}
 }
 
 // checkDriveDeadline rejects a per-drive ceiling that sits at or below the

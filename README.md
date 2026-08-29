@@ -283,17 +283,50 @@ rejected):
 | `states` | The nodes of the state graph (below). |
 
 **`policies`** — `max_concurrent_tasks`, `dry_run`, `circuit_breaker`,
-`retry_caps` (a per-state cap map, `state_name: N`), `blocked_timeout`, and
-`execution` (`backend: herdr|local|container`, `run_as: root|non_root`,
-`sandbox: bool`). The engine reads these: `retry_caps` bounds per-state retries
-and is validated, `dry_run` gates the real merge, `blocked_timeout` bounds
-blocking (below), and `max_concurrent_tasks` bounds the daemon's concurrency
-(R2). `circuit_breaker` and the finer `execution` knobs (`sandbox`) are parsed
-but not yet enforced.
+`retry_caps` (a per-state cap map, `state_name: N`), the liveness bounds
+`no_progress_timeout` / `blocked_timeout` / `drive_deadline`, and `execution`
+(`backend: herdr|local|container`, `run_as: root|non_root`, `sandbox: bool`).
+The engine reads these: `retry_caps` bounds per-state retries and is validated,
+`dry_run` gates the real merge, the three bounds below keep work from wedging,
+and `max_concurrent_tasks` bounds the daemon's concurrency (R2).
+`circuit_breaker` and the finer `execution` knobs (`sandbox`) are parsed but not
+yet enforced.
 
-**`blocked_timeout`** (a duration, e.g. `10m`; absent ⇒ unbounded) caps how long
-an agent may sit *continuously* blocked before the engine takes the state's
-timeout transition, with trigger `blocked_timeout` in the audit. It exists
+#### Liveness bounds
+
+A per-state `timeout:` transition is an **override** for the one thing that
+genuinely varies per state ("this one legitimately takes 90 minutes"). Three
+policies cover everything else, so nothing is unbounded merely because nobody
+remembered to annotate it.
+
+**`no_progress_timeout`** (a duration; absent ⇒ `30m`, `0s` disables) is the
+global bound. A state timeout measures **position** — how long a task has been
+in state X — which cannot distinguish a legitimately slow agent from a dead one,
+and only protects the states someone annotated. This measures **progress**: how
+long since the task last did anything observable. Any pane status event resets
+it. When it expires the engine treats that as a suspicion, not a verdict, and
+confirms against the agent pane's own bytes before escalating (trigger
+`no_progress`) — the event hub broadcasts only status *diffs*, so an agent
+working steadily for an hour emits no events at all. A pane that cannot be read
+counts as progress: a herdr blip must never be what escalates a task. Disabling
+it is allowed only if every agent state declares its own timeout; the validator
+rejects the combination that would leave a state unbounded.
+
+**`drive_deadline`** (a duration; absent ⇒ twice the longest state timeout,
+floored at `1h`) is the hard ceiling on a single drive, enforced by a reaper in
+the scheduler — **outside** the drive it watches. The engine's own timer is armed
+only once a drive reaches the agent-wait loop in a state that declares a timeout;
+a drive wedged in a spawn, a gate read, a decision, or a merge has no timer at
+all, and a watchdog sharing a goroutine with a wedged drive is no watchdog. A
+reaped drive settles (trigger `drive_deadline`) rather than aborting, so it is
+not re-driven and re-reaped forever. The bound is per *drive*, not per task: a
+task that suspends in a merge-gate wait and resumes next poll starts a fresh
+clock. An explicit value at or below the longest state timeout is a validation
+error — it would preempt the transitions it exists to back up.
+
+**`blocked_timeout`** (a duration, e.g. `10m`; absent ⇒ only the bounds above
+apply) caps how long an agent may sit *continuously* blocked before the engine
+gives up on it, with trigger `blocked_timeout` in the audit. It exists
 because a blocked agent is parked on an interactive prompt nobody will answer —
 it will never report done — yet **blocking does not change state**, and a state
 timeout is anchored to state *entry*. Without this the only lever is shortening
@@ -301,6 +334,13 @@ the whole state timeout, which would also kill legitimately long runs. Any
 `working` event clears the clock, so a prompt the agent resolves itself never
 counts; `idle` deliberately does **not** clear it, because a pane parked at an
 unanswerable prompt can report idle. The state timeout remains the hard backstop.
+
+All three bounds escalate to the same place: the state's own `timeout:` target if
+it declares one, else the workflow's alerting terminal, else `cancelled`. That
+fallback is what makes them apply by default — a bound whose only escalation path
+was the state's timeout edge was silently **inert** in every state that declared
+none. The derivation is recorded in the audit `result` column, so a fallback is
+never silent.
 
 **`roles`** — each has `launch` (argv, required, e.g. `["claude"]`),
 `task_delivery` (`context_file` | `inline`), `workspace` (`per_task` | `shared`),

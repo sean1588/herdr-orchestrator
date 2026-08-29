@@ -174,6 +174,15 @@ transition's `from → to (trigger/result)`:
     past `policies.blocked_timeout`. Distinct from `timeout` on purpose: this one
     means "parked on a prompt", not "legitimately slow". Read the pane read-only to
     see *which* prompt, fix the environment that caused it, and open a fresh issue.
+  - from *any* state on `no_progress` → the task produced no observable signal for a
+    whole `policies.no_progress_timeout` window, confirmed against the pane's own
+    bytes. "Nothing happened at all", rather than "this took too long". Read the
+    pane read-only to see where it died.
+  - from *any* state on `drive_deadline` → the scheduler's reaper stopped a drive
+    that outlived `policies.drive_deadline`. This is the backstop for a drive wedged
+    where the engine has no timer armed at all — a spawn, a gate read, a decision, a
+    merge — so suspect a hung `git`/`gh`/`herdr` first. The audit `result` names how
+    the escalation target was chosen.
   - from `pr_open` on a `review` verdict of `escalate` → the reviewer punted.
   - from `changes_requested` on `retry_exhausted` → the change cap was hit.
   - from `blocked_on_gate` on `timeout` → the merge gate never cleared (CI red,

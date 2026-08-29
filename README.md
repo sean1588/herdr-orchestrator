@@ -159,6 +159,22 @@ dependencies, safe to run anywhere:
 orchestratord validate examples/default-pipeline.yaml
 ```
 
+Preflight the whole environment — herdr, the agent CLI, `gh`, the checkout, the
+store — and get a fix for anything that is not ready:
+
+```sh
+orchestratord doctor --config pipeline.yaml --repo /path/to/checkout
+```
+
+`doctor` exits non-zero on any failure, so it composes:
+`orchestratord doctor --config c.yaml --repo r && orchestratord daemon ...`.
+Its last check launches the agent in a scratch herdr workspace and proves a
+kickoff is actually accepted; `--quick` skips it. That check is the reason the
+command exists — kickoff delivery has broken twice from underneath this project,
+and both times the failure was discovered by tasks escalating with no work done.
+The daemon runs the cheap subset at startup and refuses to start on a failure
+(`--skip-preflight` overrides); it never launches an agent to do so.
+
 ### Prerequisites for `run` / `recover`
 
 `run` and `recover` drive a real agent and touch GitHub, so they need:

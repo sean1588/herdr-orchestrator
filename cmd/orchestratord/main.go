@@ -9,6 +9,11 @@
 //	orchestratord validate <config.yaml>
 //	    Validate a workflow config (JSON Schema + safety invariants).
 //
+//	orchestratord doctor --config <c> --repo <dir> [--quick]
+//	    Preflight everything the daemon depends on — herdr, gh, the checkout,
+//	    the store, and an end-to-end kickoff-delivery smoke test — and report a
+//	    fix for anything that is not passing. Exits non-zero on any failure.
+//
 //	orchestratord plan <config.yaml>
 //	    Render the validated workflow's resolved graph, terminal and
 //	    side-effecting states, and cycles (with their cap/timeout status).
@@ -41,6 +46,7 @@ import (
 	"time"
 
 	"github.com/sean1588/herdr-orchestrator/internal/config"
+	"github.com/sean1588/herdr-orchestrator/internal/doctor"
 	"github.com/sean1588/herdr-orchestrator/internal/engine"
 	"github.com/sean1588/herdr-orchestrator/internal/exec"
 	"github.com/sean1588/herdr-orchestrator/internal/github"
@@ -67,6 +73,8 @@ func run(args []string) int {
 		return cmdInit(args[1:])
 	case "validate":
 		return cmdValidate(args[1:])
+	case "doctor":
+		return cmdDoctor(args[1:])
 	case "plan":
 		return cmdPlan(args[1:])
 	case "run":
@@ -93,6 +101,7 @@ func usage(w *os.File) {
 commands:
   init --repo <owner/name>                       scaffold pipeline.yaml + prompts/ for a repo
   validate <config.yaml>                         validate a workflow config
+  doctor --config <c> --repo <dir>               preflight the environment the daemon needs
   plan <config.yaml>                             render the resolved graph + invariants
   run --config <c> --repo <dir> --issue <n>      drive one issue to merged
   recover --config <c> --repo <dir>              reconcile/resume in-flight tasks
@@ -110,6 +119,8 @@ run/recover/daemon flags:
   --notify-webhook URL   POST escalation/alert events as JSON (default: none)
   --poll-interval DUR    daemon source poll cadence (default 30s)
   --mcp-listen ADDR      daemon MCP control server address, e.g. 127.0.0.1:7777 (default: off)
+  --skip-preflight       daemon: start even if the startup preflight fails
+  --quick                doctor: skip the expensive checks (does not launch an agent)
 
 init flags:
   --repo OWNER/NAME      target GitHub repo whose issues to poll (required)
@@ -444,6 +455,7 @@ func cmdDaemon(args []string) int {
 	registerCommon(fs, &cf)
 	pollInterval := fs.Duration("poll-interval", 30*time.Second, "source poll cadence")
 	mcpListen := fs.String("mcp-listen", "", "MCP control server listen address, e.g. 127.0.0.1:7777 (default: off)")
+	skipPreflight := fs.Bool("skip-preflight", false, "start even if the environment preflight fails")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -470,6 +482,25 @@ func cmdDaemon(args []string) int {
 	workers := w.wf.Policies.MaxConcurrentTasks
 	if workers < 1 {
 		workers = 1
+	}
+
+	// Preflight the environment before accepting any work. The expensive check
+	// (launching an agent to prove kickoff delivery) is deliberately NOT run here:
+	// starting the daemon must not spawn an agent. Run `orchestratord doctor` for
+	// that — it is the one check that has caught a regression which cost real tasks.
+	if !*skipPreflight {
+		env, derr := cf.doctorEnv()
+		if derr != nil {
+			fmt.Fprintf(os.Stderr, "daemon: preflight: %v\n", derr)
+			return 2
+		}
+		results := doctor.Run(ctx, env, false)
+		if doctor.Failed(results) {
+			fmt.Fprintln(os.Stderr, "daemon: preflight failed; refusing to start")
+			reportDoctor(os.Stderr, results)
+			fmt.Fprintln(os.Stderr, "run `orchestratord doctor` for the full report, or --skip-preflight to start anyway")
+			return 1
+		}
 	}
 
 	dc := doneChecker{gh: w.gh, store: w.store, settled: settled, repoDir: w.repoDir, label: label, log: slog.Default()}

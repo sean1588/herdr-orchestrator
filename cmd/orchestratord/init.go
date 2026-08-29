@@ -68,7 +68,10 @@ func cmdInit(args []string) int {
 next steps:
   orchestratord validate %s
   gh label create %s --repo %s   # the label the daemon polls
+  orchestratord doctor --config %s --repo <local-checkout>
+      # preflights everything the daemon needs, including a real
+      # kickoff-delivery smoke test. Run it until it is green, then:
   then follow RUNBOOK.md §3 (bring-up)
-`, cfg, *dir, *repo, cfg, *label, *repo)
+`, cfg, *dir, *repo, cfg, *label, *repo, cfg)
 	return 0
 }

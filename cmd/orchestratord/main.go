@@ -272,6 +272,7 @@ func cycleBounded(comp []string, wf *config.Workflow) bool {
 type commonFlags struct {
 	config, repo, base, db, worktreesDir, taskDir string
 	notifyWebhook                                 string
+	commandTimeout                                time.Duration
 }
 
 func registerCommon(fs *flag.FlagSet, cf *commonFlags) {
@@ -282,6 +283,8 @@ func registerCommon(fs *flag.FlagSet, cf *commonFlags) {
 	fs.StringVar(&cf.worktreesDir, "worktrees-dir", "", "parent dir for worktrees (default: sibling of repo)")
 	fs.StringVar(&cf.taskDir, "task-dir", "", "dir for task context files (default: temp dir)")
 	fs.StringVar(&cf.notifyWebhook, "notify-webhook", "", "POST escalation/alert events as JSON to this URL (default: none)")
+	fs.DurationVar(&cf.commandTimeout, "command-timeout", proc.DefaultTimeout,
+		"per-call budget for every git/gh/herdr subprocess; raise it on a very large repo, 0 disables (unbounded)")
 }
 
 // wired bundles everything a subcommand needs after loading + validating config.
@@ -323,7 +326,9 @@ func (cf commonFlags) wire(ctx context.Context) (*wired, error) {
 		return nil, fmt.Errorf("open store: %w", err)
 	}
 
-	runner := proc.New()
+	// Every subprocess carries a budget, so a hung git/gh/herdr fails in seconds
+	// with a precise error instead of wedging its worker with no timer running.
+	runner := proc.WithTimeout(proc.New(), cf.commandTimeout)
 	backend := exec.NewHerdr(runner)
 	backend.RepoDir = absRepo // lets Cleanup resolve a task's worktree path deterministically
 	if cf.worktreesDir != "" {
@@ -347,7 +352,7 @@ func (cf commonFlags) wire(ctx context.Context) (*wired, error) {
 	// gh runs with GITHUB_TOKEN/GH_TOKEN scrubbed so it uses its stored OAuth token:
 	// a PAT lacking checks:read 403s the check-runs API and breaks the ci_green gate.
 	// The exec backend keeps the full env (agent launches may need it).
-	gh := github.New(proc.NewScrubbed("GITHUB_TOKEN", "GH_TOKEN"))
+	gh := github.New(proc.WithTimeout(proc.NewScrubbed("GITHUB_TOKEN", "GH_TOKEN"), cf.commandTimeout))
 	eng := engine.New(engine.Config{
 		Workflow:       wf,
 		WorkflowSource: raw,

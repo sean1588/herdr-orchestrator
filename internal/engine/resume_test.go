@@ -31,10 +31,16 @@ func TestChangesRequested_ResumeThenPRExists_LoopsToPROpen(t *testing.T) {
 		{PaneID: "w1:p1", State: exec.StateWorking},
 		{PaneID: "w1:p1", State: exec.StateDone},
 	}}
-	gh := &fakeGH{pr: &github.PR{Number: 42, State: "OPEN"}}
+	// The head moves while the resumed implementer works, so the head_moved gate
+	// has real evidence to pass on rather than the unknown-baseline degradation.
+	gh := &fakeGH{pr: &github.PR{Number: 42, State: "OPEN"}, headSHA: "sha-after-fix"}
 	e := newEngine(t, st, b, gh, 5*time.Second)
 	e.goal = "pr_open"
 	task := seedAt(t, st, "changes_requested", 42, nil)
+	task.StateEntryHead = "sha-as-reviewed"
+	if err := st.UpdateTask(context.Background(), task); err != nil {
+		t.Fatal(err)
+	}
 	writeVerdict(t, e.taskDir, task.ID, `{"verdict":"request_changes","feedback":"fix the off-by-one in the loop"}`)
 
 	final, err := e.drive(context.Background(), task)

@@ -13,7 +13,13 @@ var authoritativeGateTypes = map[string]bool{
 	"github_checks":    true,
 	"github_reviews":   true,
 	"github_mergeable": true,
+	"github_commits":   true,
 }
+
+// commitsGateSince are the supported `since` anchors for a github_commits gate.
+// The anchor is required rather than implied, so the YAML states what the gate
+// actually asks ("commits since we entered this state") instead of hiding it.
+var commitsGateSince = map[string]bool{"state_entry": true}
 
 // sideEffectingActions are entry actions with an irreversible repo effect
 // (invariant 5): entering such a state must be gate-evaluated.
@@ -41,8 +47,20 @@ func semanticChecks(wf *Workflow) (warnings, errs []string) {
 	for _, gname := range sortedKeys(wf.Gates) {
 		if !authoritativeGateTypes[wf.Gates[gname].Type] {
 			errs = append(errs, fmt.Sprintf(
-				"gate %q: type %q is not an authoritative source (allowed: [github_checks github_mergeable github_pr github_reviews])",
+				"gate %q: type %q is not an authoritative source (allowed: [github_checks github_commits github_mergeable github_pr github_reviews])",
 				gname, wf.Gates[gname].Type))
+		}
+	}
+
+	// A github_commits gate must name a supported anchor.
+	for _, gname := range sortedKeys(wf.Gates) {
+		g := wf.Gates[gname]
+		if g.Type != "github_commits" {
+			continue
+		}
+		if !commitsGateSince[g.Since] {
+			errs = append(errs, fmt.Sprintf(
+				"gate %q: github_commits requires since: state_entry (got %q)", gname, g.Since))
 		}
 	}
 

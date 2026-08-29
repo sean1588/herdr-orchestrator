@@ -49,7 +49,7 @@ code — read the actual config for the workflow you run):
 | `queued` | accepted, awaiting a worker | auto `scheduled` → `implementing` |
 | `implementing` | implementer agent writing code in a worktree | `agent.done` + `pr_exists` gate → `pr_open` / `escalated`; 45m timeout; `blocked_timeout` / `no_progress` → `escalated` |
 | `pr_open` | reviewer agent reviewing the PR | `review` decision → `approved` / `changes_requested` / `escalated` |
-| `changes_requested` | implementer resumes with review feedback | `agent.done` + `pr_exists` gate → `pr_open` / `escalated`; `retry_exhausted` → `escalated` |
+| `changes_requested` | implementer resumes with review feedback | `agent.done` + `pr_exists` **and** `head_moved` gates → `pr_open` / `escalated`; `retry_exhausted` → `escalated` |
 | `approved` | merge gate being evaluated | gate pass → `merging`, fail → `blocked_on_gate` |
 | `blocked_on_gate` | merge gate not green; **suspended**, re-checked each poll | gate pass → `merging`; 30m timeout → `escalated` |
 | `merging` | runs the `merge_pr` action (**withheld under `dry_run`**), then closes the issue + deletes the remote branch | `pr.merged` → `merged` |
@@ -322,6 +322,10 @@ the trigger tells you why:
   prompt, fix the environment that caused it, retry via a fresh issue.
 - `pr_open → escalated` → the reviewer returned `escalate`.
 - `changes_requested → escalated` on `retry_exhausted` → the change cap was hit.
+- `changes_requested → escalated` on `agent.done` (`fail`) → the resumed
+  implementer reported done without moving the PR head (`head_moved` gate). It
+  addressed nothing, so it was stopped rather than sent back to the reviewer with
+  unchanged code. Read the pane read-only and the feedback file to see why.
 - `blocked_on_gate → escalated` on `timeout` → the merge gate never cleared
   (CI red, missing approval, or conflicts).
 

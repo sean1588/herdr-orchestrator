@@ -182,3 +182,35 @@ func TestAgentStatesMustBeBounded(t *testing.T) {
 		})
 	}
 }
+
+// The github_commits anchor is required rather than implied, so the YAML states
+// what the gate actually asks instead of hiding it behind the type name.
+func TestGithubCommitsGateRequiresASupportedAnchor(t *testing.T) {
+	tests := []struct {
+		name    string
+		since   string
+		wantErr bool
+	}{
+		{"state_entry is supported", "state_entry", false},
+		{"missing anchor is rejected", "", true},
+		{"unknown anchor is rejected", "review_submitted", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			wf := &Workflow{
+				Gates:  map[string]Gate{"head_moved": {Type: "github_commits", Since: tc.since}},
+				States: map[string]State{"a": {Terminal: "success"}},
+			}
+			_, errs := semanticChecks(wf)
+			var got bool
+			for _, e := range errs {
+				if strings.Contains(e, "github_commits requires since") {
+					got = true
+				}
+			}
+			if got != tc.wantErr {
+				t.Errorf("errors = %v, want anchor error: %v", errs, tc.wantErr)
+			}
+		})
+	}
+}

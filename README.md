@@ -101,8 +101,11 @@ Past `pr_open` the engine runs the rest of the pipeline:
   `agent.done` the engine reads it, validates the verdict against the decision's
   declared `verdicts`, and branches. The engine reads a verdict; it never judges.
 - **Changes requested.** `changes_requested` resumes the implementer carrying the
-  reviewer's `feedback`, loops back to `pr_open` on a new push, and gives up to
-  `escalated` once `policies.retry_caps.changes_requested` is exceeded.
+  reviewer's `feedback`, and loops back to `pr_open` only once the PR head has
+  actually moved (`pr_exists` + `github_commits`) — an agent that reports done
+  having committed nothing escalates rather than sending the reviewer back to
+  unchanged code. It gives up to `escalated` once
+  `policies.retry_caps.changes_requested` is exceeded.
 - **Merge gate.** `approved` evaluates the merge gate
   (`github_checks` + `github_reviews` + `github_mergeable`) over one authoritative
   `PRStatus` read. If not yet green it parks in `blocked_on_gate`, which evaluates
@@ -347,8 +350,26 @@ never silent.
 and an optional `kickoff` string.
 
 **`gates`** — `type` is one of `github_pr`, `github_checks`, `github_reviews`,
-`github_mergeable` (the only authoritative sources accepted). Type-specific
-fields (`head`, `all_passing`, `min_approved`, `require`) are allowed alongside.
+`github_mergeable`, `github_commits` (the only authoritative sources accepted).
+Type-specific fields (`head`, `all_passing`, `min_approved`, `require`, `since`)
+are allowed alongside.
+
+**`github_commits`** (`since: state_entry`, required) passes only if the PR head
+commit differs from the one recorded when the task entered its current state. It
+exists because a gate must ask the question its state actually asks. In
+`implementing`, `pr_exists` means "did you produce the artifact?" — real
+evidence. Reused in `changes_requested` it verifies nothing: the PR was opened in
+the round that put the task there, so it could only ever pass, whether or not the
+implementer addressed a single line of the review. A resumed agent that did
+nothing advanced anyway, the reviewer re-reviewed unchanged code, and the loop
+burned retries. `github_commits` asks whether anything was actually committed.
+
+The baseline is captured when the task enters the state, and only for states that
+evaluate such a gate — every other transition, including the detached writes that
+settle a cancel or a reaped drive, skips the read. If the baseline is unknown (no
+PR yet, a failed read, or a task predating the column) the gate passes and logs:
+degrading to the previous behavior beats escalating a task on a question whose
+input was never captured.
 
 **`decisions`** — `impl.type` is `llm` (with a `rubric` path) or `exec` (with a
 `command` argv); `verdicts` is the closed, unique set of outcomes it may return.
@@ -381,7 +402,7 @@ A `gate` reference is a single name or a list (every gate must pass).
    referenced decision's declared verdicts.
 3. **Gate branches are `{pass, fail}`**.
 4. **Gates read authoritative sources only** — `github_pr`, `github_checks`,
-   `github_reviews`, `github_mergeable`.
+   `github_reviews`, `github_mergeable`, `github_commits`.
 5. **Merge is gate-only** — entering a side-effecting (`merge_pr`) state must be
    gate-evaluated, never decided by a model or raw event.
 6. **Loops terminate** — every cycle has a retry cap or a timeout.

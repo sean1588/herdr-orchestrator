@@ -24,10 +24,16 @@ type Task struct {
 	// Recovery resumes against this, never a possibly-edited --config. Set once
 	// at create; never rewritten. Empty for tasks created before this column.
 	WorkflowSnapshot string
-	PRNumber         *int           // nil until a PR is detected
-	RetryCounts      map[string]int // keyed by retry-cap key, may be nil/empty
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
+	// StateEntryHead is the PR head commit SHA observed when the task entered
+	// CurrentState. It is the baseline the github_commits gate compares against,
+	// so "did the implementer respond to the review?" becomes a question about the
+	// artifact rather than about the agent's self-report. Empty means "unknown"
+	// (no PR yet, a read that failed, or a task predating this column).
+	StateEntryHead string
+	PRNumber       *int           // nil until a PR is detected
+	RetryCounts    map[string]int // keyed by retry-cap key, may be nil/empty
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 // AuditEntry is one immutable row in a task's transition history.

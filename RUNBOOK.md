@@ -181,6 +181,24 @@ pass end-to-end, then set `dry_run: false` and restart the daemon.
 
 ### 3.1 Prerequisites — verify all before starting
 
+**Check them all at once:**
+
+```sh
+orchestratord doctor --config <config> --repo <repo-dir> \
+  --db <db> --worktrees-dir <wt-dir>
+```
+
+One line per check, a fix under anything not passing, exit non-zero on failure.
+It covers every row of the table below plus the store, the source label, whether
+the base branch is behind origin, and — the check the command exists for — an
+end-to-end kickoff-delivery smoke test that launches the real agent in a scratch
+workspace. Run it until green, then start the daemon. `--quick` skips the agent
+launch. The daemon runs the cheap subset itself at startup and refuses to start
+on a failure; `--skip-preflight` overrides that.
+
+The table remains as the explanation of *why* each requirement matters, and for
+diagnosing by hand when `doctor` is not available:
+
 | Requirement | Check | Why |
 | --- | --- | --- |
 | Running **inside a herdr pane** | `echo $HERDR_ENV` → `1` | the backend shells out to `herdr`; outside a pane it can't reach the session |
@@ -384,6 +402,9 @@ When you're done operating:
 **Daemon flags:** `--config` · `--repo` · `--base` (main) · `--db`
 (orchestrator.db) · `--task-dir` · `--worktrees-dir` · `--poll-interval` (30s) ·
 `--notify-webhook` · `--mcp-listen` (off).
+
+**Preflight:** `orchestratord doctor --config <c> --repo <dir> [--quick]` —
+exit 0 means the environment is ready; every failure names its fix.
 
 **Key policies:** `dry_run` (default-on; withholds the real merge) ·
 `retry_caps.<state>` · `no_progress_timeout` (global liveness bound; absent ⇒

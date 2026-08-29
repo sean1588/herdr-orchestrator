@@ -3,6 +3,7 @@ package exec
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,11 @@ import (
 
 	"github.com/sean1588/herdr-orchestrator/internal/proc"
 )
+
+// smokeLabel is the herdr workspace label SmokeKickoff claims. It is fixed (not
+// per-run) so a crashed preflight leaves exactly one stale workspace, which the
+// next run closes, rather than accumulating one per attempt.
+const smokeLabel = "orchestratord-doctor"
 
 // waitBudgetSlack is how far WaitState's per-call subprocess budget sits above
 // the --timeout it hands herdr, so the budget is a backstop for a herdr that
@@ -123,6 +129,45 @@ func (h *Herdr) Spawn(ctx context.Context, s Spawn) (Handle, error) {
 		return hd, err
 	}
 	return hd, nil
+}
+
+// SmokeKickoff proves the kickoff-delivery path end to end without a task: it
+// creates a scratch workspace at dir, launches launch verbatim, delivers kickoff
+// through the SAME verified path Spawn uses, and tears the workspace down.
+//
+// It exists because kickoff delivery has broken twice from underneath us — once
+// when herdr's CLI changed, once when Claude Code stopped accepting send-text —
+// and both times the failure was discovered by a task escalating with zero work
+// done. Exercising the real delivery code (rather than a reimplementation of it)
+// is the whole point: a smoke test that takes its own path would keep passing
+// through exactly the regressions this is meant to catch.
+//
+// The workspace is closed on every exit path, including a failed launch.
+func (h *Herdr) SmokeKickoff(ctx context.Context, dir string, launch []string, kickoff string) error {
+	if len(launch) == 0 {
+		return errors.New("smoke kickoff: no launch argv")
+	}
+	out, err := h.r.Run(ctx, "", h.HerdrBin, "workspace", "create", "--cwd", dir, "--label", smokeLabel, "--no-focus")
+	if err != nil {
+		return fmt.Errorf("create scratch workspace: %w", err)
+	}
+	pane, err := parseRootPaneID(out)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		// Best-effort teardown on every path: a scratch workspace left behind
+		// would collide with the next run's label and break Resolve-by-label.
+		if wsID, werr := h.workspaceByLabel(context.WithoutCancel(ctx), smokeLabel); werr == nil && wsID != "" {
+			_, _ = h.r.Run(context.WithoutCancel(ctx), "", h.HerdrBin, "workspace", "close", wsID)
+		}
+	}()
+
+	if _, err := h.r.Run(ctx, "", h.HerdrBin, "pane", "run", pane, strings.Join(launch, " ")); err != nil {
+		return fmt.Errorf("launch %q on %s: %w", strings.Join(launch, " "), pane, err)
+	}
+	_, _ = h.r.Run(ctx, "", h.HerdrBin, "pane", "wait-output", pane, "--match", h.ReadyMatch, "--timeout", msString(h.ReadyTimeout))
+	return h.deliverKickoff(ctx, pane, kickoff)
 }
 
 // deliverKickoff gets the single-line kickoff into the agent's prompt and proves

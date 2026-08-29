@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/sean1588/herdr-orchestrator/internal/config"
+	"github.com/sean1588/herdr-orchestrator/internal/doctor"
 	"github.com/sean1588/herdr-orchestrator/internal/engine"
 	"github.com/sean1588/herdr-orchestrator/internal/github"
 	"github.com/sean1588/herdr-orchestrator/internal/store"
@@ -325,5 +326,42 @@ func TestWritePlan_UncappedCycleAnnotated(t *testing.T) {
 	out := buf.String()
 	if !strings.Contains(out, "{loop}") || !strings.Contains(out, "UNCAPPED") {
 		t.Errorf("uncapped self-loop should render {loop} ... UNCAPPED:\n%s", out)
+	}
+}
+
+// The report has to be readable when everything is fine and actionable when it
+// is not: a fix line under every non-passing check, and a summary that names the
+// failure count.
+func TestReportDoctor_ShowsFixesForNonPassingChecks(t *testing.T) {
+	var buf bytes.Buffer
+	reportDoctor(&buf, []doctor.Result{
+		{Name: "gh-auth", Status: doctor.StatusPass, Detail: "authenticated"},
+		{Name: "herdr-server", Status: doctor.StatusFail, Detail: "connection refused", Fix: "run `herdr server`"},
+		{Name: "gh-token-env", Status: doctor.StatusWarn, Detail: "GITHUB_TOKEN set", Fix: "unset it"},
+		{Name: "kickoff-delivery", Status: doctor.StatusSkip, Detail: "not run"},
+	})
+	got := buf.String()
+
+	for _, want := range []string{
+		"ok", "FAIL", "WARN", "skip",
+		"run `herdr server`", "unset it",
+		"1 passed, 1 warning(s), 1 failed, 1 skipped",
+		"FAIL: fix the failures above",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("report is missing %q:\n%s", want, got)
+		}
+	}
+	// A passing check must not print an empty fix line.
+	if strings.Contains(got, "→ \n") {
+		t.Errorf("report has an empty fix line:\n%s", got)
+	}
+}
+
+// doctor without a config cannot check anything; it must say so rather than
+// report a vacuous pass.
+func TestCmdDoctor_RequiresAConfig(t *testing.T) {
+	if code := cmdDoctor(nil); code != 2 {
+		t.Errorf("cmdDoctor with no --config = %d, want 2", code)
 	}
 }

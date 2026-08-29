@@ -44,8 +44,42 @@ type Policies struct {
 	// windows no in-drive timer covers — a spawn, a gate read, a decision, a merge
 	// — where the engine's only clock is not armed. Empty => derived (see
 	// ResolveDriveDeadline).
-	DriveDeadline string    `yaml:"drive_deadline"`
-	Execution     Execution `yaml:"execution"`
+	DriveDeadline string `yaml:"drive_deadline"`
+	// NoProgressTimeout bounds how long a task may go without ANY observable
+	// signal — the global liveness bound. Where a state timeout measures POSITION
+	// ("how long has this task been in state X"), this measures PROGRESS ("how
+	// long since it last did anything"), which is the question that actually
+	// distinguishes a legitimately slow agent from a dead one.
+	//
+	// It inverts the default. A per-state `timeout:` protects only the states
+	// someone remembered to annotate; this applies everywhere an agent runs, so
+	// absence of config means the global bound applies rather than no bound at
+	// all, and a per-state timeout becomes an override for the thing that
+	// genuinely varies — "this one legitimately takes 90 minutes".
+	//
+	// Empty => defaultNoProgressTimeout. "0s" disables it (and warns).
+	NoProgressTimeout string    `yaml:"no_progress_timeout"`
+	Execution         Execution `yaml:"execution"`
+}
+
+// defaultNoProgressTimeout is the global liveness bound applied when a workflow
+// declares none. It is deliberately generous: the bound is confirmed against the
+// agent pane's own bytes before anything escalates, so it fires only when
+// genuinely nothing has happened.
+const defaultNoProgressTimeout = 30 * time.Minute
+
+// ResolveNoProgressTimeout returns the global no-progress bound in effect: the
+// explicit policies.no_progress_timeout if set, else defaultNoProgressTimeout.
+// Zero means the bound is disabled.
+func (p Policies) ResolveNoProgressTimeout() (time.Duration, error) {
+	if p.NoProgressTimeout == "" {
+		return defaultNoProgressTimeout, nil
+	}
+	d, err := time.ParseDuration(p.NoProgressTimeout)
+	if err != nil {
+		return 0, fmt.Errorf("parse no_progress_timeout %q: %w", p.NoProgressTimeout, err)
+	}
+	return d, nil
 }
 
 // minDriveDeadline floors the derived per-drive ceiling, so a workflow whose

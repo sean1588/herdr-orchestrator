@@ -90,3 +90,28 @@ func TestCheckDriveDeadlineRejectsACeilingBelowAStateTimeout(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveNoProgressTimeout(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		want    time.Duration
+		wantErr bool
+	}{
+		{"absent applies the global default", "", defaultNoProgressTimeout, false},
+		{"explicit value wins", "45m", 45 * time.Minute, false},
+		{"zero disables the bound", "0s", 0, false},
+		{"malformed is rejected", "banana", 0, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := Policies{NoProgressTimeout: tc.value}.ResolveNoProgressTimeout()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if !tc.wantErr && got != tc.want {
+				t.Errorf("ResolveNoProgressTimeout() = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}

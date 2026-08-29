@@ -29,6 +29,9 @@ type fakeBackend struct {
 	verdictOnSpawn map[string]string // role -> verdict JSON the spawned agent "writes" (see Spawn)
 	cleanups       []string          // taskIDs Cleanup was called with
 	cleanupErr     error
+	// readFunc scripts pane reads (the no-progress confirmation read). Nil keeps
+	// the default: an empty, unchanging pane.
+	readFunc func(lines int) (string, error)
 }
 
 func (f *fakeBackend) Spawn(ctx context.Context, s exec.Spawn) (exec.Handle, error) {
@@ -50,6 +53,9 @@ func (f *fakeBackend) WaitState(ctx context.Context, h exec.Handle, target exec.
 	return target, nil
 }
 func (f *fakeBackend) Read(ctx context.Context, h exec.Handle, lines int) (string, error) {
+	if f.readFunc != nil {
+		return f.readFunc(lines)
+	}
 	return "", nil
 }
 func (f *fakeBackend) Events(ctx context.Context) (<-chan exec.Event, error) {

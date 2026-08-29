@@ -35,6 +35,7 @@
         "retry_caps": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
         "blocked_timeout": { "$ref": "#/$defs/duration" },
         "drive_deadline": { "$ref": "#/$defs/duration" },
+        "no_progress_timeout": { "$ref": "#/$defs/duration" },
         "execution": {
           "type": "object",
           "additionalProperties": false,

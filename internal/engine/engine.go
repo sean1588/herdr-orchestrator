@@ -19,6 +19,8 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -104,7 +106,12 @@ type Config struct {
 	Goal         string                              // halt-on-enter success state; default "pr_open"
 	StartState   string                              // where the daemon enqueues discovered issues; default "queued"
 	DurationFunc func(string) (time.Duration, error) // default time.ParseDuration
-	Logger       *slog.Logger
+	// NoProgressTimeout overrides the global liveness bound resolved from
+	// policies.no_progress_timeout. Nil => resolve from the workflow. Set to a
+	// pointer-to-zero to disable the bound outright (what most unit tests want,
+	// since they drive fake backends whose panes never produce bytes).
+	NoProgressTimeout *time.Duration
+	Logger            *slog.Logger
 	// Notifier forwards escalation/alert events out-of-band; default notify.Nop.
 	Notifier notify.Notifier
 }
@@ -122,9 +129,11 @@ type Engine struct {
 	taskDir             string
 	goal, startState    string
 	parseDur            func(string) (time.Duration, error)
-	now                 func() time.Time // injectable clock; drives the blocked_on_gate wait timeout
-	log                 *slog.Logger
-	notifier            notify.Notifier
+	// noProgress is the resolved global liveness bound (see Config.NoProgressTimeout).
+	noProgress time.Duration
+	now        func() time.Time // injectable clock; drives the blocked_on_gate wait timeout
+	log        *slog.Logger
+	notifier   notify.Notifier
 }
 
 // New builds an Engine, applying defaults.
@@ -165,6 +174,10 @@ func New(c Config) *Engine {
 	if e.parseDur == nil {
 		e.parseDur = time.ParseDuration
 	}
+	// Resolved from the workflow, not via DurationFunc: tests stub DurationFunc to
+	// return one fixed value for every state timeout, and letting that also govern
+	// the global bound would silently couple two unrelated knobs.
+	e.noProgress = resolveNoProgress(c.NoProgressTimeout, c.Workflow, e.log)
 	if e.now == nil {
 		e.now = time.Now
 	}
@@ -238,7 +251,30 @@ func (e *Engine) Recover(ctx context.Context) error {
 func (e *Engine) cloneWithWorkflow(wf *config.Workflow) *Engine {
 	c := *e
 	c.wf = wf
+	// The liveness bound is a policy of the workflow, so it must be re-resolved
+	// against the snapshot rather than inherited from the daemon's current config.
+	c.noProgress = resolveNoProgress(nil, wf, e.log)
 	return &c
+}
+
+// resolveNoProgress resolves the global liveness bound: an explicit override
+// wins, otherwise the workflow's policy (or its default). A malformed policy
+// value is logged and treated as disabled rather than failing engine
+// construction — config.Parse already rejects it at load, so reaching this is a
+// programming error, not an operator one.
+func resolveNoProgress(override *time.Duration, wf *config.Workflow, log *slog.Logger) time.Duration {
+	if override != nil {
+		return *override
+	}
+	if wf == nil {
+		return 0
+	}
+	d, err := wf.Policies.ResolveNoProgressTimeout()
+	if err != nil {
+		log.Warn("no_progress_timeout unparseable; liveness bound disabled", "err", err)
+		return 0
+	}
+	return d
 }
 
 // ensureTask loads an existing task or creates a fresh one at the start state.
@@ -311,7 +347,7 @@ func (e *Engine) reclassifyCancel(ctx context.Context, task *store.Task, state s
 // a human needs to inspect, and it may hold uncommitted work.
 func (e *Engine) settleDeadline(ctx context.Context, task *store.Task) (string, error) {
 	from := task.CurrentState
-	target, why := e.deadlineTarget(from)
+	target, why := e.escalationTarget(from)
 	e.log.Warn("drive deadline exceeded", "task", task.ID, "state", from, "to", target, "via", why)
 
 	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), settleTimeout)
@@ -323,14 +359,22 @@ func (e *Engine) settleDeadline(ctx context.Context, task *store.Task) (string, 
 	return target, nil
 }
 
-// deadlineTarget resolves where a reaped drive lands, preferring the state's own
-// timeout target so a deadline escalation is indistinguishable from the timeout
-// it is standing in for. A state with no timeout transition falls back to the
-// workflow's alerting terminal (the escalated state), and a workflow with neither
-// falls back to CancelState — which settles the task rather than leaving it to be
-// re-driven and re-reaped forever. The second return names the derivation, and is
-// recorded on the audit row so the fallback is never silent.
-func (e *Engine) deadlineTarget(state string) (target, why string) {
+// escalationTarget resolves where a state gives up to when a bound fires that is
+// not itself a declared transition — the drive deadline, the blocked bound, and
+// the no-progress bound all land here. It prefers the state's own timeout target,
+// so such an escalation is indistinguishable from the timeout it stands in for. A
+// state with no timeout transition falls back to the workflow's alerting terminal
+// (the escalated state), and a workflow with neither falls back to CancelState —
+// which settles the task rather than leaving it to be re-driven and re-bounded
+// forever.
+//
+// This fallback is what makes the bounds apply by default rather than by
+// remembering: before it, a bound whose only escalation path was the state's
+// timeout edge was silently inert in every state that declared none.
+//
+// The second return names the derivation, and is recorded on the audit row so a
+// fallback is never silent.
+func (e *Engine) escalationTarget(state string) (target, why string) {
 	if t := findTimeoutTransition(e.wf.States[state]); t != nil && t.To != "" {
 		return t.To, "state_timeout_target"
 	}
@@ -551,11 +595,14 @@ func (e *Engine) awaitAgentState(ctx context.Context, task *store.Task, st confi
 		timer = t.C
 	}
 
-	// The blocked bound only has somewhere to go if the state declares a timeout
-	// transition — its target is by definition "this state gave up". Reusing it
-	// keeps the escalation path single and adds no per-state config.
+	// The blocked bound needs somewhere to go — by definition "this state gave
+	// up". It used to reuse the state's timeout target, which made it silently
+	// INERT in any state that declared no timeout (pr_open, changes_requested):
+	// the policy was set, the clock never armed, and nothing said so.
+	// escalationTarget always resolves a destination, so the bound now applies
+	// wherever it is configured.
 	var blockedFor time.Duration
-	if timeoutT != nil && e.wf.Policies.BlockedTimeout != "" {
+	if e.wf.Policies.BlockedTimeout != "" {
 		if blockedFor, err = e.parseDur(e.wf.Policies.BlockedTimeout); err != nil {
 			return "", "", "", fmt.Errorf("parse blocked_timeout %q: %w", e.wf.Policies.BlockedTimeout, err)
 		}
@@ -576,6 +623,34 @@ func (e *Engine) awaitAgentState(ctx context.Context, task *store.Task, st confi
 	}
 	defer clearBlocked()
 
+	// The global liveness bound: how long this task may produce NO observable
+	// signal at all. Where the state timeout above measures POSITION (time since
+	// entering the state), this measures PROGRESS, so it bounds every agent state
+	// — including the ones that declare no timeout of their own — without capping
+	// how long honest work may take.
+	//
+	// Deliberately a live per-drive timer rather than an audit-anchored deadline:
+	// the question is "has anything happened lately", which has no meaning across
+	// a restart. The audit-anchored state timeout and the scheduler's drive
+	// deadline remain the hard backstops, so the worst case is exactly the
+	// behavior before this bound existed.
+	var progressTimer *time.Timer
+	var progressC <-chan time.Time
+	var lastDigest string
+	if e.noProgress > 0 {
+		lastDigest = e.paneDigest(ctx, task) // baseline; skipped when the bound is off
+		progressTimer = time.NewTimer(e.noProgress)
+		progressC = progressTimer.C
+		defer progressTimer.Stop()
+	}
+	resetProgress := func() {
+		if progressTimer == nil {
+			return
+		}
+		progressTimer.Stop()
+		progressTimer.Reset(e.noProgress)
+	}
+
 	events, err := e.backend.Events(waitCtx)
 	if err != nil {
 		return "", "", "", fmt.Errorf("subscribe to events: %w", err)
@@ -589,9 +664,28 @@ func (e *Engine) awaitAgentState(ctx context.Context, task *store.Task, st confi
 			e.log.Warn("state timeout", "task", task.ID, "state", task.CurrentState)
 			return timeoutT.To, "timeout", "", nil
 		case <-blockedC:
+			target, why := e.escalationTarget(task.CurrentState)
 			e.log.Warn("blocked timeout", "task", task.ID, "state", task.CurrentState,
-				"blocked_for", e.wf.Policies.BlockedTimeout)
-			return timeoutT.To, "blocked_timeout", "", nil
+				"blocked_for", e.wf.Policies.BlockedTimeout, "to", target, "via", why)
+			return target, "blocked_timeout", why, nil
+
+		case <-progressC:
+			// The timer expiring is a suspicion, not a verdict. Pane STATUS can sit
+			// on "working" for an hour while an agent works steadily, and the event
+			// hub broadcasts only diffs — so silence on the event stream is not
+			// evidence of a dead agent. Confirm against the pane's own bytes before
+			// giving up on it, which is what keeps a legitimately slow agent from
+			// being mistaken for a wedged one.
+			moved, digest := e.paneMoved(ctx, task, lastDigest)
+			if moved {
+				lastDigest = digest
+				resetProgress()
+				continue
+			}
+			target, why := e.escalationTarget(task.CurrentState)
+			e.log.Warn("no progress", "task", task.ID, "state", task.CurrentState,
+				"window", e.noProgress, "to", target, "via", why)
+			return target, "no_progress", why, nil
 		case ev, ok := <-events:
 			if !ok {
 				return "", "", "", fmt.Errorf("event stream closed before agent settled")
@@ -599,6 +693,10 @@ func (e *Engine) awaitAgentState(ctx context.Context, task *store.Task, st confi
 			if ev.PaneID != task.PaneID {
 				continue
 			}
+			// The hub broadcasts only diffs, so an event for our pane IS a change:
+			// the agent did something observable. Reset before dispatching, so
+			// every arm below counts, not just the ones that return.
+			resetProgress()
 			switch ev.State {
 			case exec.StateDone:
 				verdict, derr := e.evaluateDone(ctx, task, doneT)
@@ -674,6 +772,51 @@ func (e *Engine) awaitAgentState(ctx context.Context, task *store.Task, st confi
 			}
 		}
 	}
+}
+
+// progressReadLines is how much pane tail the confirmation read hashes. Wide
+// enough that any real agent activity — a tool call, a diff, a status line —
+// lands inside it, cheap enough to run once per no-progress window.
+const progressReadLines = 80
+
+// paneMoved reports whether the agent pane's tail has changed since prev,
+// returning the new digest. A read failure counts as movement: a herdr blip must
+// never be the thing that escalates a task. That deliberately means a persistently
+// unreadable pane keeps this bound from firing — the state timeout and the
+// scheduler's drive deadline are the backstops for that case.
+func (e *Engine) paneMoved(ctx context.Context, task *store.Task, prev string) (bool, string) {
+	if task.PaneID == "" {
+		return true, prev
+	}
+	out, err := e.backend.Read(ctx, exec.Handle{PaneID: task.PaneID}, progressReadLines)
+	if err != nil {
+		e.log.Warn("progress check: pane read failed; assuming progress",
+			"task", task.ID, "pane", task.PaneID, "err", err)
+		return true, prev
+	}
+	d := digestOf(out)
+	return d != prev, d
+}
+
+// paneDigest takes the baseline the first confirmation read compares against.
+// An unreadable pane yields "", which simply costs one extra window before the
+// bound can fire.
+func (e *Engine) paneDigest(ctx context.Context, task *store.Task) string {
+	if task.PaneID == "" {
+		return ""
+	}
+	out, err := e.backend.Read(ctx, exec.Handle{PaneID: task.PaneID}, progressReadLines)
+	if err != nil {
+		return ""
+	}
+	return digestOf(out)
+}
+
+// digestOf hashes pane output so a whole window's worth of tail is held as 32
+// bytes rather than kilobytes of retained terminal text.
+func digestOf(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
 }
 
 // decisionRefOf returns a transition's decision name, or "" if the transition is

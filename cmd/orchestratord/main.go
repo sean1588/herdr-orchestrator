@@ -481,8 +481,14 @@ func cmdDaemon(args []string) int {
 		fmt.Fprintf(os.Stderr, "daemon: %v\n", err)
 		return 2
 	}
-	slog.Default().Info("drive deadline armed", "deadline", driveDeadline,
-		"explicit", w.wf.Policies.DriveDeadline != "")
+	noProgress, err := w.wf.Policies.ResolveNoProgressTimeout()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "daemon: %v\n", err)
+		return 2
+	}
+	slog.Default().Info("liveness bounds armed",
+		"drive_deadline", driveDeadline, "drive_deadline_explicit", w.wf.Policies.DriveDeadline != "",
+		"no_progress_timeout", noProgress, "no_progress_enabled", noProgress > 0)
 
 	sched := &scheduler.Scheduler{
 		List: func(ctx context.Context) ([]int, error) {

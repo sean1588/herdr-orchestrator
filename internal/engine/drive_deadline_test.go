@@ -55,11 +55,11 @@ func TestDriveDeadlineSettlesToTheStateTimeoutTarget(t *testing.T) {
 	}
 }
 
-// deadlineTarget's fallbacks, in order: the state's timeout edge, then the
+// escalationTarget's fallbacks, in order: the state's timeout edge, then the
 // workflow's alerting terminal, then CancelState. The last one matters most —
 // without it a workflow that declares no escalation terminal would leave a
 // reaped task non-settled and the reaper would chase it forever.
-func TestDeadlineTargetFallbacks(t *testing.T) {
+func TestEscalationTargetFallbacks(t *testing.T) {
 	alerting := config.State{Terminal: "needs_human", Alert: true}
 	timedOut := config.State{Transitions: []config.Transition{
 		{When: config.Trigger{Timeout: "5m"}, To: "escalated"},
@@ -97,9 +97,9 @@ func TestDeadlineTargetFallbacks(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			e := &Engine{wf: &config.Workflow{States: tc.states}}
-			target, why := e.deadlineTarget(tc.from)
+			target, why := e.escalationTarget(tc.from)
 			if target != tc.wantTarget || why != tc.wantWhy {
-				t.Errorf("deadlineTarget(%q) = (%q, %q), want (%q, %q)", tc.from, target, why, tc.wantTarget, tc.wantWhy)
+				t.Errorf("escalationTarget(%q) = (%q, %q), want (%q, %q)", tc.from, target, why, tc.wantTarget, tc.wantWhy)
 			}
 		})
 	}

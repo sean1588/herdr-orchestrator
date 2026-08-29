@@ -50,7 +50,7 @@ func TestImplementing_BlockedPastBound_Escalates(t *testing.T) {
 	// The trigger must name the blocked bound, not the state timeout — an operator
 	// reading the audit has to be able to tell "parked on a prompt" apart from
 	// "legitimately slow and overran".
-	if !hasAudit(auditFor(t, st, task.ID), "implementing", "escalated", "blocked_timeout", "") {
+	if !hasAudit(auditFor(t, st, task.ID), "implementing", "escalated", "blocked_timeout", "state_timeout_target") {
 		t.Error("missing audit implementing->escalated blocked_timeout")
 	}
 }
@@ -118,7 +118,7 @@ func TestImplementing_BlockedThenIdle_StillEscalates(t *testing.T) {
 	}
 	// Assert the trigger, not just the terminal: the state timeout escalates too,
 	// so only the trigger distinguishes "the bound fired" from "we waited it out".
-	if !hasAudit(auditFor(t, st, task.ID), "implementing", "escalated", "blocked_timeout", "") {
+	if !hasAudit(auditFor(t, st, task.ID), "implementing", "escalated", "blocked_timeout", "state_timeout_target") {
 		t.Error("escalated, but not via the blocked bound")
 	}
 }
@@ -141,7 +141,7 @@ func TestImplementing_RepeatBlockedEvents_DoNotResetTheClock(t *testing.T) {
 	if final != "escalated" {
 		t.Fatalf("final = %q, want escalated (repeat blocked events must not restart the bound)", final)
 	}
-	if !hasAudit(auditFor(t, st, task.ID), "implementing", "escalated", "blocked_timeout", "") {
+	if !hasAudit(auditFor(t, st, task.ID), "implementing", "escalated", "blocked_timeout", "state_timeout_target") {
 		t.Error("escalated, but not via the blocked bound")
 	}
 }

@@ -13,6 +13,11 @@ import (
 	"github.com/sean1588/herdr-orchestrator/internal/proc"
 )
 
+// waitBudgetSlack is how far WaitState's per-call subprocess budget sits above
+// the --timeout it hands herdr, so the budget is a backstop for a herdr that
+// ignores its own bound rather than a second, competing deadline.
+const waitBudgetSlack = 30 * time.Second
+
 // Herdr is the herdr-backed ExecutionBackend. It wraps the same git + herdr CLI
 // commands proven in Spike 0, run through a proc.Runner so command construction
 // is unit-testable.
@@ -251,7 +256,12 @@ func (h *Herdr) WaitState(ctx context.Context, hd Handle, target AgentState) (Ag
 			timeout = rem
 		}
 	}
-	_, err := h.r.Run(ctx, "", h.HerdrBin, "agent", "wait", hd.PaneID, "--until", string(target), "--timeout", msString(timeout))
+	// This is the one command that blocks by design, so the runner's default
+	// per-call budget would kill it long before herdr's own --timeout fired. Give
+	// it a budget just above that timeout: herdr stays the primary bound, and a
+	// herdr that ignores its own --timeout still cannot hang the caller forever.
+	waitCtx := proc.WithBudget(ctx, timeout+waitBudgetSlack)
+	_, err := h.r.Run(waitCtx, "", h.HerdrBin, "agent", "wait", hd.PaneID, "--until", string(target), "--timeout", msString(timeout))
 	if err != nil {
 		return h.currentStatus(ctx, hd.PaneID), fmt.Errorf("agent wait %s on %s: %w", target, hd.PaneID, err)
 	}

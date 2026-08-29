@@ -41,7 +41,13 @@ func containsSubstr(ss []string, sub string) bool {
 
 // --- Golden tests: the two fixtures are the validator's acceptance bar. ---
 
-func TestLoad_DefaultPipeline_ValidWith2Warnings(t *testing.T) {
+// The shipped pipeline must validate CLEAN. pr_open and changes_requested
+// declare no timeout of their own and used to warn about it on every startup —
+// a warning the config could do nothing about, on a config that was in fact
+// bounded. The global no-progress bound covers them now, so silence here is the
+// assertion: a validator that cries wolf about its own default trains operators
+// to ignore the warnings that matter.
+func TestLoad_DefaultPipeline_ValidWithNoWarnings(t *testing.T) {
 	wf, warnings, err := Load("testdata/default-pipeline.yaml")
 	if err != nil {
 		t.Fatalf("default-pipeline.yaml should be valid, got error: %v", err)
@@ -49,15 +55,8 @@ func TestLoad_DefaultPipeline_ValidWith2Warnings(t *testing.T) {
 	if wf.Name != "default-pipeline" {
 		t.Errorf("name = %q, want default-pipeline", wf.Name)
 	}
-	if len(warnings) != 2 {
-		t.Fatalf("want exactly 2 warnings, got %d: %v", len(warnings), warnings)
-	}
-	// Both warnings are the spawn/resume-without-timeout kind, for pr_open and changes_requested.
-	if !containsSubstr(warnings, `state "pr_open" spawns/resumes`) {
-		t.Errorf("missing pr_open spawn-no-timeout warning: %v", warnings)
-	}
-	if !containsSubstr(warnings, `state "changes_requested" spawns/resumes`) {
-		t.Errorf("missing changes_requested resume-no-timeout warning: %v", warnings)
+	if len(warnings) != 0 {
+		t.Fatalf("want no warnings, got %d: %v", len(warnings), warnings)
 	}
 }
 
@@ -109,8 +108,8 @@ func TestLoad_DefaultPipeline_IntakeSpawnsTriagerAndBranchesTriage(t *testing.T)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if len(warnings) != 2 { // still only pr_open + changes_requested spawn-without-timeout
-		t.Fatalf("want 2 warnings, got %d: %v", len(warnings), warnings)
+	if len(warnings) != 0 {
+		t.Fatalf("want no warnings, got %d: %v", len(warnings), warnings)
 	}
 	if _, ok := wf.Roles["triager"]; !ok {
 		t.Fatal("triager role not declared")

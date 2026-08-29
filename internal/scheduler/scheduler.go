@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"sync"
 	"time"
 )
@@ -32,6 +33,24 @@ type Scheduler struct {
 	Interval time.Duration
 	Workers  int
 	Log      *slog.Logger
+
+	// DriveDeadline is the wall-clock ceiling on a single drive, enforced by a
+	// reaper goroutine that runs OUTSIDE the drive it watches. Zero disables it.
+	// DeadlineCause is the cancellation cause a reap carries (the daemon wires
+	// engine.ErrDriveDeadline, which the drive settles on rather than aborting).
+	//
+	// The point is structural. The engine's only timer is armed inside the code it
+	// is meant to be watching, and only for part of a drive; a watchdog sharing a
+	// goroutine with a wedged drive is no watchdog at all. Cancelling the drive
+	// context also kills any hung subprocess, since exec.CommandContext already
+	// honors it — machinery that was in place all along with nothing driving it.
+	DriveDeadline time.Duration
+	DeadlineCause error
+	// ReapInterval is the reaper's sweep cadence; zero derives one from
+	// DriveDeadline. Injectable so tests need not wait out a real cadence.
+	ReapInterval time.Duration
+	// Now is an injectable clock for the reaper; nil means time.Now.
+	Now func() time.Time
 
 	// Control seam (nil unless EnableControl): the MCP server submits commands
 	// here and Serve processes them in the poller goroutine. cancelCause is the
@@ -107,8 +126,11 @@ func (s *Scheduler) Serve(ctx context.Context) error {
 	if workers < 1 {
 		workers = 1
 	}
+	if s.Now == nil {
+		s.Now = time.Now
+	}
 	work := make(chan int, queueDepth)
-	inflight := &inflightSet{m: map[int]context.CancelCauseFunc{}}
+	inflight := &inflightSet{m: map[int]*driveHandle{}}
 
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
@@ -121,7 +143,7 @@ func (s *Scheduler) Serve(ctx context.Context) error {
 				// Cancelling with ErrOperatorCancel makes the drive settle; the
 				// parent ctx cancels it too on daemon shutdown.
 				runCtx, cancel := context.WithCancelCause(ctx)
-				inflight.arm(issue, cancel)
+				inflight.arm(issue, cancel, s.Now())
 				if err := s.RunTask(runCtx, issue); err != nil {
 					s.Log.Warn("run task failed", "issue", issue, "err", err)
 				}
@@ -132,6 +154,10 @@ func (s *Scheduler) Serve(ctx context.Context) error {
 	}
 
 	s.seed(ctx, work, inflight) // resume in-flight/suspended tasks immediately
+
+	// The reaper is a separate goroutine on purpose: a drive wedged in a spawn, a
+	// gate read, or a hung subprocess cannot run its own watchdog.
+	reaperDone := s.startReaper(ctx, inflight)
 
 	interval := s.Interval
 	if interval <= 0 {
@@ -144,6 +170,7 @@ func (s *Scheduler) Serve(ctx context.Context) error {
 		case <-ctx.Done():
 			close(work) // Serve is the only sender; safe to close
 			wg.Wait()
+			<-reaperDone
 			return nil
 		case c := <-s.commands: // nil channel when control is disabled: never ready
 			s.handleCommand(ctx, c, work, inflight)
@@ -159,6 +186,50 @@ func (s *Scheduler) Serve(ctx context.Context) error {
 			s.seed(ctx, work, inflight)
 		}
 	}
+}
+
+// maxReapInterval caps the reaper's sweep cadence, so a very long deadline still
+// gets a sweep often enough that a reaped drive is noticed promptly.
+const maxReapInterval = 30 * time.Second
+
+// startReaper launches the deadline sweep and returns a channel closed when it
+// stops. A zero DriveDeadline disables it, and the returned channel is already
+// closed so Serve's shutdown path need not special-case it.
+func (s *Scheduler) startReaper(ctx context.Context, inflight *inflightSet) <-chan struct{} {
+	done := make(chan struct{})
+	if s.DriveDeadline <= 0 {
+		close(done)
+		return done
+	}
+	// An explicit ReapInterval is taken as given (tests inject a fast one); only
+	// the derived cadence is clamped, so a very short deadline cannot produce a
+	// pathologically tight sweep loop.
+	interval := s.ReapInterval
+	if interval <= 0 {
+		switch interval = s.DriveDeadline / 10; {
+		case interval > maxReapInterval:
+			interval = maxReapInterval
+		case interval < time.Second:
+			interval = time.Second
+		}
+	}
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				for _, issue := range inflight.reap(s.DriveDeadline, s.Now(), s.DeadlineCause) {
+					s.Log.Warn("drive deadline exceeded; cancelling",
+						"issue", issue, "deadline", s.DriveDeadline)
+				}
+			}
+		}
+	}()
+	return done
 }
 
 // seed re-enqueues the non-settled in-flight tasks reported by SeedFrom. It runs
@@ -264,7 +335,18 @@ func (s *Scheduler) enqueueOne(ctx context.Context, work chan int, inflight *inf
 // map is race-free.
 type inflightSet struct {
 	mu sync.Mutex
-	m  map[int]context.CancelCauseFunc
+	m  map[int]*driveHandle
+}
+
+// driveHandle is one issue's claim: its cancel func once a worker picks it up
+// (nil while claimed-but-not-yet-running) and when that drive started, which is
+// what the reaper measures against DriveDeadline. The start time is per DRIVE,
+// not per task: a task that suspends in a merge-gate wait and is re-driven next
+// poll starts a fresh clock, so a long-lived task is never reaped for being long
+// lived — only a single drive that will not end is.
+type driveHandle struct {
+	cancel  context.CancelCauseFunc
+	started time.Time
 }
 
 func (s *inflightSet) add(issue int) bool { // true if newly claimed
@@ -273,14 +355,17 @@ func (s *inflightSet) add(issue int) bool { // true if newly claimed
 	if _, ok := s.m[issue]; ok {
 		return false
 	}
-	s.m[issue] = nil
+	s.m[issue] = &driveHandle{}
 	return true
 }
 
-// arm records the running drive's cancel func for an already-claimed issue.
-func (s *inflightSet) arm(issue int, cancel context.CancelCauseFunc) {
+// arm records the running drive's cancel func and start time for an
+// already-claimed issue.
+func (s *inflightSet) arm(issue int, cancel context.CancelCauseFunc, started time.Time) {
 	s.mu.Lock()
-	s.m[issue] = cancel
+	if h, ok := s.m[issue]; ok {
+		h.cancel, h.started = cancel, started
+	}
 	s.mu.Unlock()
 }
 
@@ -288,13 +373,39 @@ func (s *inflightSet) arm(issue int, cancel context.CancelCauseFunc) {
 // is not currently being driven (unclaimed, or claimed but not yet armed).
 func (s *inflightSet) cancel(issue int, cause error) bool {
 	s.mu.Lock()
-	cancel := s.m[issue]
+	var cancel context.CancelCauseFunc
+	if h, ok := s.m[issue]; ok {
+		cancel = h.cancel
+	}
 	s.mu.Unlock()
 	if cancel != nil {
 		cancel(cause)
 		return true
 	}
 	return false
+}
+
+// reap cancels every armed drive that started more than deadline ago and returns
+// the issues it cancelled. Entries are left in place: the worker owning each
+// drive removes its own claim when the drive returns, so the reaper never races
+// the worker for ownership. Cancelling twice is harmless — the second call on an
+// already-cancelled context is a no-op — so a drive that finished between the
+// sweep and the cancel is unaffected.
+func (s *inflightSet) reap(deadline time.Duration, now time.Time, cause error) []int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var reaped []int
+	for issue, h := range s.m {
+		if h.cancel == nil || h.started.IsZero() {
+			continue // claimed but not yet running; no drive to bound
+		}
+		if now.Sub(h.started) >= deadline {
+			h.cancel(cause)
+			reaped = append(reaped, issue)
+		}
+	}
+	sort.Ints(reaped) // deterministic log order
+	return reaped
 }
 
 func (s *inflightSet) remove(issue int) {

@@ -16,13 +16,32 @@ policies:
   circuit_breaker: false
   retry_caps:
     changes_requested: 3
+  # --- liveness bounds -------------------------------------------------------
+  # Three layers, deliberately independent. A per-state `timeout:` below is an
+  # OVERRIDE for the one thing that genuinely varies per state ("this one
+  # legitimately takes 90 minutes"); these cover everything else by default, so
+  # nothing is unbounded merely because nobody remembered to annotate it.
+  #
+  # How long a task may go without ANY observable signal — the global bound.
+  # A state timeout measures POSITION ("how long in this state"), which cannot
+  # tell a slow agent from a dead one. This measures PROGRESS: any pane status
+  # event resets it, and when it expires the engine confirms against the agent
+  # pane's own bytes before escalating. Omit for the 30m default; "0s" disables
+  # it, but then every agent state must declare its own timeout (validated).
+  no_progress_timeout: 30m
   # How long an agent may sit *continuously* blocked on an interactive prompt
-  # before the engine gives up and takes the state's timeout transition. Blocking
-  # doesn't change state and a state timeout runs from state entry, so without
-  # this a parked agent burns the full state timeout doing nothing. Any "working"
-  # event clears the clock, so a prompt the agent resolves itself never counts.
-  # Remove the key for the old behavior (state timeout only).
+  # nobody will answer. Blocking doesn't change state and a state timeout runs
+  # from state entry, so without this a parked agent burns the full state timeout
+  # doing nothing. Any "working" event clears the clock, so a prompt the agent
+  # resolves itself never counts. Remove the key to rely on the bounds above.
   blocked_timeout: 10m
+  # Hard ceiling on a single drive, enforced by the scheduler's reaper from
+  # OUTSIDE the drive — the only bound that still works when a drive is wedged
+  # somewhere the engine has no timer armed at all (a spawn, a gate read, a
+  # decision, a merge). Omit to derive it: twice the longest state timeout below,
+  # floored at 1h. An explicit value at or below the longest state timeout is
+  # rejected, because it would preempt the transitions it is meant to back up.
+  # drive_deadline: 3h
   execution:
     backend: herdr
     run_as: non_root

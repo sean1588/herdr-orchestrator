@@ -474,6 +474,16 @@ func cmdDaemon(args []string) int {
 
 	dc := doneChecker{gh: w.gh, store: w.store, settled: settled, repoDir: w.repoDir, label: label, log: slog.Default()}
 
+	// The per-drive ceiling is enforced by the scheduler's reaper, outside the
+	// drive goroutine — the only place that can still act when a drive is wedged.
+	driveDeadline, err := w.wf.ResolveDriveDeadline()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "daemon: %v\n", err)
+		return 2
+	}
+	slog.Default().Info("drive deadline armed", "deadline", driveDeadline,
+		"explicit", w.wf.Policies.DriveDeadline != "")
+
 	sched := &scheduler.Scheduler{
 		List: func(ctx context.Context) ([]int, error) {
 			return w.gh.ListIssues(ctx, w.repoDir, label)
@@ -496,9 +506,11 @@ func cmdDaemon(args []string) int {
 			}
 			return out, nil
 		},
-		Interval: *pollInterval,
-		Workers:  workers,
-		Log:      slog.Default(),
+		Interval:      *pollInterval,
+		Workers:       workers,
+		Log:           slog.Default(),
+		DriveDeadline: driveDeadline,
+		DeadlineCause: engine.ErrDriveDeadline,
 	}
 
 	// Optional loopback MCP control server: shares the daemon's store handle

@@ -3,6 +3,11 @@
 // truth consumed by the engine; the engine never redefines them.
 package config
 
+import (
+	"fmt"
+	"time"
+)
+
 // Workflow is a complete, decoded workflow config.
 type Workflow struct {
 	Version int    `yaml:"version"`
@@ -33,8 +38,67 @@ type Policies struct {
 	// (waiting on an interactive prompt nobody will answer) before the engine
 	// gives up on it. Empty => no bound, i.e. only the state timeout applies.
 	// See Engine.awaitAgentState for why this can't be expressed as a transition.
-	BlockedTimeout string    `yaml:"blocked_timeout"`
-	Execution      Execution `yaml:"execution"`
+	BlockedTimeout string `yaml:"blocked_timeout"`
+	// DriveDeadline is the hard wall-clock ceiling on a single drive, enforced by
+	// the scheduler from OUTSIDE the drive goroutine. It is the backstop for the
+	// windows no in-drive timer covers — a spawn, a gate read, a decision, a merge
+	// — where the engine's only clock is not armed. Empty => derived (see
+	// ResolveDriveDeadline).
+	DriveDeadline string    `yaml:"drive_deadline"`
+	Execution     Execution `yaml:"execution"`
+}
+
+// minDriveDeadline floors the derived per-drive ceiling, so a workflow whose
+// states declare only short timeouts (or none) still gets a sane bound rather
+// than one that preempts ordinary work.
+const minDriveDeadline = time.Hour
+
+// ResolveDriveDeadline returns the wall-clock ceiling on a single drive: the
+// explicit policies.drive_deadline if set, else twice the longest declared state
+// timeout, floored at one hour.
+//
+// The default is derived rather than fixed because the ceiling must sit safely
+// ABOVE every per-state timeout — it is a backstop for a wedged drive, not a
+// competing deadline, and a ceiling below a state's own timeout would preempt it
+// and turn every long-running state into a reaped one. Doubling the longest
+// declared timeout keeps that margin automatic as configs change.
+func (wf *Workflow) ResolveDriveDeadline() (time.Duration, error) {
+	if s := wf.Policies.DriveDeadline; s != "" {
+		d, err := time.ParseDuration(s)
+		if err != nil {
+			return 0, fmt.Errorf("parse drive_deadline %q: %w", s, err)
+		}
+		return d, nil
+	}
+	longest, err := wf.LongestStateTimeout()
+	if err != nil {
+		return 0, err
+	}
+	if d := 2 * longest; d > minDriveDeadline {
+		return d, nil
+	}
+	return minDriveDeadline, nil
+}
+
+// LongestStateTimeout returns the longest timeout any state declares (zero if
+// none do).
+func (wf *Workflow) LongestStateTimeout() (time.Duration, error) {
+	var longest time.Duration
+	for _, sname := range sortedKeys(wf.States) {
+		for _, t := range wf.States[sname].Transitions {
+			if !t.When.IsTimeout() {
+				continue
+			}
+			d, err := time.ParseDuration(t.When.Timeout)
+			if err != nil {
+				return 0, fmt.Errorf("state %q: parse timeout %q: %w", sname, t.When.Timeout, err)
+			}
+			if d > longest {
+				longest = d
+			}
+		}
+	}
+	return longest, nil
 }
 
 // DryRunEnabled reports whether auto-merge should be withheld. dry_run is

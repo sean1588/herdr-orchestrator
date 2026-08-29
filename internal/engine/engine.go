@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/sean1588/herdr-orchestrator/internal/config"
@@ -51,6 +52,27 @@ var errSuspended = errors.New("suspended: awaiting merge gate")
 // leaves the state untouched for recovery. Exported so the scheduler can cancel
 // with it without importing engine (the daemon injects it).
 var ErrOperatorCancel = errors.New("operator cancel")
+
+// ErrDriveDeadline is the cancellation cause the scheduler's reaper carries when
+// a drive outlives its wall-clock ceiling (policies.drive_deadline). A drive that
+// observes it settles to its state's escalation target instead of aborting, so a
+// wedged drive stops being re-driven forever.
+//
+// It exists because the engine's only clock — the timer in awaitAgentState — is
+// armed solely once a drive reaches the event-wait loop in a state that declares
+// a timeout. Everything outside that window (creating a worktree, launching a
+// pane, evaluating a gate, running a decision, merging a PR) has no timer at all,
+// so the bound must come from a watchdog that does not share a goroutine with the
+// thing it watches. Exported so the scheduler can cancel with it without
+// importing engine (the daemon injects it).
+var ErrDriveDeadline = errors.New("drive deadline exceeded")
+
+// settleTimeout bounds the detached write that records a forced settle. The
+// drive's own context is already cancelled by then, and the store's writes are
+// ctx-aware, so the settle runs on a context detached from that cancellation —
+// otherwise the write would itself fail with context.Canceled and the settle
+// would not stick.
+const settleTimeout = 15 * time.Second
 
 // CancelState is the reserved terminal a task lands in when an operator cancels
 // it. It is never a workflow state (never in the YAML or workflow.schema.json);
@@ -267,10 +289,72 @@ func (e *Engine) drive(ctx context.Context, task *store.Task) (string, error) {
 // err != nil keeps a drive that completed (err == nil) from being force-settled
 // when a cancel arrived too late.
 func (e *Engine) reclassifyCancel(ctx context.Context, task *store.Task, state string, err error) (string, error) {
-	if err != nil && errors.Is(context.Cause(ctx), ErrOperatorCancel) {
+	if err == nil {
+		return state, err
+	}
+	switch cause := context.Cause(ctx); {
+	case errors.Is(cause, ErrOperatorCancel):
 		return e.settleCancelled(ctx, task)
+	case errors.Is(cause, ErrDriveDeadline):
+		return e.settleDeadline(ctx, task)
 	}
 	return state, err
+}
+
+// settleDeadline records a reaped drive as a transition to its state's
+// escalation target. Unlike an operator cancel — which is a human deciding to
+// stop a task — this is the system reporting that a drive made no progress and
+// could not be bounded from within, so it routes to the same place the state's
+// own timeout would have gone rather than to a bespoke terminal.
+//
+// The worktree is deliberately NOT torn down: a wedged drive is exactly the case
+// a human needs to inspect, and it may hold uncommitted work.
+func (e *Engine) settleDeadline(ctx context.Context, task *store.Task) (string, error) {
+	from := task.CurrentState
+	target, why := e.deadlineTarget(from)
+	e.log.Warn("drive deadline exceeded", "task", task.ID, "state", from, "to", target, "via", why)
+
+	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), settleTimeout)
+	defer cancel()
+	if err := e.advance(sctx, task, target, "drive_deadline", why); err != nil {
+		return from, fmt.Errorf("settle drive deadline: %w", err)
+	}
+	e.notifyTerminalAlert(sctx, task)
+	return target, nil
+}
+
+// deadlineTarget resolves where a reaped drive lands, preferring the state's own
+// timeout target so a deadline escalation is indistinguishable from the timeout
+// it is standing in for. A state with no timeout transition falls back to the
+// workflow's alerting terminal (the escalated state), and a workflow with neither
+// falls back to CancelState — which settles the task rather than leaving it to be
+// re-driven and re-reaped forever. The second return names the derivation, and is
+// recorded on the audit row so the fallback is never silent.
+func (e *Engine) deadlineTarget(state string) (target, why string) {
+	if t := findTimeoutTransition(e.wf.States[state]); t != nil && t.To != "" {
+		return t.To, "state_timeout_target"
+	}
+	if n := e.alertTerminal(); n != "" {
+		return n, "alert_terminal"
+	}
+	return CancelState, "no_escalation_target"
+}
+
+// alertTerminal returns the workflow's escalation terminal — a terminal state
+// flagged alert — or "" if it declares none. Map iteration is randomized, so the
+// names are sorted to keep the choice deterministic across restarts.
+func (e *Engine) alertTerminal() string {
+	names := make([]string, 0, len(e.wf.States))
+	for name := range e.wf.States {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if st := e.wf.States[name]; st.Terminal != "" && st.Alert {
+			return name
+		}
+	}
+	return ""
 }
 
 // driveLoop runs the interpreter loop until a halt state (goal or terminal).
@@ -961,7 +1045,7 @@ func (e *Engine) isHalt(state string) bool {
 // an automated no-PR terminal, an operator cancel is a human intervening on a
 // possibly-runaway agent who may want to inspect its uncommitted work.
 func (e *Engine) settleCancelled(ctx context.Context, task *store.Task) (string, error) {
-	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), settleTimeout)
 	defer cancel()
 	if err := e.advance(sctx, task, CancelState, "operator.cancel", ""); err != nil {
 		return task.CurrentState, fmt.Errorf("settle cancelled: %w", err)

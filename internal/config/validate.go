@@ -1,6 +1,9 @@
 package config
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // authoritativeGateTypes are the only gate types allowed to feed a gate
 // evaluation (invariant 4). Gates must read objective sources, never agent
@@ -74,11 +77,41 @@ func semanticChecks(wf *Workflow) (warnings, errs []string) {
 		}
 	}
 
+	// An explicit drive_deadline below a declared state timeout would preempt it.
+	checkDriveDeadline(wf, &errs)
+
 	// role allowed_tools tokens must be shell-safe (delivered space-joined into
 	// the pane shell; arg-scoped specs would break at spawn — fail closed here).
 	checkAllowedTools(wf, &errs)
 
 	return warnings, errs
+}
+
+// checkDriveDeadline rejects a per-drive ceiling that sits at or below the
+// longest declared state timeout. The ceiling is a backstop for a drive wedged
+// where no in-drive timer is armed; set below a state's own timeout it stops
+// being a backstop and becomes a competing deadline that reaps every task in
+// that state before the state's transition can ever fire.
+func checkDriveDeadline(wf *Workflow, errs *[]string) {
+	if wf.Policies.DriveDeadline == "" {
+		return // derived; ResolveDriveDeadline keeps the margin by construction
+	}
+	deadline, err := time.ParseDuration(wf.Policies.DriveDeadline)
+	if err != nil {
+		*errs = append(*errs, fmt.Sprintf("policies.drive_deadline %q: %v", wf.Policies.DriveDeadline, err))
+		return
+	}
+	longest, err := wf.LongestStateTimeout()
+	if err != nil {
+		*errs = append(*errs, err.Error())
+		return
+	}
+	if longest > 0 && deadline <= longest {
+		*errs = append(*errs, fmt.Sprintf(
+			"policies.drive_deadline %s is not above the longest state timeout %s: it would reap drives "+
+				"before their own timeout transition could fire (raise it, or lower the state timeout)",
+			deadline, longest))
+	}
 }
 
 // checkAllowedTools rejects role allowed_tools entries that are not shell-safe

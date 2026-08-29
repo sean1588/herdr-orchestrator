@@ -31,6 +31,10 @@ type PRStatus struct {
 	ReviewDecision   string // APPROVED | REVIEW_REQUIRED | CHANGES_REQUESTED | ""
 	Mergeable        string // MERGEABLE | CONFLICTING | UNKNOWN
 	MergeStateStatus string // CLEAN | BLOCKED | DIRTY | UNSTABLE | BEHIND | ...
+	// HeadSHA is the PR head commit (headRefOid). It is the artifact-movement
+	// signal: comparing it against the SHA recorded when a task entered its
+	// current state answers "did anything actually get committed here?".
+	HeadSHA string
 }
 
 // ChecksGreen reports whether no check is failing or pending. It is vacuously

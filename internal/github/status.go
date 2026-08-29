@@ -8,12 +8,13 @@ import (
 )
 
 // prStatusFields is the `gh pr view --json` field set backing PRStatus.
-const prStatusFields = "state,statusCheckRollup,reviewDecision,reviews,mergeable,mergeStateStatus"
+const prStatusFields = "state,statusCheckRollup,reviewDecision,reviews,mergeable,mergeStateStatus,headRefOid"
 
 // prViewStatus mirrors the gh pr view JSON we read for merge gating.
 type prViewStatus struct {
 	State             string `json:"state"`
 	ReviewDecision    string `json:"reviewDecision"`
+	HeadRefOid        string `json:"headRefOid"`
 	Mergeable         string `json:"mergeable"`
 	MergeStateStatus  string `json:"mergeStateStatus"`
 	StatusCheckRollup []struct {
@@ -50,6 +51,7 @@ func (g *GH) PRStatus(ctx context.Context, repoDir string, pr int) (*PRStatus, e
 		ReviewDecision:   v.ReviewDecision,
 		Mergeable:        v.Mergeable,
 		MergeStateStatus: v.MergeStateStatus,
+		HeadSHA:          v.HeadRefOid,
 	}
 	for _, c := range v.StatusCheckRollup {
 		s.ChecksTotal++

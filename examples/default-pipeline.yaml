@@ -83,6 +83,14 @@ gates:
   approvals:
     type: github_reviews
     min_approved: 1
+  # Evidence of NEW WORK, not of the artifact's continued existence. In
+  # changes_requested the PR already exists — it was opened in the round that put
+  # the task there — so pr_exists alone could only ever pass, whether or not the
+  # implementer addressed a single line of the review. This asks the question the
+  # state actually asks: did the head commit move since we entered it?
+  head_moved:
+    type: github_commits
+    since: state_entry
   no_conflicts:
     type: github_mergeable
     require: clean
@@ -136,7 +144,7 @@ states:
     entry: { resume: implementer, with: review_feedback }
     transitions:
       - when: { event: agent.done }
-        evaluate: { gate: pr_exists }
+        evaluate: { gate: [pr_exists, head_moved] }
         branch: { pass: pr_open, fail: escalated }
       - when: { event: retry_exhausted }
         to: escalated

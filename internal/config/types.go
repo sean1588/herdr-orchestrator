@@ -180,6 +180,7 @@ type Gate struct {
 	AllPassing  bool   `yaml:"all_passing"`  // github_checks
 	MinApproved int    `yaml:"min_approved"` // github_reviews
 	Require     string `yaml:"require"`      // github_mergeable, e.g. "clean"
+	Since       string `yaml:"since"`        // github_commits, e.g. "state_entry"
 }
 
 // Decision is a constrained LLM/exec judgment hook with declared verdicts.

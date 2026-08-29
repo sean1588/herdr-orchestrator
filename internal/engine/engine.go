@@ -894,6 +894,30 @@ func (e *Engine) gatePass(ctx context.Context, task *store.Task, name string, g 
 		return status.ChecksGreen(), nil
 	case "github_reviews":
 		return status.ApprovedReviews >= g.MinApproved, nil
+	case "github_commits":
+		// The artifact-movement question: has anything been committed since the
+		// task entered this state? In changes_requested the previous gate
+		// (pr_exists) was tautological — the PR was opened in the round that put
+		// the task here, so it could only pass, whether or not the implementer
+		// addressed a single line of the review.
+		if task.StateEntryHead == "" {
+			// No baseline: no PR when the state was entered, a status read that
+			// failed, or a task predating the column. We cannot answer, so we
+			// degrade to the previous behavior (pass) rather than escalating a task
+			// on a question we never captured the input for. Logged, never silent.
+			e.log.Warn("gate: no head baseline recorded for this state; cannot verify movement, passing",
+				"task", task.ID, "gate", name, "state", task.CurrentState)
+			return true, nil
+		}
+		if status.HeadSHA == "" {
+			return false, fmt.Errorf("gate %q: PR status carries no head SHA", name)
+		}
+		moved := status.HeadSHA != task.StateEntryHead
+		if !moved {
+			e.log.Info("gate fail: head has not moved since state entry",
+				"task", task.ID, "gate", name, "state", task.CurrentState, "head", status.HeadSHA)
+		}
+		return moved, nil
 	case "github_mergeable":
 		// `require: clean` demands GitHub's CLEAN mergeStateStatus (no conflicts
 		// AND up to date AND not blocked), which is stricter than mere
@@ -1101,11 +1125,48 @@ func (e *Engine) advance(ctx context.Context, task *store.Task, next, trigger, r
 		return fmt.Errorf("audit %s->%s: %w", from, next, err)
 	}
 	task.CurrentState = next
+	task.StateEntryHead = e.headBaseline(ctx, task)
 	if err := e.store.UpdateTask(ctx, task); err != nil {
 		return fmt.Errorf("persist transition %s->%s: %w", from, next, err)
 	}
 	e.log.Info("transition", "task", task.ID, "from", from, "to", next, "trigger", trigger, "result", result)
 	return nil
+}
+
+// headBaseline captures the PR head SHA the task is entering its new state with,
+// so a github_commits gate can later ask whether anything was committed since.
+//
+// It is only read for states that actually evaluate such a gate: every other
+// transition — including the detached, time-bounded writes that settle a cancel
+// or a reaped drive — must not pay for a GitHub round trip it will never use.
+//
+// Best-effort by design. A read failure yields "" (unknown), which the gate
+// treats as "cannot answer" and passes, degrading to the pre-gate behavior rather
+// than escalating a task because GitHub was briefly unreachable.
+func (e *Engine) headBaseline(ctx context.Context, task *store.Task) string {
+	if task.PRNumber == nil || !e.stateGatesOnCommits(task.CurrentState) {
+		return ""
+	}
+	status, err := e.gh.PRStatus(ctx, e.repoDir, *task.PRNumber)
+	if err != nil {
+		e.log.Warn("could not record head baseline for this state; commit-movement gate will pass",
+			"task", task.ID, "state", task.CurrentState, "err", err)
+		return ""
+	}
+	return status.HeadSHA
+}
+
+// stateGatesOnCommits reports whether any transition out of state evaluates a
+// github_commits gate — i.e. whether entering it needs a head baseline.
+func (e *Engine) stateGatesOnCommits(state string) bool {
+	for _, t := range e.wf.States[state].Transitions {
+		for _, gname := range t.GateRefs() {
+			if e.wf.Gates[gname].Type == "github_commits" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // alert records an agent.blocked alert as an audit row without changing state.

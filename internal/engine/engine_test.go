@@ -92,6 +92,14 @@ type fakeGH struct {
 	// merge-gate input: the PR status each PRStatus call returns.
 	status *github.PRStatus
 
+	// headSHA is the PR head every PRStatus call reports. headSeq overrides it
+	// per call (the last entry repeats), so a test can model the head moving —
+	// or pointedly NOT moving — between the baseline read on state entry and the
+	// gate read that follows. statusCalls counts the reads.
+	headSHA     string
+	headSeq     []string
+	statusCalls int
+
 	merged   bool
 	mergeErr error
 	merges   int
@@ -125,17 +133,31 @@ func (g *fakeGH) RemoveLabel(ctx context.Context, repoDir string, number int, la
 	return nil
 }
 func (g *fakeGH) PRStatus(ctx context.Context, repoDir string, pr int) (*github.PRStatus, error) {
-	if g.merged {
-		state := g.mergeResultState
-		if state == "" {
-			state = "MERGED"
+	defer func() { g.statusCalls++ }()
+
+	var s github.PRStatus
+	switch {
+	case g.merged:
+		s.State = g.mergeResultState
+		if s.State == "" {
+			s.State = "MERGED"
 		}
-		return &github.PRStatus{State: state}, nil
+	case g.status != nil:
+		s = *g.status // copy: per-call head substitution must not mutate the fixture
+	default:
+		s.State = "OPEN"
 	}
-	if g.status != nil {
-		return g.status, nil
+	if s.HeadSHA == "" {
+		s.HeadSHA = g.headSHA
 	}
-	return &github.PRStatus{State: "OPEN"}, nil
+	if n := len(g.headSeq); n > 0 {
+		if g.statusCalls < n {
+			s.HeadSHA = g.headSeq[g.statusCalls]
+		} else {
+			s.HeadSHA = g.headSeq[n-1]
+		}
+	}
+	return &s, nil
 }
 func (g *fakeGH) DeleteRemoteBranch(ctx context.Context, repoDir, branch string) error {
 	g.deletedBranches = append(g.deletedBranches, branch)

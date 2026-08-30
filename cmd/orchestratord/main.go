@@ -582,12 +582,8 @@ func cmdDaemon(args []string) int {
 // sourceLabel returns the label of the first github_issues source, or an error
 // if the workflow declares no such source with select.label.
 func sourceLabel(wf *config.Workflow) (string, error) {
-	for _, s := range wf.Sources {
-		if s.Type == "github_issues" {
-			if l, ok := s.Select["label"].(string); ok && l != "" {
-				return l, nil
-			}
-		}
+	if l := wf.SourceLabel(); l != "" {
+		return l, nil
 	}
 	return "", fmt.Errorf("no github_issues source with select.label declared")
 }

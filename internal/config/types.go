@@ -294,3 +294,19 @@ func (s State) HasTimeoutTransition() bool {
 	}
 	return false
 }
+
+// SourceLabel returns the label of the first github_issues source, or "" when
+// the workflow declares no such source with select.label. Both the daemon (which
+// polls on it) and the engine (which drains it once a task settles) resolve the
+// label through here, so the two can never disagree about which label is the
+// queue.
+func (w *Workflow) SourceLabel() string {
+	for _, s := range w.Sources {
+		if s.Type == "github_issues" {
+			if l, ok := s.Select["label"].(string); ok && l != "" {
+				return l
+			}
+		}
+	}
+	return ""
+}

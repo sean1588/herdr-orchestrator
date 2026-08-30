@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -100,6 +101,12 @@ type fakeGH struct {
 	headSeq     []string
 	statusCalls int
 
+	// removedLabels records "<issue>:<label>" for each drain, so a test can assert
+	// the source label is cleared when (and only when) a task settles.
+	// removeLabelErr makes the drain fail, proving it cannot fail a drive.
+	removedLabels  []string
+	removeLabelErr error
+
 	merged   bool
 	mergeErr error
 	merges   int
@@ -130,6 +137,10 @@ func (g *fakeGH) ListIssues(ctx context.Context, repoDir, label string) ([]int, 
 	return nil, nil
 }
 func (g *fakeGH) RemoveLabel(ctx context.Context, repoDir string, number int, label string) error {
+	if g.removeLabelErr != nil {
+		return g.removeLabelErr
+	}
+	g.removedLabels = append(g.removedLabels, fmt.Sprintf("%d:%s", number, label))
 	return nil
 }
 func (g *fakeGH) PRStatus(ctx context.Context, repoDir string, pr int) (*github.PRStatus, error) {

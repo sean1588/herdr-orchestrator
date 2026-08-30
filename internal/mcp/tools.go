@@ -43,7 +43,28 @@ type TaskView struct {
 	RetryCounts map[string]int `json:"retry_counts,omitempty"`
 	CreatedAt   string         `json:"created_at"`
 	UpdatedAt   string         `json:"updated_at"`
+
+	// Liveness. State answers "where is this task"; these answer "is it moving,
+	// and what is it racing" — which state alone cannot, because blocking does
+	// not change state. AgentStatus is "" when no pane event has been observed
+	// yet (a queued task, or one whose agent has not started).
+	AgentStatus string `json:"agent_status,omitempty"`
+	// Seconds the agent has held AgentStatus, and seconds since the task entered
+	// State. Omitted when unknown (an old row predating these columns) rather
+	// than reported as 0, which would read as "just now".
+	AgentStatusFor *int `json:"agent_status_for_seconds,omitempty"`
+	StateFor       *int `json:"state_for_seconds,omitempty"`
+	// The bounds this task is racing in its current state, as configured.
+	// Comparing them against StateFor is the whole "is anything wedged" question.
+	StateTimeout   string `json:"state_timeout,omitempty"`
+	BlockedTimeout string `json:"blocked_timeout,omitempty"`
 }
+
+// Deadlines reports the bounds a task sitting in `state` is racing: the state's
+// own timeout transition and the global blocked bound. Injected rather than read
+// from config here so this package stays free of the workflow types. Either may
+// be "" when not configured.
+type Deadlines func(state string) (stateTimeout, blockedTimeout string)
 
 type AuditEntryView struct {
 	TS        string `json:"ts"`
@@ -53,16 +74,37 @@ type AuditEntryView struct {
 	Result    string `json:"result,omitempty"`
 }
 
-func toTaskView(t store.Task) TaskView {
+func (h *handler) toTaskView(t store.Task) TaskView {
 	rc := t.RetryCounts
 	if len(rc) == 0 {
 		rc = nil
 	}
-	return TaskView{
+	v := TaskView{
 		ID: t.ID, Issue: t.Issue, Repo: t.Repo, Branch: t.Branch,
 		State: t.CurrentState, PRNumber: t.PRNumber, RetryCounts: rc,
 		CreatedAt: t.CreatedAt.Format(time.RFC3339), UpdatedAt: t.UpdatedAt.Format(time.RFC3339),
+		AgentStatus:    t.AgentStatus,
+		AgentStatusFor: secondsSince(h.clock(), t.AgentStatusAt),
+		StateFor:       secondsSince(h.clock(), t.StateEnteredAt),
 	}
+	if h.deadlines != nil {
+		v.StateTimeout, v.BlockedTimeout = h.deadlines(t.CurrentState)
+	}
+	return v
+}
+
+// secondsSince returns whole seconds between then and now, or nil when `then` is
+// unset — an unknown age must stay absent rather than render as 0, which an
+// operator would read as "just now". A clock that has gone backwards clamps to 0.
+func secondsSince(now, then time.Time) *int {
+	if then.IsZero() {
+		return nil
+	}
+	n := int(now.Sub(then).Seconds())
+	if n < 0 {
+		n = 0
+	}
+	return &n
 }
 
 func toAuditView(a store.AuditEntry) AuditEntryView {
@@ -96,7 +138,7 @@ func (h *handler) callTool(ctx context.Context, req request) response {
 		}
 		views := make([]TaskView, 0, len(tasks))
 		for _, t := range tasks {
-			views = append(views, toTaskView(t))
+			views = append(views, h.toTaskView(t))
 		}
 		return okResp(req.ID, h.toolJSON(views))
 	}
@@ -114,7 +156,7 @@ func (h *handler) callTool(ctx context.Context, req request) response {
 		if err != nil {
 			return okResp(req.ID, h.toolErr(fmt.Sprintf("issue %d not found", issue)))
 		}
-		return okResp(req.ID, h.toolJSON(toTaskView(*t)))
+		return okResp(req.ID, h.toolJSON(h.toTaskView(*t)))
 	case "get_audit":
 		aud, err := h.reader.Audit(ctx, h.taskID(issue))
 		if err != nil {

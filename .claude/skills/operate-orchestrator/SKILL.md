@@ -105,6 +105,14 @@ Run this each pass. Keep it cheap — most ticks do nothing but observe.
 - Confirm the daemon is alive: if `list_tasks` errors or its pane shows the
   process exited, the daemon is down.
 
+> **Read liveness first.** Each task view carries `agent_status`
+> (`working`/`idle`/`blocked`/`done`), `agent_status_for_seconds`,
+> `state_for_seconds`, and the `state_timeout` / `blocked_timeout` it is racing.
+> Comparing elapsed against bound answers "is anything wedged" directly — a task
+> `blocked` for a duration approaching `blocked_timeout` is about to escalate, and
+> is worth surfacing *before* it does. An absent age means "not observed", not
+> "just now".
+>
 > **`list_tasks` alone cannot see a blocked agent.** Blocking does not change
 > state, so a task parked on an unanswerable prompt looks byte-identical to one
 > making progress — a state-change watcher stays silent through the whole thing.
@@ -133,6 +141,10 @@ Surface **only** for a pipeline escalation or an environmental dead-end:
 - any task at `escalated`, or a task closed via a `needs_human` triage verdict;
 - an environment you can't fix: herdr down, `gh` not authenticated, an invalid
   config, a disk/DB failure.
+
+When the daemon runs with `--notify-webhook`, the escalation payload already
+carries `Cause`, the last few transitions, the agent's pane tail, and a
+recommended action — prefer relaying that over reconstructing it by hand.
 
 Emit a clearly-marked block and stop touching that item:
 

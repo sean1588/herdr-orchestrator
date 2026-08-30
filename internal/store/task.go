@@ -27,6 +27,18 @@ type Task struct {
 	// in flight. Set once at create; never rewritten. Empty for tasks created
 	// before this column, which fall back to the current --config.
 	WorkflowSnapshot string
+	// AgentStatus is the agent's last observed pane status ("working", "idle",
+	// "blocked", "done"); "" before any observation. AgentStatusAt is when that
+	// status was first seen. Together they answer "is this task actually moving?"
+	// — a question the state alone cannot answer, because blocking does not
+	// change state, so a task parked on an unanswerable prompt looks identical to
+	// one making progress.
+	AgentStatus   string
+	AgentStatusAt time.Time
+	// StateEnteredAt is when the task entered CurrentState. Distinct from
+	// UpdatedAt, which moves on every write (an agent-status observation included)
+	// and so cannot measure time-in-state.
+	StateEnteredAt time.Time
 	// StateEntryHead is the PR head commit SHA observed when the task entered
 	// CurrentState. It is the baseline the github_commits gate compares against,
 	// so "did the implementer respond to the review?" becomes a question about the

@@ -258,7 +258,13 @@ orchestratord daemon \
 
 Only `--config` and `--repo` are required; `--base` defaults to `main`, `--db` to
 `./orchestrator.db`, `--poll-interval` to `30s`, and `--mcp-listen` is **off**
-unless set. Add `--notify-webhook <url>` to POST escalations/alerts out-of-band
+unless set. Add `--event-log <path>` to append every event (transitions, spawns,
+gate evaluations, decisions, agent status changes, escalations) as JSON Lines to
+a file — the same narrative the pane shows, in a form you can `tail -f | jq`
+without scraping a TUI. It appends across restarts, so a restart to apply a
+config change does not erase the run's history.
+
+Add `--notify-webhook <url>` to POST escalations/alerts out-of-band
 (the always-on channel for when no one is watching the loop).
 
 **Verify it came up:** the daemon logs `daemon starting label=<…> workers=<N>`
@@ -298,7 +304,7 @@ tools are your surface:
 
 | Tool | Args | Use |
 | --- | --- | --- |
-| `list_tasks` | — | primary observe: every task + state, branch, PR, retries. **Cannot see a blocked agent** — blocking doesn't change state, so a task parked on an unanswerable prompt looks identical to one working. Check `get_audit` for an `agent.blocked` row, and set `policies.blocked_timeout` so the engine bounds it for you. |
+| `list_tasks` | — | primary observe: every task + state, branch, PR, retries, **and liveness** (see below). |
 | `get_task` | `issue` | one task's current view |
 | `get_audit` | `issue` | primary diagnosis: a task's full transition history |
 | `enqueue_task` | `issue` | nudge a **non-settled** idle issue (refused if settled) |
@@ -309,6 +315,29 @@ tools are your surface:
 - Control tools are **dispatch-acknowledged, not completion-acknowledged** — a
   success means the command reached the scheduler, not that the drive finished.
   Confirm the effect with a follow-up `get_task` / `get_audit`.
+
+### Reading liveness
+
+State tells you *where* a task is, not whether it is *moving* — blocking does not
+change state, so a task parked on an unanswerable permission prompt is
+byte-identical over the wire to one making progress. Real runs have lost 45+
+minutes to exactly that. Each task view therefore also carries:
+
+| Field | Meaning |
+|---|---|
+| `agent_status` | what the agent was last observed doing: `working`, `idle`, `blocked`, `done`. Absent until a pane event is seen. |
+| `agent_status_for_seconds` | how long it has held that status — the number that turns "blocked" into "blocked for 40 minutes". |
+| `state_for_seconds` | how long it has been in the current state. |
+| `state_timeout` / `blocked_timeout` | the bounds it is racing, as configured. |
+
+Comparing the elapsed values against the bounds *is* the "is anything wedged"
+question, and you no longer need the config in your head to ask it. An unknown
+age is **omitted** rather than reported as `0` — absent means "not observed",
+never "just now".
+
+A task showing `agent_status: blocked` with `agent_status_for_seconds`
+approaching `blocked_timeout` is about to escalate. Read its pane read-only
+(`herdr pane read <pane>`) to see which prompt; never type into it.
 - `cancel_task` is **one-way**: a cancelled task is settled and **cannot be
   re-driven** through the tools, and it only acts on an *actively-running* drive
   (a suspended `blocked_on_gate` task returns "not currently running"). So a
@@ -412,7 +441,7 @@ When you're done operating:
 
 **Daemon flags:** `--config` · `--repo` · `--base` (main) · `--db`
 (orchestrator.db) · `--task-dir` · `--worktrees-dir` · `--poll-interval` (30s) ·
-`--notify-webhook` · `--mcp-listen` (off).
+`--notify-webhook` · `--event-log` (off) · `--mcp-listen` (off).
 
 **Preflight:** `orchestratord doctor --config <c> --repo <dir> [--quick]` —
 exit 0 means the environment is ready; every failure names its fix.

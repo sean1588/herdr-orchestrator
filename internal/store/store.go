@@ -28,6 +28,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     pane_spawn_state TEXT NOT NULL DEFAULT '',
     workflow_snapshot TEXT NOT NULL DEFAULT '',
     state_entry_head TEXT NOT NULL DEFAULT '',
+    agent_status  TEXT NOT NULL DEFAULT '',
+    agent_status_at TEXT NOT NULL DEFAULT '',
+    state_entered_at TEXT NOT NULL DEFAULT '',
     pr_number     INTEGER,
     retry_counts  TEXT NOT NULL,
     created_at    TEXT NOT NULL,
@@ -93,6 +96,19 @@ func applyMigrations(ctx context.Context, db *sql.DB) error {
 	if _, err := db.ExecContext(ctx, addStateEntryHead); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 		return fmt.Errorf("store: migrate state_entry_head: %w", err)
 	}
+	// Liveness columns: what the agent was last observed doing, when that was
+	// observed, and when the task entered its current state. The last one is
+	// distinct from updated_at because updated_at moves on every write (including
+	// an agent-status write), which would make "time in state" meaningless.
+	for _, m := range []struct{ name, stmt string }{
+		{"agent_status", `ALTER TABLE tasks ADD COLUMN agent_status TEXT NOT NULL DEFAULT ''`},
+		{"agent_status_at", `ALTER TABLE tasks ADD COLUMN agent_status_at TEXT NOT NULL DEFAULT ''`},
+		{"state_entered_at", `ALTER TABLE tasks ADD COLUMN state_entered_at TEXT NOT NULL DEFAULT ''`},
+	} {
+		if _, err := db.ExecContext(ctx, m.stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return fmt.Errorf("store: migrate %s: %w", m.name, err)
+		}
+	}
 	return nil
 }
 
@@ -121,10 +137,11 @@ func (s *Store) CreateTask(ctx context.Context, t *Task) error {
 
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO tasks
-			(id, issue, repo, branch, current_state, pane_id, pane_spawn_state, workflow_snapshot, state_entry_head, pr_number, retry_counts, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			(id, issue, repo, branch, current_state, pane_id, pane_spawn_state, workflow_snapshot, state_entry_head, agent_status, agent_status_at, state_entered_at, pr_number, retry_counts, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		t.ID, t.Issue, t.Repo, t.Branch, t.CurrentState, t.PaneID, t.PaneSpawnState, t.WorkflowSnapshot,
-		t.StateEntryHead, prNumberArg(t.PRNumber), rc,
+		t.StateEntryHead, t.AgentStatus, formatTime(t.AgentStatusAt), formatTime(t.StateEnteredAt),
+		prNumberArg(t.PRNumber), rc,
 		t.CreatedAt.Format(timeLayout), t.UpdatedAt.Format(timeLayout),
 	)
 	if err != nil {
@@ -136,7 +153,7 @@ func (s *Store) CreateTask(ctx context.Context, t *Task) error {
 // GetTask returns the task with the given id, or ErrNotFound.
 func (s *Store) GetTask(ctx context.Context, id string) (*Task, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, issue, repo, branch, current_state, pane_id, pane_spawn_state, workflow_snapshot, state_entry_head, pr_number, retry_counts, created_at, updated_at
+		SELECT id, issue, repo, branch, current_state, pane_id, pane_spawn_state, workflow_snapshot, state_entry_head, agent_status, agent_status_at, state_entered_at, pr_number, retry_counts, created_at, updated_at
 		FROM tasks WHERE id = ?`, id)
 
 	t, err := scanTask(row)
@@ -162,10 +179,12 @@ func (s *Store) UpdateTask(ctx context.Context, t *Task) error {
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE tasks SET
 			repo = ?, branch = ?, current_state = ?, pane_id = ?, pane_spawn_state = ?,
-			state_entry_head = ?, pr_number = ?, retry_counts = ?, updated_at = ?
+			state_entry_head = ?, agent_status = ?, agent_status_at = ?, state_entered_at = ?,
+			pr_number = ?, retry_counts = ?, updated_at = ?
 		WHERE id = ?`,
 		t.Repo, t.Branch, t.CurrentState, t.PaneID, t.PaneSpawnState,
-		t.StateEntryHead, prNumberArg(t.PRNumber), rc, t.UpdatedAt.Format(timeLayout), t.ID,
+		t.StateEntryHead, t.AgentStatus, formatTime(t.AgentStatusAt), formatTime(t.StateEnteredAt),
+		prNumberArg(t.PRNumber), rc, t.UpdatedAt.Format(timeLayout), t.ID,
 	)
 	if err != nil {
 		return fmt.Errorf("store: update task %q: %w", t.ID, err)
@@ -184,7 +203,7 @@ func (s *Store) UpdateTask(ctx context.Context, t *Task) error {
 // filter terminal states themselves.
 func (s *Store) List(ctx context.Context) ([]Task, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, issue, repo, branch, current_state, pane_id, pane_spawn_state, workflow_snapshot, state_entry_head, pr_number, retry_counts, created_at, updated_at
+		SELECT id, issue, repo, branch, current_state, pane_id, pane_spawn_state, workflow_snapshot, state_entry_head, agent_status, agent_status_at, state_entered_at, pr_number, retry_counts, created_at, updated_at
 		FROM tasks ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("store: list tasks: %w", err)
@@ -282,16 +301,21 @@ type scanner interface {
 
 func scanTask(sc scanner) (*Task, error) {
 	var (
-		t       Task
-		pr      sql.NullInt64
-		rc      string
-		created string
-		updated string
+		t         Task
+		pr        sql.NullInt64
+		rc        string
+		created   string
+		updated   string
+		statusAt  string
+		enteredAt string
 	)
 	if err := sc.Scan(&t.ID, &t.Issue, &t.Repo, &t.Branch, &t.CurrentState, &t.PaneID, &t.PaneSpawnState,
-		&t.WorkflowSnapshot, &t.StateEntryHead, &pr, &rc, &created, &updated); err != nil {
+		&t.WorkflowSnapshot, &t.StateEntryHead, &t.AgentStatus, &statusAt, &enteredAt,
+		&pr, &rc, &created, &updated); err != nil {
 		return nil, err
 	}
+	t.AgentStatusAt = parseTimeOrZero(statusAt)
+	t.StateEnteredAt = parseTimeOrZero(enteredAt)
 
 	if pr.Valid {
 		n := int(pr.Int64)
@@ -326,4 +350,28 @@ func prNumberArg(pr *int) any {
 		return nil
 	}
 	return *pr
+}
+
+// formatTime renders an optional timestamp; the zero time round-trips as "",
+// so a row that has never observed an agent status is distinguishable from one
+// observed at the Unix epoch.
+func formatTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.Format(timeLayout)
+}
+
+// parseTimeOrZero is formatTime's inverse. An unparseable value degrades to the
+// zero time rather than failing the read: these columns are diagnostics, and a
+// corrupt one must not make a task unreadable.
+func parseTimeOrZero(s string) time.Time {
+	if s == "" {
+		return time.Time{}
+	}
+	t, err := time.Parse(timeLayout, s)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
 }

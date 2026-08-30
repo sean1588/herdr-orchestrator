@@ -48,6 +48,7 @@ import (
 	"github.com/sean1588/herdr-orchestrator/internal/config"
 	"github.com/sean1588/herdr-orchestrator/internal/doctor"
 	"github.com/sean1588/herdr-orchestrator/internal/engine"
+	"github.com/sean1588/herdr-orchestrator/internal/eventlog"
 	"github.com/sean1588/herdr-orchestrator/internal/exec"
 	"github.com/sean1588/herdr-orchestrator/internal/github"
 	"github.com/sean1588/herdr-orchestrator/internal/mcp"
@@ -120,6 +121,7 @@ run/recover/daemon flags:
   --poll-interval DUR    daemon source poll cadence (default 30s)
   --mcp-listen ADDR      daemon MCP control server address, e.g. 127.0.0.1:7777 (default: off)
   --skip-preflight       daemon: start even if the startup preflight fails
+  --event-log PATH       daemon: append run events as JSON Lines (default: off)
   --quick                doctor: skip the expensive checks (does not launch an agent)
 
 init flags:
@@ -456,6 +458,7 @@ func cmdDaemon(args []string) int {
 	pollInterval := fs.Duration("poll-interval", 30*time.Second, "source poll cadence")
 	mcpListen := fs.String("mcp-listen", "", "MCP control server listen address, e.g. 127.0.0.1:7777 (default: off)")
 	skipPreflight := fs.Bool("skip-preflight", false, "start even if the environment preflight fails")
+	eventLog := fs.String("event-log", "", "append the run's events as JSON Lines to this file (default: off)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -466,6 +469,27 @@ func cmdDaemon(args []string) int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Add the JSON sink alongside the console one rather than replacing it: the
+	// operator's pane output stays exactly as it was, and a supervisor gets a
+	// stream it can tail without scraping a TUI. Installed before anything else
+	// logs so the event log captures the whole run, startup included.
+	if *eventLog != "" {
+		jh, closer, lerr := eventlog.Open(*eventLog)
+		if lerr != nil {
+			fmt.Fprintf(os.Stderr, "daemon: %v\n", lerr)
+			return 2
+		}
+		defer closer.Close()
+		// Tee an EXPLICIT console handler, never slog.Default().Handler(). The
+		// built-in default handler writes through the log package, and
+		// slog.SetDefault points the log package's output back at the new default
+		// handler — so teeing it would route tee -> default -> log -> tee. That
+		// re-entry deadlocks on the tee's mutex: the daemon starts, opens its
+		// store, and then logs nothing at all, forever.
+		console := slog.NewTextHandler(os.Stderr, nil)
+		slog.SetDefault(slog.New(eventlog.Tee(console, jh)))
+	}
 
 	w, err := cf.wire(ctx)
 	if err != nil {
@@ -561,7 +585,8 @@ func cmdDaemon(args []string) int {
 			fmt.Fprintf(os.Stderr, "daemon: mcp listen %q: %v\n", *mcpListen, err)
 			return 1
 		}
-		srv := mcp.New(w.store, sched, engine.TaskID, slog.Default())
+		srv := mcp.New(w.store, sched, engine.TaskID, slog.Default()).
+			WithDeadlines(deadlinesFor(w.wf))
 		go func() {
 			if err := srv.Serve(ctx, ln); err != nil {
 				slog.Error("mcp server stopped", "err", err)
@@ -678,4 +703,31 @@ func repoSlug(wf *config.Workflow) string {
 		}
 	}
 	return ""
+}
+
+// deadlinesFor reports the bounds a task sitting in a given state is racing, so
+// the supervision surface can show them next to how long the task has actually
+// been there. That comparison — elapsed against bound — is the whole "is
+// anything wedged" question, and previously an operator had to hold the config
+// in their head to make it.
+func deadlinesFor(wf *config.Workflow) mcp.Deadlines {
+	return func(state string) (stateTimeout, blockedTimeout string) {
+		st, ok := wf.States[state]
+		if !ok {
+			return "", ""
+		}
+		for _, t := range st.Transitions {
+			if t.When.Timeout != "" {
+				stateTimeout = t.When.Timeout
+				break
+			}
+		}
+		// The blocked bound is global, but only meaningful where an agent runs;
+		// reporting it on a state that spawns nothing would invite an operator to
+		// wait for a clock that will never start.
+		if st.Entry != nil && (st.Entry.Spawn != "" || st.Entry.Resume != "") {
+			blockedTimeout = wf.Policies.BlockedTimeout
+		}
+		return stateTimeout, blockedTimeout
+	}
 }

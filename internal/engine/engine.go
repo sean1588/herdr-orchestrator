@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/sean1588/herdr-orchestrator/internal/config"
@@ -728,6 +729,7 @@ func (e *Engine) awaitAgentState(ctx context.Context, task *store.Task, st confi
 			// the agent did something observable. Reset before dispatching, so
 			// every arm below counts, not just the ones that return.
 			resetProgress()
+			e.recordAgentStatus(ctx, task, string(ev.State))
 			switch ev.State {
 			case exec.StateDone:
 				verdict, derr := e.evaluateDone(ctx, task, doneT)
@@ -1156,6 +1158,7 @@ func (e *Engine) advance(ctx context.Context, task *store.Task, next, trigger, r
 		return fmt.Errorf("audit %s->%s: %w", from, next, err)
 	}
 	task.CurrentState = next
+	task.StateEnteredAt = e.now()
 	task.StateEntryHead = e.headBaseline(ctx, task)
 	if err := e.store.UpdateTask(ctx, task); err != nil {
 		return fmt.Errorf("persist transition %s->%s: %w", from, next, err)
@@ -1191,6 +1194,31 @@ func (e *Engine) maybeDrainLabel(ctx context.Context, task *store.Task) {
 	if err := e.gh.RemoveLabel(ctx, e.repoDir, task.Issue, label); err != nil {
 		e.log.Warn("remove source label after settle failed", "task", task.ID,
 			"issue", task.Issue, "label", label, "err", err)
+	}
+}
+
+// recordAgentStatus persists the agent's last observed pane status so the
+// supervision surface can answer "is this task actually moving?".
+//
+// It exists because state is not liveness: blocking does not change state, so a
+// task parked on an unanswerable permission prompt is byte-identical over the
+// wire to one making progress. Real runs have lost 45+ minutes to exactly that,
+// with the only signal being a state that had not changed for suspiciously long.
+//
+// Writes only on a *change* of status, so an agent flipping between the same two
+// states does not rewrite the row on every event; AgentStatusAt therefore marks
+// when the current status began, which is the number an operator wants ("idle
+// for 40 minutes"), not when it was last re-observed.
+//
+// Best-effort: a diagnostic must never fail a drive.
+func (e *Engine) recordAgentStatus(ctx context.Context, task *store.Task, status string) {
+	if status == "" || task.AgentStatus == status {
+		return
+	}
+	task.AgentStatus = status
+	task.AgentStatusAt = e.now()
+	if err := e.store.UpdateTask(ctx, task); err != nil {
+		e.log.Warn("record agent status failed", "task", task.ID, "status", status, "err", err)
 	}
 }
 
@@ -1275,12 +1303,86 @@ func (e *Engine) notifyTerminalAlert(ctx context.Context, task *store.Task) {
 	if !e.wf.States[task.CurrentState].Alert {
 		return
 	}
-	e.notify(ctx, notify.Event{
+	ev := notify.Event{
 		TaskID: task.ID,
 		Issue:  task.Issue,
 		State:  task.CurrentState,
 		Kind:   "escalated",
-	})
+	}
+	e.explain(ctx, task, &ev)
+	e.notify(ctx, ev)
+}
+
+// alertHistory is how many audit rows an escalation carries. Enough to show how
+// the task arrived (the transition that escalated it, plus the couple before),
+// few enough that a webhook payload stays readable.
+const alertHistory = 3
+
+// alertPaneLines is how much agent output an escalation carries. Sized to show a
+// permission prompt and the command that triggered it without shipping a screen.
+const alertPaneLines = 25
+
+// explain fills in the diagnosis an escalation should arrive with, so the
+// recipient does not have to reconstruct it from get_audit plus a pane read.
+//
+// Every part is best-effort and independently optional: an escalation that
+// reaches a human missing its pane tail is still useful, one that never arrives
+// because a diagnostic failed is not. Nothing here can fail the drive.
+func (e *Engine) explain(ctx context.Context, task *store.Task, ev *notify.Event) {
+	if aud, err := e.store.Audit(ctx, task.ID); err == nil {
+		// Most recent first: the escalating transition is the headline.
+		for i := len(aud) - 1; i >= 0 && len(ev.Recent) < alertHistory; i-- {
+			ev.Recent = append(ev.Recent, notify.Transition{
+				From: aud[i].FromState, To: aud[i].ToState,
+				Trigger: aud[i].Trigger, Result: aud[i].Result,
+			})
+		}
+		if len(ev.Recent) > 0 {
+			ev.Cause = ev.Recent[0].Trigger
+			if ev.Recent[0].Result != "" {
+				ev.Cause = ev.Recent[0].Trigger + ":" + ev.Recent[0].Result
+			}
+		}
+	} else {
+		e.log.Warn("escalation: could not read audit trail", "task", task.ID, "err", err)
+	}
+
+	if task.PaneID != "" {
+		if tail, err := e.backend.Read(ctx, exec.Handle{PaneID: task.PaneID}, alertPaneLines); err == nil {
+			ev.PaneTail = tail
+		} else {
+			e.log.Warn("escalation: could not read agent pane", "task", task.ID, "err", err)
+		}
+	}
+	ev.Recommended = recommendFor(ev.Cause)
+}
+
+// recommendFor maps an escalation cause to the action a human should take. The
+// wording matches the diagnosis table in the operate-orchestrator skill, so the
+// alert and the runbook cannot drift into saying different things.
+//
+// A settled task can never be re-driven, so no recommendation here is ever
+// "retry it" — the honest advice is always to fix the cause and open a fresh
+// issue.
+func recommendFor(cause string) string {
+	switch {
+	case strings.HasPrefix(cause, "blocked_timeout"):
+		return "The agent sat blocked on an interactive prompt. Read its pane (read-only) to see which one, add the tool to permissions.allow, then open a fresh issue — a settled task cannot be re-driven."
+	case strings.HasPrefix(cause, "no_progress"):
+		return "The agent produced no observable output for the no_progress window. Read its pane (read-only): a prompt means fix the allow-list; a dead pane means check herdr. Then open a fresh issue."
+	case strings.HasPrefix(cause, "drive_deadline"):
+		return "The drive outlived its wall-clock ceiling, so it was reaped from outside. Check for a wedged subprocess or an over-scoped task, then open a fresh issue."
+	case strings.HasPrefix(cause, "timeout"):
+		return "The agent ran past its state timeout. Read its pane (read-only) to tell a slow task from a permission wedge, then either raise the state's timeout or narrow the issue, and open a fresh one."
+	case strings.HasPrefix(cause, "retry_exhausted"):
+		return "The reviewer and implementer disagreed until the retry cap ran out. Read the PR's review history; this usually needs a human to settle the disagreement or clarify the issue."
+	case strings.HasPrefix(cause, "agent.done:fail"), strings.HasPrefix(cause, "agent.done"):
+		return "The agent reported done but the gate found no artifact — typically no PR, or no new commits since the review. Check the agent's worktree and the issue's clarity."
+	case cause == "":
+		return "Read the task's audit trail (get_audit) and the agent's pane to determine why it escalated."
+	default:
+		return "Read the task's audit trail (get_audit) and the agent's pane, then act on the cause above."
+	}
 }
 
 // checkRetryCap enforces a state's retry cap on entry: it increments the

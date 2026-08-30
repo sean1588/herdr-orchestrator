@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"time"
 
 	"github.com/sean1588/herdr-orchestrator/internal/store"
 )
@@ -30,6 +31,20 @@ type handler struct {
 	ctrl   Controller
 	taskID func(int) string // engine.TaskID, injected so mcp needn't import engine
 	log    *slog.Logger
+	// deadlines reports the bounds a task in a given state is racing; nil => the
+	// task view simply omits them. now is injectable so age fields are testable.
+	deadlines Deadlines
+	now       func() time.Time
+}
+
+// clock reads the injectable now, defaulting to the real one. Defensive so a
+// handler built without it (tests, and any future construction site) reports
+// real ages instead of panicking on a nil func.
+func (h *handler) clock() time.Time {
+	if h.now == nil {
+		return time.Now()
+	}
+	return h.now()
 }
 
 // handle dispatches one JSON-RPC message. It returns the marshalled response and

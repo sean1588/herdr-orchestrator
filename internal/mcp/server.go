@@ -27,7 +27,15 @@ func New(reader Reader, ctrl Controller, taskID func(int) string, log *slog.Logg
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Server{h: &handler{reader: reader, ctrl: ctrl, taskID: taskID, log: log}}
+	return &Server{h: &handler{reader: reader, ctrl: ctrl, taskID: taskID, log: log, now: time.Now}}
+}
+
+// WithDeadlines wires the reporter that tells the task view which bounds a task
+// is racing. Optional and chainable: without it the view simply omits those
+// fields, so a caller with no workflow handy still gets a valid view.
+func (s *Server) WithDeadlines(d Deadlines) *Server {
+	s.h.deadlines = d
+	return s
 }
 
 // Serve runs the HTTP server on ln until ctx is cancelled, then shuts it down

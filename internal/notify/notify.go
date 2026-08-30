@@ -24,12 +24,40 @@ import (
 var defaultClient = &http.Client{Timeout: 10 * time.Second}
 
 // Event is an out-of-band signal worth surfacing to an operator.
+//
+// Beyond identifying the task, an escalation carries the diagnosis the daemon
+// already holds at the moment it escalates: what caused it, how the task got
+// there, what its agent last printed, and what a human should do. Without that
+// the recipient has to reconstruct the story from the audit trail and a pane
+// read — work the daemon can do once, correctly, for free.
 type Event struct {
 	TaskID string
 	Issue  int
 	State  string // the task's current state
 	Kind   string // "alert" | "escalated"
 	Detail string // e.g. the alert message
+
+	// Cause is the trigger that produced the terminal transition — "timeout",
+	// "blocked_timeout", "retry_exhausted", "no_progress", "drive_deadline", or a
+	// decision/gate result. Empty when it could not be determined.
+	Cause string `json:",omitempty"`
+	// Recent is the tail of the audit trail, most recent first, so the escalation
+	// reads as a story rather than a single row.
+	Recent []Transition `json:",omitempty"`
+	// PaneTail is the last of the agent's pane output. It is what distinguishes a
+	// genuinely slow agent from one parked on a permission prompt, which is the
+	// single most common cause of a silent stall.
+	PaneTail string `json:",omitempty"`
+	// Recommended is the concrete next action for a human.
+	Recommended string `json:",omitempty"`
+}
+
+// Transition is one audit row, flattened for transport.
+type Transition struct {
+	From    string
+	To      string
+	Trigger string
+	Result  string `json:",omitempty"`
 }
 
 // Notifier forwards Events. Implementations must be safe to call from the

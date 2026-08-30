@@ -245,11 +245,32 @@ non-loopback address.
 
 | Tool | Args | Does |
 | --- | --- | --- |
-| `list_tasks` | — | list every task with its state, branch, PR, retries |
+| `list_tasks` | — | list every task with its state, branch, PR, retries, and liveness |
 | `get_task` | `issue` | one task's current view |
 | `get_audit` | `issue` | a task's state-transition history |
 | `cancel_task` | `issue` | cancel the running drive; it settles to `cancelled` |
 | `enqueue_task` | `issue` | (re-)drive an issue by number (idempotent) |
+
+**Liveness.** State says *where* a task is; it cannot say whether it is *moving* —
+blocking doesn't change state, so an agent parked on a permission prompt looks
+exactly like one working. Task views therefore carry `agent_status`
+(`working`/`idle`/`blocked`/`done`), `agent_status_for_seconds`,
+`state_for_seconds`, and the `state_timeout` / `blocked_timeout` the task is
+racing. Elapsed-vs-bound is the "is anything wedged" question, answerable without
+holding the config in your head. Unknown ages are omitted, never reported as `0`.
+
+**Escalations explain themselves.** An escalation delivered via
+`--notify-webhook` carries the diagnosis the daemon already had when it
+escalated: the `Cause` (`timeout`, `blocked_timeout`, `retry_exhausted`,
+`no_progress`, `drive_deadline`, or a gate/decision result), the last few
+transitions, the tail of the agent's pane, and a concrete recommended action.
+Since a settled task can never be re-driven, the recommendation is always "fix
+the cause and open a fresh issue", never "retry it".
+
+**Event log.** `--event-log <path>` appends every event as JSON Lines —
+transitions, spawns, gate evaluations, decisions, agent status changes,
+escalations — so a supervisor can `tail -f | jq` instead of scraping the daemon's
+terminal pane. It appends across restarts.
 
 **Control semantics.** `cancel_task` / `enqueue_task` are
 **dispatch-acknowledged, not completion-acknowledged**: the tool confirms the

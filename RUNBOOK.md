@@ -172,6 +172,17 @@ Remember the shipped default is `dry_run: true`: the first run withholds the
 real merge and halts each task at `merging` as a *success*. Supervise one dry
 pass end-to-end, then set `dry_run: false` and restart the daemon.
 
+**A config edit does not reach work already in flight.** Each task records the
+config it started under and is driven against that snapshot for its whole life,
+policies included. So flipping `dry_run: false` and restarting affects tasks
+started *after* the restart; tasks already parked in `merging` still honor the
+`dry_run: true` they began with. This is deliberate — a flag whose job is to
+withhold a side effect would be worthless if editing a file silently retracted
+it mid-drive. To move an in-flight task onto new rules, let it settle, or cancel
+it and open a fresh issue. A snapshot that no longer parses fails closed: the
+daemon refuses to drive that task and says so, rather than quietly falling back
+to the current config.
+
 > **Non-Claude agents (Codex, etc.):** nothing here depends on Claude Code.
 > The per-tick supervision procedure in
 > `.claude/skills/operate-orchestrator/SKILL.md` is plain markdown — read it

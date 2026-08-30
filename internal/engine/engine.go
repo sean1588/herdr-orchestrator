@@ -1161,7 +1161,46 @@ func (e *Engine) advance(ctx context.Context, task *store.Task, next, trigger, r
 		return fmt.Errorf("persist transition %s->%s: %w", from, next, err)
 	}
 	e.log.Info("transition", "task", task.ID, "from", from, "to", next, "trigger", trigger, "result", result)
+	e.maybeDrainLabel(ctx, task)
 	return nil
+}
+
+// maybeDrainLabel removes the source label once a task settles, so the label
+// stops meaning "the backlog plus everything ever completed".
+//
+// The daemon also drains it from doneChecker.done, but that path is only reached
+// for an issue ListIssues just returned — and `gh issue list` defaults to open
+// issues, while the success path closes the issue as part of the merge. So for
+// the one outcome the pipeline exists to produce, the poll-time drain can never
+// run. Draining here instead keys on the settle itself, which every terminal
+// reaches through advance: merged, closed, escalated, and the detached writes
+// that settle an operator cancel or a reaped drive.
+//
+// Best-effort and deliberately after the state write: the transition is the
+// durable fact, and a label left behind must never fail a drive or re-run a
+// terminal transition. The poll-time drain remains as the idempotent backstop
+// for tasks that settle while their issue is still open.
+func (e *Engine) maybeDrainLabel(ctx context.Context, task *store.Task) {
+	if !e.isSettled(task.CurrentState) {
+		return
+	}
+	label := e.wf.SourceLabel()
+	if label == "" {
+		return // no labeled source: nothing to drain
+	}
+	if err := e.gh.RemoveLabel(ctx, e.repoDir, task.Issue, label); err != nil {
+		e.log.Warn("remove source label after settle failed", "task", task.ID,
+			"issue", task.Issue, "label", label, "err", err)
+	}
+}
+
+// isSettled reports whether a state means the task is finished for good: any
+// terminal, plus the daemon-owned cancel terminal. Deliberately narrower than
+// isHalt, which also stops on the goal state (a mid-pipeline halt used by tests
+// and the one-shot run) and on the dry-run merging halt — neither of which has
+// settled anything.
+func (e *Engine) isSettled(state string) bool {
+	return state == CancelState || e.isTerminal(state)
 }
 
 // headBaseline captures the PR head SHA the task is entering its new state with,

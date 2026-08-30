@@ -92,8 +92,9 @@ type Config struct {
 	Store    *store.Store
 
 	// WorkflowSource is the raw config bytes snapshotted onto each new task, so
-	// recovery resumes against the graph the task started under. Empty => no
-	// snapshot (recovery falls back to the current --config).
+	// every later drive resumes against the graph the task started under (see
+	// engineForTask). Empty => no snapshot, and drives fall back to the current
+	// --config.
 	WorkflowSource []byte
 
 	RepoDir   string // local checkout (absolute) where git/gh run
@@ -193,17 +194,53 @@ func New(c Config) *Engine {
 // Run drives a single issue from the start state to the goal (pr_open) or a
 // terminal state, returning the final state. If the task already exists (a
 // re-run after a crash), it is reconciled against herdr/GitHub before driving.
+//
+// The task is driven against its own WorkflowSnapshot, not the engine's current
+// --config: the daemon re-drives non-settled tasks on every poll and on restart,
+// so without this an operator editing the config file would silently change the
+// rules for work already in flight.
 func (e *Engine) Run(ctx context.Context, issue int) (string, error) {
 	task, created, err := e.ensureTask(ctx, issue)
 	if err != nil {
 		return "", err
 	}
+	// Only a pre-existing task can have drifted from the current --config. One
+	// created on this very call carries e's own workflowSource as its snapshot by
+	// construction, so re-parsing it would be redundant work and an extra failure
+	// mode on the hot path.
+	eng := e
 	if !created {
-		if err := e.reconcile(ctx, task); err != nil {
-			return e.reclassifyCancel(ctx, task, task.CurrentState, err)
+		eng, err = e.engineForTask(task)
+		if err != nil {
+			return "", err
+		}
+		if err := eng.reconcile(ctx, task); err != nil {
+			return eng.reclassifyCancel(ctx, task, task.CurrentState, err)
 		}
 	}
-	return e.drive(ctx, task)
+	return eng.drive(ctx, task)
+}
+
+// engineForTask returns the engine a task must be driven by: one bound to the
+// workflow the task started under (its snapshot), never a possibly-edited
+// current --config. Re-validating via config.Parse keeps this fail-closed — a
+// snapshot that no longer satisfies the invariants yields an error rather than
+// being silently run. An empty snapshot (a legacy row written before snapshots
+// existed) falls back to the current config, preserving pre-snapshot behavior.
+//
+// Policies pin alongside the graph, deliberately. dry_run is the motivating
+// case: a flag whose entire job is to withhold a side effect must not stop
+// applying to in-flight work the moment someone edits a file. Changing policy
+// for a running task is therefore an explicit act — cancel it, or let it settle.
+func (e *Engine) engineForTask(task *store.Task) (*Engine, error) {
+	if task.WorkflowSnapshot == "" {
+		return e, nil
+	}
+	wf, _, err := config.Parse([]byte(task.WorkflowSnapshot))
+	if err != nil {
+		return nil, fmt.Errorf("task %s: workflow snapshot invalid (fix or migrate the stored config): %w", task.ID, err)
+	}
+	return e.cloneWithWorkflow(wf), nil
 }
 
 // Recover reconciles in-flight tasks against live herdr panes and GitHub PRs,
@@ -216,19 +253,13 @@ func (e *Engine) Recover(ctx context.Context) error {
 	}
 	for i := range tasks {
 		task := &tasks[i]
-		// Drive the task against the graph it started under (its snapshot), never a
-		// possibly-edited current --config. Re-validating via config.Parse keeps
-		// recovery fail-closed: a snapshot that no longer satisfies the invariants
-		// is skipped, not silently run. An empty snapshot (legacy row) resumes
-		// against the current --config, preserving pre-snapshot behavior.
-		eng := e
-		if task.WorkflowSnapshot != "" {
-			wf, _, perr := config.Parse([]byte(task.WorkflowSnapshot))
-			if perr != nil {
-				e.log.Warn("recover: task snapshot invalid; skipping (fix or migrate)", "task", task.ID, "err", perr)
-				continue
-			}
-			eng = e.cloneWithWorkflow(wf)
+		// Drive the task against the graph it started under; see engineForTask.
+		// Recovery is a batch over every stored task, so an invalid snapshot skips
+		// just that task with a warning rather than aborting the whole sweep.
+		eng, perr := e.engineForTask(task)
+		if perr != nil {
+			e.log.Warn("recover: task snapshot invalid; skipping (fix or migrate)", "task", task.ID, "err", perr)
+			continue
 		}
 		if eng.isHalt(task.CurrentState) {
 			continue

@@ -21,8 +21,11 @@ type Task struct {
 	// entering a new state spawns a fresh agent for that state's role.
 	PaneSpawnState string
 	// WorkflowSnapshot is the exact config the task started under (raw bytes).
-	// Recovery resumes against this, never a possibly-edited --config. Set once
-	// at create; never rewritten. Empty for tasks created before this column.
+	// Every drive of an existing task resumes against this — the daemon's poll
+	// loop as well as `orchestratord recover` — never a possibly-edited --config.
+	// Policies pin along with the graph, so dry_run keeps applying to work already
+	// in flight. Set once at create; never rewritten. Empty for tasks created
+	// before this column, which fall back to the current --config.
 	WorkflowSnapshot string
 	// StateEntryHead is the PR head commit SHA observed when the task entered
 	// CurrentState. It is the baseline the github_commits gate compares against,

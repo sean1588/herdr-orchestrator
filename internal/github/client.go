@@ -65,3 +65,15 @@ type PullRequests interface {
 	// cannot be deleted never fails the merge.
 	DeleteRemoteBranch(ctx context.Context, repoDir, branch string) error
 }
+
+// IssueClient is the GitHub issue API, separate from pull-request operations.
+type IssueClient interface {
+	// Issue loads an issue's title and body from the given checkout's repository.
+	Issue(ctx context.Context, repoDir string, number int) (*Issue, error)
+	// ListIssues discovers open issues matching label.
+	ListIssues(ctx context.Context, repoDir, label string) ([]int, error)
+	// RemoveLabel acknowledges an issue. Removing an absent label is a no-op.
+	RemoveLabel(ctx context.Context, repoDir string, number int, label string) error
+	// CloseIssue marks successful work complete with a result comment.
+	CloseIssue(ctx context.Context, repoDir string, number int, comment string) error
+}

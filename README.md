@@ -471,8 +471,20 @@ orchestratord validate path/to/your-workflow.yaml
 
 ### Issue sources and code hosting
 
-Work intake is now a separate `source.Source` dependency from GitHub pull-request
-operations. The engine and scheduler support opaque external item IDs, providing
-the extension point for sources such as Notion while retaining existing GitHub
-workflows. The shipped CLI still selects GitHub issues; no Notion connection is
-included yet. See [the source adapter guide](docs/issue-sources.md).
+Work intake uses `source.Source`, independently of GitHub pull-request operations.
+The source owns discovery, loading task text, acknowledging settled work, and
+marking successful work complete. `github.IssueSource` implements this boundary;
+the engine receives it separately from `github.PullRequests`.
+
+Acknowledgement removes work from discovery without marking it done: cancellation
+and escalation acknowledge, while only successful implementation completes the
+source item. Source write failures are logged without undoing a merge. The
+existing poll-time acknowledgement retry remains; completion updates have no
+new durable retry mechanism.
+
+Existing GitHub workflows retain their numeric task IDs, CLI/MCP arguments,
+branches, database schema, and notification fields. The shared scheduler accepts
+string keys, but the shipped daemon still uses numeric keys for MCP compatibility.
+The source interface preserves opaque string keys so a future adapter can use
+external IDs; persistent identity and CLI/configuration support for a second
+source will be designed alongside that adapter. No Notion connection is included.

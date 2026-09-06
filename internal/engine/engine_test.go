@@ -197,7 +197,8 @@ func newEngine(t *testing.T, st *store.Store, b exec.ExecutionBackend, gh github
 	return New(Config{
 		Workflow:     wf,
 		Backend:      b,
-		GitHub:       gh,
+		PullRequests: gh,
+		Source:       github.IssueSource{Client: gh, RepoDir: "/repo"},
 		Store:        st,
 		RepoDir:      "/repo",
 		Base:         "main",

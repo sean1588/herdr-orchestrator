@@ -136,7 +136,7 @@ func (s *SchedulerOf[K]) Serve(ctx context.Context) error {
 		s.Now = time.Now
 	}
 	work := make(chan K, queueDepth)
-	inflight := &inflightKeys[K]{m: map[K]*driveHandle{}}
+	inflight := &inflightSet[K]{m: map[K]*driveHandle{}}
 
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
@@ -201,7 +201,7 @@ const maxReapInterval = 30 * time.Second
 // startReaper launches the deadline sweep and returns a channel closed when it
 // stops. A zero DriveDeadline disables it, and the returned channel is already
 // closed so Serve's shutdown path need not special-case it.
-func (s *SchedulerOf[K]) startReaper(ctx context.Context, inflight *inflightKeys[K]) <-chan struct{} {
+func (s *SchedulerOf[K]) startReaper(ctx context.Context, inflight *inflightSet[K]) <-chan struct{} {
 	done := make(chan struct{})
 	if s.DriveDeadline <= 0 {
 		close(done)
@@ -242,7 +242,7 @@ func (s *SchedulerOf[K]) startReaper(ctx context.Context, inflight *inflightKeys
 // at startup and on every poll so a task that yielded its worker mid-drive (a
 // suspended blocked_on_gate wait) is resumed; enqueue's inflight and Done checks
 // keep it from racing a task already being driven or one that has since settled.
-func (s *SchedulerOf[K]) seed(ctx context.Context, work chan K, inflight *inflightKeys[K]) {
+func (s *SchedulerOf[K]) seed(ctx context.Context, work chan K, inflight *inflightSet[K]) {
 	if s.SeedFrom == nil {
 		return
 	}
@@ -256,7 +256,7 @@ func (s *SchedulerOf[K]) seed(ctx context.Context, work chan K, inflight *inflig
 
 // enqueue adds issues that are neither in-flight nor already done. It never
 // blocks: a full channel means the issue is skipped and re-discovered next poll.
-func (s *SchedulerOf[K]) enqueue(ctx context.Context, work chan K, inflight *inflightKeys[K], issues []K) {
+func (s *SchedulerOf[K]) enqueue(ctx context.Context, work chan K, inflight *inflightSet[K], issues []K) {
 	for _, issue := range issues {
 		if inflight.has(issue) {
 			continue
@@ -286,7 +286,7 @@ func (s *SchedulerOf[K]) enqueue(ctx context.Context, work chan K, inflight *inf
 // so an enqueue keeps Serve the single sender on the work channel, and a cancel
 // reads the inflight set without a second owner. The reply channel is buffered,
 // so this never blocks on a caller that has already given up (a cancelled request).
-func (s *SchedulerOf[K]) handleCommand(ctx context.Context, c command[K], work chan K, inflight *inflightKeys[K]) {
+func (s *SchedulerOf[K]) handleCommand(ctx context.Context, c command[K], work chan K, inflight *inflightSet[K]) {
 	switch c.kind {
 	case cmdEnqueue:
 		c.reply <- s.enqueueOne(ctx, work, inflight, c.issue)
@@ -307,7 +307,7 @@ func (s *SchedulerOf[K]) handleCommand(ctx context.Context, c command[K], work c
 // poller's batch enqueue (fire-and-forget: a labelled issue is re-discovered next
 // poll), a manual enqueue has no such backstop, so its disposition must be honest.
 // An already-in-flight issue is a benign success (it is being driven).
-func (s *SchedulerOf[K]) enqueueOne(ctx context.Context, work chan K, inflight *inflightKeys[K], issue K) error {
+func (s *SchedulerOf[K]) enqueueOne(ctx context.Context, work chan K, inflight *inflightSet[K], issue K) error {
 	if inflight.has(issue) {
 		return nil // already being driven
 	}
@@ -339,9 +339,7 @@ func (s *SchedulerOf[K]) enqueueOne(ctx context.Context, work chan K, inflight *
 // dies with the same per-issue claim, needing no second structure. Per-issue
 // registration is serialized (one worker per issue at a time), so a mutex-guarded
 // map is race-free.
-type inflightSet = inflightKeys[int]
-
-type inflightKeys[K ~int | ~string] struct {
+type inflightSet[K ~int | ~string] struct {
 	mu sync.Mutex
 	m  map[K]*driveHandle
 }
@@ -357,7 +355,7 @@ type driveHandle struct {
 	started time.Time
 }
 
-func (s *inflightKeys[K]) add(issue K) bool { // true if newly claimed
+func (s *inflightSet[K]) add(issue K) bool { // true if newly claimed
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.m[issue]; ok {
@@ -369,7 +367,7 @@ func (s *inflightKeys[K]) add(issue K) bool { // true if newly claimed
 
 // arm records the running drive's cancel func and start time for an
 // already-claimed issue.
-func (s *inflightKeys[K]) arm(issue K, cancel context.CancelCauseFunc, started time.Time) {
+func (s *inflightSet[K]) arm(issue K, cancel context.CancelCauseFunc, started time.Time) {
 	s.mu.Lock()
 	if h, ok := s.m[issue]; ok {
 		h.cancel, h.started = cancel, started
@@ -379,7 +377,7 @@ func (s *inflightKeys[K]) arm(issue K, cancel context.CancelCauseFunc, started t
 
 // cancel invokes the issue's cancel func with cause, returning false if the issue
 // is not currently being driven (unclaimed, or claimed but not yet armed).
-func (s *inflightKeys[K]) cancel(issue K, cause error) bool {
+func (s *inflightSet[K]) cancel(issue K, cause error) bool {
 	s.mu.Lock()
 	var cancel context.CancelCauseFunc
 	if h, ok := s.m[issue]; ok {
@@ -399,7 +397,7 @@ func (s *inflightKeys[K]) cancel(issue K, cause error) bool {
 // the worker for ownership. Cancelling twice is harmless — the second call on an
 // already-cancelled context is a no-op — so a drive that finished between the
 // sweep and the cancel is unaffected.
-func (s *inflightKeys[K]) reap(deadline time.Duration, now time.Time, cause error) []K {
+func (s *inflightSet[K]) reap(deadline time.Duration, now time.Time, cause error) []K {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var reaped []K
@@ -416,13 +414,13 @@ func (s *inflightKeys[K]) reap(deadline time.Duration, now time.Time, cause erro
 	return reaped
 }
 
-func (s *inflightKeys[K]) remove(issue K) {
+func (s *inflightSet[K]) remove(issue K) {
 	s.mu.Lock()
 	delete(s.m, issue)
 	s.mu.Unlock()
 }
 
-func (s *inflightKeys[K]) has(issue K) bool {
+func (s *inflightSet[K]) has(issue K) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, ok := s.m[issue]

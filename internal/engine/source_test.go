@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -44,12 +45,11 @@ func sourceEngine(t *testing.T, st *store.Store, b exec.ExecutionBackend, gh git
 	t.Helper()
 	baseline := newEngine(t, st, b, nil, time.Second)
 	return New(Config{Workflow: baseline.wf, Backend: b, PullRequests: gh, Source: pages,
-		SourceID: "notion-database", SourceSelector: source.Selector{"status": "Ready"},
 		Store: st, TaskDir: t.TempDir(), ConfigDir: baseline.configDir, Logger: baseline.log,
 		Repo: "owner/code", RepoDir: "/code", StartState: "intake"})
 }
 
-func TestOpaqueSourceTriageAndResume(t *testing.T) {
+func TestSourceTriageAndResume(t *testing.T) {
 	for _, tc := range []struct {
 		verdict, goal, want string
 		ack                 int
@@ -66,16 +66,16 @@ func TestOpaqueSourceTriageAndResume(t *testing.T) {
 			prs := struct{ github.PullRequests }{&fakeGH{}}
 			e := sourceEngine(t, st, b, prs, pages)
 			e.goal = tc.goal
-			key := "b3d9a1c4-opaque-page-uuid"
-			final, err := e.RunSource(ctx, key)
+
+			final, err := e.Run(ctx, 5)
 			if err != nil || final != tc.want {
 				t.Fatalf("run = %s, %v", final, err)
 			}
-			task, err := st.GetTask(ctx, SourceTaskID(e.sourceID, key))
+			task, err := st.GetTask(ctx, TaskID(5))
 			if err != nil {
 				t.Fatal(err)
 			}
-			if task.SourceKey != key || task.SourceID != e.sourceID || task.Issue != 0 {
+			if task.Issue != 5 || task.ID != TaskID(5) {
 				t.Fatalf("identity = %+v", task)
 			}
 			body, err := os.ReadFile(b.spawnLog[0].TaskFile)
@@ -92,7 +92,7 @@ func TestOpaqueSourceTriageAndResume(t *testing.T) {
 			// another issue-N task or invoking GitHub's issue API.
 			resumed := sourceEngine(t, st, b, prs, pages)
 			resumed.goal = tc.goal
-			if _, err := resumed.RunSource(ctx, key); err != nil {
+			if _, err := resumed.Run(ctx, 5); err != nil {
 				t.Fatal(err)
 			}
 			tasks, err := st.List(ctx)
@@ -106,7 +106,7 @@ func TestOpaqueSourceTriageAndResume(t *testing.T) {
 	}
 }
 
-func TestOpaqueSourceSettlement(t *testing.T) {
+func TestSourceSettlement(t *testing.T) {
 	for _, tc := range []struct {
 		name, state   string
 		dry, failAck  bool
@@ -128,7 +128,7 @@ func TestOpaqueSourceSettlement(t *testing.T) {
 			e := sourceEngine(t, st, &fakeBackend{}, struct{ github.PullRequests }{gh}, pages)
 			e.wf.Policies.DryRun = &tc.dry
 			pr := 42
-			task := &store.Task{ID: SourceTaskID(e.sourceID, "uuid"), SourceID: e.sourceID, SourceKey: "uuid", CurrentState: tc.state, PRNumber: &pr}
+			task := &store.Task{ID: TaskID(5), Issue: 5, CurrentState: tc.state, PRNumber: &pr}
 			if err := st.CreateTask(ctx, task); err != nil {
 				t.Fatal(err)
 			}
@@ -144,6 +144,9 @@ func TestOpaqueSourceSettlement(t *testing.T) {
 			if len(pages.completed) != tc.complete || len(pages.acknowledged) != tc.ack {
 				t.Fatalf("wrong settlement: %+v", pages)
 			}
+			if tc.ack > 0 && !reflect.DeepEqual(pages.selector, source.Selector{"label": "agent-ready"}) {
+				t.Fatalf("ack selector = %v", pages.selector)
+			}
 			if len(gh.closedIssues) != 0 || len(gh.removedLabels) != 0 {
 				t.Fatal("touched GitHub issues for an external page")
 			}
@@ -151,35 +154,44 @@ func TestOpaqueSourceSettlement(t *testing.T) {
 	}
 }
 
-func TestSourceIdentityIsolation(t *testing.T) {
-	seen := map[string]bool{}
-	for _, pair := range [][2]string{{"a", "b:c"}, {"a:b", "c"}, {"one", "same"}, {"two", "same"}, {"one", "../../x\ncommand"}} {
-		id := SourceTaskID(pair[0], pair[1])
-		if seen[id] || strings.ContainsAny(id, "/\n:") {
-			t.Fatalf("unsafe or aliased ID %q", id)
-		}
-		seen[id] = true
-	}
-	st := newStore(t)
-	e := sourceEngine(t, st, &fakeBackend{}, &fakeGH{}, &pageSource{})
-	if _, err := e.engineForTask(&store.Task{ID: "other", SourceID: "different"}); err == nil {
-		t.Fatal("accepted a task from another source")
-	}
-	if _, err := e.Run(context.Background(), 1); err == nil {
-		t.Fatal("numeric entry point accepted custom source")
-	}
-	if _, err := e.RunSource(context.Background(), ""); err == nil {
-		t.Fatal("accepted empty key")
+type brokenSource struct {
+	source.Source
+	item *source.Item
+}
+
+func (s brokenSource) Get(context.Context, string) (*source.Item, error) { return s.item, nil }
+
+func TestSourceItemContract(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		item    *source.Item
+		wantErr bool
+	}{
+		{"nil", nil, true}, {"wrong key", &source.Item{Key: "6"}, true}, {"matching key", &source.Item{Key: "5"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := &Engine{source: brokenSource{item: tc.item}}
+			_, err := e.sourceItem(context.Background(), &store.Task{Issue: 5})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("error = %v", err)
+			}
+		})
 	}
 }
 
-func TestSourceContextCancellation(t *testing.T) {
+func TestAcknowledgeUsesPinnedWorkflowLabel(t *testing.T) {
 	st := newStore(t)
-	e := sourceEngine(t, st, &fakeBackend{}, &fakeGH{}, &pageSource{})
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	_, err := e.sourceItem(ctx, &store.Task{SourceID: e.sourceID, SourceKey: "uuid"})
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("got %v", err)
+	pages := &pageSource{}
+	e := sourceEngine(t, st, &fakeBackend{}, &fakeGH{}, pages)
+	task := &store.Task{ID: TaskID(5), Issue: 5, WorkflowSnapshot: strings.ReplaceAll(shippedConfig(t), "agent-ready", "original-ready")}
+	pinned, err := e.engineForTask(task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pinned.acknowledge(context.Background(), task); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(pages.selector, source.Selector{"label": "original-ready"}) {
+		t.Fatalf("selector=%v", pages.selector)
 	}
 }

@@ -10,11 +10,8 @@ import (
 
 // Task is the persisted state of one unit of work flowing through the workflow.
 type Task struct {
-	// SourceID and SourceKey are immutable intake identity. Empty on legacy GitHub tasks.
-	SourceID     string
-	SourceKey    string
 	ID           string // deterministic, e.g. "issue-5"
-	Issue        int    // legacy GitHub issue number; zero for opaque source items
+	Issue        int    // source issue number
 	Repo         string // e.g. "sean1588/minicode"
 	Branch       string // deterministic, e.g. "agent/issue-5"
 	CurrentState string // workflow state name, e.g. "implementing"

@@ -153,8 +153,8 @@ func (e *Engine) triageTask(ctx context.Context, task *store.Task, decisionName 
 	}
 	vp := verdictPath(e.taskDir, task.ID)
 	kickoff = fmt.Sprintf(
-		"Triage issue %s following the rubric in %s. When done, write your verdict as JSON {\"verdict\": one of %v, \"feedback\": \"...\"} to %s. Stop when the verdict file is written.",
-		sourceDisplay(task), path, d.Verdicts, vp)
+		"Triage issue #%d following the rubric in %s. When done, write your verdict as JSON {\"verdict\": one of %v, \"feedback\": \"...\"} to %s. Stop when the verdict file is written.",
+		task.Issue, path, d.Verdicts, vp)
 	return path, kickoff, nil
 }
 

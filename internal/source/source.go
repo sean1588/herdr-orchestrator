@@ -1,4 +1,10 @@
 // Package source defines the work-intake boundary, independent of code hosting.
+// Sources are bound to an external collection and must support concurrent calls
+// with context cancellation. Item keys are opaque to the interface; the current
+// daemon maps its numeric issue IDs at the boundary. Completion means successful
+// implementation, while acknowledgement only removes settled work from discovery.
+// Adapters must make both mutations idempotent. Selectors are read-only workflow
+// data and may come from a task's pinned configuration during recovery.
 package source
 
 import "context"
@@ -9,7 +15,6 @@ type Item struct {
 	Key   string
 	Title string
 	Body  string
-	URL   string
 }
 
 // Selector is provider-specific discovery configuration (for example a GitHub
@@ -21,11 +26,11 @@ type Selector map[string]any
 // All methods honor cancellation. List may return duplicates; callers deduplicate
 // by key. Acknowledge and Complete must be idempotent, since recovery can retry.
 type Source interface {
-	List(context.Context, Selector) ([]string, error)
-	Get(context.Context, string) (*Item, error)
+	List(ctx context.Context, selector Selector) ([]string, error)
+	Get(ctx context.Context, key string) (*Item, error)
 	// Acknowledge removes settled work from discovery without marking it done.
 	// Escalations and cancellations also acknowledge; they must NOT complete it.
-	Acknowledge(context.Context, string, Selector) error
+	Acknowledge(ctx context.Context, key string, selector Selector) error
 	// Complete marks successfully implemented work done, with a result comment.
-	Complete(context.Context, string, string) error
+	Complete(ctx context.Context, key, comment string) error
 }

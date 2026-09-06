@@ -31,13 +31,11 @@ var defaultClient = &http.Client{Timeout: 10 * time.Second}
 // the recipient has to reconstruct the story from the audit trail and a pane
 // read — work the daemon can do once, correctly, for free.
 type Event struct {
-	SourceID  string `json:",omitempty"`
-	SourceKey string `json:",omitempty"`
-	TaskID    string
-	Issue     int
-	State     string // the task's current state
-	Kind      string // "alert" | "escalated"
-	Detail    string // e.g. the alert message
+	TaskID string
+	Issue  int
+	State  string // the task's current state
+	Kind   string // "alert" | "escalated"
+	Detail string // e.g. the alert message
 
 	// Cause is the trigger that produced the terminal transition — "timeout",
 	// "blocked_timeout", "retry_exhausted", "no_progress", "drive_deadline", or a

@@ -306,7 +306,6 @@ func registerCommon(fs *flag.FlagSet, cf *commonFlags) {
 type wired struct {
 	eng     *engine.Engine
 	store   *store.Store
-	gh      github.Client
 	source  source.Source
 	wf      *config.Workflow
 	repoDir string
@@ -385,7 +384,7 @@ func (cf commonFlags) wire(ctx context.Context) (*wired, error) {
 		Notifier:       notifier,
 		StartState:     start,
 	})
-	return &wired{eng: eng, store: st, gh: gh, source: issues, wf: wf, repoDir: absRepo}, nil
+	return &wired{eng: eng, store: st, source: issues, wf: wf, repoDir: absRepo}, nil
 }
 
 func cmdRun(args []string) int {
@@ -532,7 +531,7 @@ func cmdDaemon(args []string) int {
 		}
 	}
 
-	dc := doneChecker{source: w.source, store: w.store, settled: settled, repoDir: w.repoDir, label: label, log: slog.Default()}
+	dc := doneChecker{source: w.source, store: w.store, settled: settled, label: label, log: slog.Default()}
 
 	// The per-drive ceiling is enforced by the scheduler's reaper, outside the
 	// drive goroutine — the only place that can still act when a drive is wedged.
@@ -556,11 +555,16 @@ func cmdDaemon(args []string) int {
 			if err != nil {
 				return nil, err
 			}
+			// Numeric keys are retained for MCP issue arguments; remove this hop
+			// when the daemon and MCP accept opaque source keys.
 			numbers := make([]int, len(keys))
 			for i, key := range keys {
 				n, err := strconv.Atoi(key)
-				if err != nil || n <= 0 {
-					return nil, fmt.Errorf("invalid issue key %q", key)
+				if err != nil {
+					return nil, fmt.Errorf("parse source key %q for numeric MCP: %w", key, err)
+				}
+				if n <= 0 {
+					return nil, fmt.Errorf("source key %q must be positive", key)
 				}
 				numbers[i] = n
 			}
@@ -665,10 +669,8 @@ func settledStates(wf *config.Workflow) map[string]bool {
 // scheduler callback stays a plain (ctx, issue) func.
 type doneChecker struct {
 	source  source.Source
-	gh      github.Client // compatibility for legacy construction sites
 	store   *store.Store
 	settled map[string]bool
-	repoDir string
 	label   string
 	log     *slog.Logger
 }
@@ -691,11 +693,7 @@ func (d doneChecker) done(ctx context.Context, issue int) (bool, error) {
 	if !d.settled[tk.CurrentState] {
 		return false, nil
 	}
-	issues := d.source
-	if issues == nil {
-		issues = github.IssueSource{Client: d.gh, RepoDir: d.repoDir}
-	}
-	if err := issues.Acknowledge(ctx, strconv.Itoa(issue), source.Selector{"label": d.label}); err != nil {
+	if err := d.source.Acknowledge(ctx, strconv.Itoa(issue), source.Selector{"label": d.label}); err != nil {
 		d.log.Warn("remove source label failed", "issue", issue, "label", d.label, "err", err)
 	}
 	return true, nil

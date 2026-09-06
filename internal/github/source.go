@@ -8,14 +8,6 @@ import (
 	"github.com/sean1588/herdr-orchestrator/internal/source"
 )
 
-// IssueClient is the GitHub issue API, separate from pull-request operations.
-type IssueClient interface {
-	Issue(context.Context, string, int) (*Issue, error)
-	ListIssues(context.Context, string, string) ([]int, error)
-	RemoveLabel(context.Context, string, int, string) error
-	CloseIssue(context.Context, string, int, string) error
-}
-
 // IssueSource adapts GitHub issues to work intake. RepoDir is bound here, rather
 // than supplied by the engine on each call, so source and code repo can differ.
 type IssueSource struct {

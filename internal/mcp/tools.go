@@ -34,8 +34,6 @@ func toolDefs() []toolDef {
 // (pane id, pane spawn state, workflow snapshot) are omitted; a nil PR and empty
 // retry map are omitted rather than rendered null/{}.
 type TaskView struct {
-	SourceID    string         `json:"source_id,omitempty"`
-	SourceKey   string         `json:"source_key,omitempty"`
 	ID          string         `json:"id"`
 	Issue       int            `json:"issue"`
 	Repo        string         `json:"repo"`
@@ -82,7 +80,7 @@ func (h *handler) toTaskView(t store.Task) TaskView {
 		rc = nil
 	}
 	v := TaskView{
-		ID: t.ID, SourceID: t.SourceID, SourceKey: t.SourceKey, Issue: t.Issue, Repo: t.Repo, Branch: t.Branch,
+		ID: t.ID, Issue: t.Issue, Repo: t.Repo, Branch: t.Branch,
 		State: t.CurrentState, PRNumber: t.PRNumber, RetryCounts: rc,
 		CreatedAt: t.CreatedAt.Format(time.RFC3339), UpdatedAt: t.UpdatedAt.Format(time.RFC3339),
 		AgentStatus:    t.AgentStatus,

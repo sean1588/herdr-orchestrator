@@ -88,14 +88,11 @@ const CancelState = "cancelled"
 
 // Config wires the engine's dependencies and tunables.
 type Config struct {
-	Workflow       *config.Workflow
-	Backend        exec.ExecutionBackend
-	GitHub         github.Client // Compatibility wiring; prefer PullRequests and Source.
-	PullRequests   github.PullRequests
-	Source         source.Source
-	SourceID       string // Stable collection identity; required for RunSource.
-	SourceSelector source.Selector
-	Store          *store.Store
+	Workflow     *config.Workflow
+	Backend      exec.ExecutionBackend
+	PullRequests github.PullRequests
+	Source       source.Source
+	Store        *store.Store
 
 	// WorkflowSource is the raw config bytes snapshotted onto each new task, so
 	// every later drive resumes against the graph the task started under (see
@@ -129,8 +126,6 @@ type Engine struct {
 	backend        exec.ExecutionBackend
 	gh             github.PullRequests
 	source         source.Source
-	sourceID       string
-	selector       source.Selector
 	store          *store.Store
 	workflowSource []byte
 
@@ -153,8 +148,6 @@ func New(c Config) *Engine {
 		backend:        c.Backend,
 		gh:             c.PullRequests,
 		source:         c.Source,
-		sourceID:       c.SourceID,
-		selector:       c.SourceSelector,
 		store:          c.Store,
 		workflowSource: c.WorkflowSource,
 		repoDir:        c.RepoDir,
@@ -167,12 +160,6 @@ func New(c Config) *Engine {
 		parseDur:       c.DurationFunc,
 		log:            c.Logger,
 		notifier:       c.Notifier,
-	}
-	if e.gh == nil {
-		e.gh = c.GitHub
-	}
-	if e.source == nil && c.GitHub != nil && c.SourceID == "" {
-		e.source = github.IssueSource{Client: c.GitHub, RepoDir: c.RepoDir}
 	}
 	if e.taskDir == "" {
 		e.taskDir = os.TempDir()
@@ -218,21 +205,10 @@ func New(c Config) *Engine {
 // so without this an operator editing the config file would silently change the
 // rules for work already in flight.
 func (e *Engine) Run(ctx context.Context, issue int) (string, error) {
-	if e.sourceID != "" {
-		return "", fmt.Errorf("use RunSource for source %q", e.sourceID)
-	}
-	if issue <= 0 {
-		return "", fmt.Errorf("issue must be positive")
-	}
 	task, created, err := e.ensureTask(ctx, issue)
 	if err != nil {
 		return "", err
 	}
-	return e.runTask(ctx, task, created)
-}
-
-func (e *Engine) runTask(ctx context.Context, task *store.Task, created bool) (string, error) {
-	var err error
 	// Only a pre-existing task can have drifted from the current --config. One
 	// created on this very call carries e's own workflowSource as its snapshot by
 	// construction, so re-parsing it would be redundant work and an extra failure
@@ -262,9 +238,6 @@ func (e *Engine) runTask(ctx context.Context, task *store.Task, created bool) (s
 // applying to in-flight work the moment someone edits a file. Changing policy
 // for a running task is therefore an explicit act — cancel it, or let it settle.
 func (e *Engine) engineForTask(task *store.Task) (*Engine, error) {
-	if task.SourceID != e.sourceID {
-		return nil, fmt.Errorf("task %s belongs to source %q, configured source is %q", task.ID, task.SourceID, e.sourceID)
-	}
 	if task.WorkflowSnapshot == "" {
 		return e, nil
 	}
@@ -1295,13 +1268,11 @@ func (e *Engine) alert(ctx context.Context, task *store.Task, msg string) {
 		e.log.Warn("failed to record alert", "task", task.ID, "err", err)
 	}
 	e.notify(ctx, notify.Event{
-		TaskID:    task.ID,
-		Issue:     task.Issue,
-		SourceID:  task.SourceID,
-		SourceKey: task.SourceKey,
-		State:     task.CurrentState,
-		Kind:      "alert",
-		Detail:    msg,
+		TaskID: task.ID,
+		Issue:  task.Issue,
+		State:  task.CurrentState,
+		Kind:   "alert",
+		Detail: msg,
 	})
 }
 
@@ -1321,12 +1292,10 @@ func (e *Engine) notifyTerminalAlert(ctx context.Context, task *store.Task) {
 		return
 	}
 	ev := notify.Event{
-		TaskID:    task.ID,
-		Issue:     task.Issue,
-		SourceID:  task.SourceID,
-		SourceKey: task.SourceKey,
-		State:     task.CurrentState,
-		Kind:      "escalated",
+		TaskID: task.ID,
+		Issue:  task.Issue,
+		State:  task.CurrentState,
+		Kind:   "escalated",
 	}
 	e.explain(ctx, task, &ev)
 	e.notify(ctx, ev)

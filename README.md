@@ -468,3 +468,11 @@ orchestratord validate path/to/your-workflow.yaml
   `run_as: non_root` + `sandbox`.
 - Task handoff is a **context file + single-line kickoff**, never an inline
   multi-line prompt typed through the pane.
+
+### Issue sources and code hosting
+
+Work intake is now a separate `source.Source` dependency from GitHub pull-request
+operations. The engine and scheduler support opaque external item IDs, providing
+the extension point for sources such as Notion while retaining existing GitHub
+workflows. The shipped CLI still selects GitHub issues; no Notion connection is
+included yet. See [the source adapter guide](docs/issue-sources.md).

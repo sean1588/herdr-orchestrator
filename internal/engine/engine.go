@@ -34,6 +34,7 @@ import (
 	"github.com/sean1588/herdr-orchestrator/internal/exec"
 	"github.com/sean1588/herdr-orchestrator/internal/github"
 	"github.com/sean1588/herdr-orchestrator/internal/notify"
+	"github.com/sean1588/herdr-orchestrator/internal/source"
 	"github.com/sean1588/herdr-orchestrator/internal/store"
 )
 
@@ -87,10 +88,14 @@ const CancelState = "cancelled"
 
 // Config wires the engine's dependencies and tunables.
 type Config struct {
-	Workflow *config.Workflow
-	Backend  exec.ExecutionBackend
-	GitHub   github.Client
-	Store    *store.Store
+	Workflow       *config.Workflow
+	Backend        exec.ExecutionBackend
+	GitHub         github.Client // Compatibility wiring; prefer PullRequests and Source.
+	PullRequests   github.PullRequests
+	Source         source.Source
+	SourceID       string // Stable collection identity; required for RunSource.
+	SourceSelector source.Selector
+	Store          *store.Store
 
 	// WorkflowSource is the raw config bytes snapshotted onto each new task, so
 	// every later drive resumes against the graph the task started under (see
@@ -122,7 +127,10 @@ type Config struct {
 type Engine struct {
 	wf             *config.Workflow
 	backend        exec.ExecutionBackend
-	gh             github.Client
+	gh             github.PullRequests
+	source         source.Source
+	sourceID       string
+	selector       source.Selector
 	store          *store.Store
 	workflowSource []byte
 
@@ -143,7 +151,10 @@ func New(c Config) *Engine {
 	e := &Engine{
 		wf:             c.Workflow,
 		backend:        c.Backend,
-		gh:             c.GitHub,
+		gh:             c.PullRequests,
+		source:         c.Source,
+		sourceID:       c.SourceID,
+		selector:       c.SourceSelector,
 		store:          c.Store,
 		workflowSource: c.WorkflowSource,
 		repoDir:        c.RepoDir,
@@ -156,6 +167,12 @@ func New(c Config) *Engine {
 		parseDur:       c.DurationFunc,
 		log:            c.Logger,
 		notifier:       c.Notifier,
+	}
+	if e.gh == nil {
+		e.gh = c.GitHub
+	}
+	if e.source == nil && c.GitHub != nil && c.SourceID == "" {
+		e.source = github.IssueSource{Client: c.GitHub, RepoDir: c.RepoDir}
 	}
 	if e.taskDir == "" {
 		e.taskDir = os.TempDir()
@@ -201,10 +218,21 @@ func New(c Config) *Engine {
 // so without this an operator editing the config file would silently change the
 // rules for work already in flight.
 func (e *Engine) Run(ctx context.Context, issue int) (string, error) {
+	if e.sourceID != "" {
+		return "", fmt.Errorf("use RunSource for source %q", e.sourceID)
+	}
+	if issue <= 0 {
+		return "", fmt.Errorf("issue must be positive")
+	}
 	task, created, err := e.ensureTask(ctx, issue)
 	if err != nil {
 		return "", err
 	}
+	return e.runTask(ctx, task, created)
+}
+
+func (e *Engine) runTask(ctx context.Context, task *store.Task, created bool) (string, error) {
+	var err error
 	// Only a pre-existing task can have drifted from the current --config. One
 	// created on this very call carries e's own workflowSource as its snapshot by
 	// construction, so re-parsing it would be redundant work and an extra failure
@@ -234,6 +262,9 @@ func (e *Engine) Run(ctx context.Context, issue int) (string, error) {
 // applying to in-flight work the moment someone edits a file. Changing policy
 // for a running task is therefore an explicit act — cancel it, or let it settle.
 func (e *Engine) engineForTask(task *store.Task) (*Engine, error) {
+	if task.SourceID != e.sourceID {
+		return nil, fmt.Errorf("task %s belongs to source %q, configured source is %q", task.ID, task.SourceID, e.sourceID)
+	}
 	if task.WorkflowSnapshot == "" {
 		return e, nil
 	}
@@ -1064,9 +1095,9 @@ func (e *Engine) agentTask(ctx context.Context, task *store.Task, st config.Stat
 // writeTaskFile fetches the issue and writes its title+body to a context file.
 // The multi-line body is NEVER sent through the pane — only the kickoff is.
 func (e *Engine) writeTaskFile(ctx context.Context, task *store.Task) (string, error) {
-	issue, err := e.gh.Issue(ctx, e.repoDir, task.Issue)
+	issue, err := e.sourceItem(ctx, task)
 	if err != nil {
-		return "", fmt.Errorf("fetch issue %d: %w", task.Issue, err)
+		return "", fmt.Errorf("fetch source item %q: %w", sourceKey(task), err)
 	}
 	path := filepath.Join(e.taskDir, "task-"+task.ID+".md")
 	body := fmt.Sprintf("# %s\n\n%s\n", issue.Title, issue.Body)
@@ -1164,36 +1195,20 @@ func (e *Engine) advance(ctx context.Context, task *store.Task, next, trigger, r
 		return fmt.Errorf("persist transition %s->%s: %w", from, next, err)
 	}
 	e.log.Info("transition", "task", task.ID, "from", from, "to", next, "trigger", trigger, "result", result)
-	e.maybeDrainLabel(ctx, task)
+	e.maybeAcknowledgeSource(ctx, task)
 	return nil
 }
 
-// maybeDrainLabel removes the source label once a task settles, so the label
-// stops meaning "the backlog plus everything ever completed".
-//
-// The daemon also drains it from doneChecker.done, but that path is only reached
-// for an issue ListIssues just returned — and `gh issue list` defaults to open
-// issues, while the success path closes the issue as part of the merge. So for
-// the one outcome the pipeline exists to produce, the poll-time drain can never
-// run. Draining here instead keys on the settle itself, which every terminal
-// reaches through advance: merged, closed, escalated, and the detached writes
-// that settle an operator cancel or a reaped drive.
-//
-// Best-effort and deliberately after the state write: the transition is the
-// durable fact, and a label left behind must never fail a drive or re-run a
-// terminal transition. The poll-time drain remains as the idempotent backstop
-// for tasks that settle while their issue is still open.
-func (e *Engine) maybeDrainLabel(ctx context.Context, task *store.Task) {
+// maybeAcknowledgeSource removes settled work from discovery. This is separate
+// from successful completion: rejection, escalation, and cancellation must not
+// mark an external item done. Run after the durable transition and best-effort,
+// so an unavailable source cannot undo a merge. The poller can retry the ack.
+func (e *Engine) maybeAcknowledgeSource(ctx context.Context, task *store.Task) {
 	if !e.isSettled(task.CurrentState) {
 		return
 	}
-	label := e.wf.SourceLabel()
-	if label == "" {
-		return // no labeled source: nothing to drain
-	}
-	if err := e.gh.RemoveLabel(ctx, e.repoDir, task.Issue, label); err != nil {
-		e.log.Warn("remove source label after settle failed", "task", task.ID,
-			"issue", task.Issue, "label", label, "err", err)
+	if err := e.acknowledge(ctx, task); err != nil {
+		e.log.Warn("acknowledge source after settle failed", "task", task.ID, "err", err)
 	}
 }
 
@@ -1280,11 +1295,13 @@ func (e *Engine) alert(ctx context.Context, task *store.Task, msg string) {
 		e.log.Warn("failed to record alert", "task", task.ID, "err", err)
 	}
 	e.notify(ctx, notify.Event{
-		TaskID: task.ID,
-		Issue:  task.Issue,
-		State:  task.CurrentState,
-		Kind:   "alert",
-		Detail: msg,
+		TaskID:    task.ID,
+		Issue:     task.Issue,
+		SourceID:  task.SourceID,
+		SourceKey: task.SourceKey,
+		State:     task.CurrentState,
+		Kind:      "alert",
+		Detail:    msg,
 	})
 }
 
@@ -1304,10 +1321,12 @@ func (e *Engine) notifyTerminalAlert(ctx context.Context, task *store.Task) {
 		return
 	}
 	ev := notify.Event{
-		TaskID: task.ID,
-		Issue:  task.Issue,
-		State:  task.CurrentState,
-		Kind:   "escalated",
+		TaskID:    task.ID,
+		Issue:     task.Issue,
+		SourceID:  task.SourceID,
+		SourceKey: task.SourceKey,
+		State:     task.CurrentState,
+		Kind:      "escalated",
 	}
 	e.explain(ctx, task, &ev)
 	e.notify(ctx, ev)

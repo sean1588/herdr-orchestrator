@@ -71,7 +71,7 @@ func (e *Engine) runMergeAction(ctx context.Context, task *store.Task, st config
 // open after a successful run.
 func (e *Engine) settleMerged(ctx context.Context, task *store.Task, pr int) {
 	comment := fmt.Sprintf("Merged in #%d by the orchestrator (task %s).", pr, task.ID)
-	if err := e.gh.CloseIssue(ctx, e.repoDir, task.Issue, comment); err != nil {
+	if err := e.completeSource(ctx, task, comment); err != nil {
 		e.log.Warn("close issue after merge failed", "task", task.ID, "issue", task.Issue, "err", err)
 	}
 	if err := e.gh.DeleteRemoteBranch(ctx, e.repoDir, task.Branch); err != nil {

@@ -21,6 +21,8 @@ const schema = `
 CREATE TABLE IF NOT EXISTS tasks (
     id            TEXT PRIMARY KEY,
     issue         INTEGER NOT NULL,
+    source_id TEXT NOT NULL DEFAULT '',
+    source_key TEXT NOT NULL DEFAULT '',
     repo          TEXT NOT NULL,
     branch        TEXT NOT NULL,
     current_state TEXT NOT NULL,
@@ -101,6 +103,8 @@ func applyMigrations(ctx context.Context, db *sql.DB) error {
 	// distinct from updated_at because updated_at moves on every write (including
 	// an agent-status write), which would make "time in state" meaningless.
 	for _, m := range []struct{ name, stmt string }{
+		{"source_id", `ALTER TABLE tasks ADD COLUMN source_id TEXT NOT NULL DEFAULT ''`},
+		{"source_key", `ALTER TABLE tasks ADD COLUMN source_key TEXT NOT NULL DEFAULT ''`},
 		{"agent_status", `ALTER TABLE tasks ADD COLUMN agent_status TEXT NOT NULL DEFAULT ''`},
 		{"agent_status_at", `ALTER TABLE tasks ADD COLUMN agent_status_at TEXT NOT NULL DEFAULT ''`},
 		{"state_entered_at", `ALTER TABLE tasks ADD COLUMN state_entered_at TEXT NOT NULL DEFAULT ''`},
@@ -137,9 +141,9 @@ func (s *Store) CreateTask(ctx context.Context, t *Task) error {
 
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO tasks
-			(id, issue, repo, branch, current_state, pane_id, pane_spawn_state, workflow_snapshot, state_entry_head, agent_status, agent_status_at, state_entered_at, pr_number, retry_counts, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		t.ID, t.Issue, t.Repo, t.Branch, t.CurrentState, t.PaneID, t.PaneSpawnState, t.WorkflowSnapshot,
+			(id, issue, source_id, source_key, repo, branch, current_state, pane_id, pane_spawn_state, workflow_snapshot, state_entry_head, agent_status, agent_status_at, state_entered_at, pr_number, retry_counts, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		t.ID, t.Issue, t.SourceID, t.SourceKey, t.Repo, t.Branch, t.CurrentState, t.PaneID, t.PaneSpawnState, t.WorkflowSnapshot,
 		t.StateEntryHead, t.AgentStatus, formatTime(t.AgentStatusAt), formatTime(t.StateEnteredAt),
 		prNumberArg(t.PRNumber), rc,
 		t.CreatedAt.Format(timeLayout), t.UpdatedAt.Format(timeLayout),
@@ -153,7 +157,7 @@ func (s *Store) CreateTask(ctx context.Context, t *Task) error {
 // GetTask returns the task with the given id, or ErrNotFound.
 func (s *Store) GetTask(ctx context.Context, id string) (*Task, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, issue, repo, branch, current_state, pane_id, pane_spawn_state, workflow_snapshot, state_entry_head, agent_status, agent_status_at, state_entered_at, pr_number, retry_counts, created_at, updated_at
+		SELECT id, issue, source_id, source_key, repo, branch, current_state, pane_id, pane_spawn_state, workflow_snapshot, state_entry_head, agent_status, agent_status_at, state_entered_at, pr_number, retry_counts, created_at, updated_at
 		FROM tasks WHERE id = ?`, id)
 
 	t, err := scanTask(row)
@@ -203,7 +207,7 @@ func (s *Store) UpdateTask(ctx context.Context, t *Task) error {
 // filter terminal states themselves.
 func (s *Store) List(ctx context.Context) ([]Task, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, issue, repo, branch, current_state, pane_id, pane_spawn_state, workflow_snapshot, state_entry_head, agent_status, agent_status_at, state_entered_at, pr_number, retry_counts, created_at, updated_at
+		SELECT id, issue, source_id, source_key, repo, branch, current_state, pane_id, pane_spawn_state, workflow_snapshot, state_entry_head, agent_status, agent_status_at, state_entered_at, pr_number, retry_counts, created_at, updated_at
 		FROM tasks ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("store: list tasks: %w", err)
@@ -309,7 +313,7 @@ func scanTask(sc scanner) (*Task, error) {
 		statusAt  string
 		enteredAt string
 	)
-	if err := sc.Scan(&t.ID, &t.Issue, &t.Repo, &t.Branch, &t.CurrentState, &t.PaneID, &t.PaneSpawnState,
+	if err := sc.Scan(&t.ID, &t.Issue, &t.SourceID, &t.SourceKey, &t.Repo, &t.Branch, &t.CurrentState, &t.PaneID, &t.PaneSpawnState,
 		&t.WorkflowSnapshot, &t.StateEntryHead, &t.AgentStatus, &statusAt, &enteredAt,
 		&pr, &rc, &created, &updated); err != nil {
 		return nil, err

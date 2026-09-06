@@ -139,9 +139,9 @@ func (e *Engine) triageTask(ctx context.Context, task *store.Task, decisionName 
 	if err != nil {
 		return "", "", fmt.Errorf("decision %q: %w", decisionName, err)
 	}
-	issue, err := e.gh.Issue(ctx, e.repoDir, task.Issue)
+	issue, err := e.sourceItem(ctx, task)
 	if err != nil {
-		return "", "", fmt.Errorf("triage: fetch issue %d: %w", task.Issue, err)
+		return "", "", fmt.Errorf("triage: fetch source item %q: %w", sourceKey(task), err)
 	}
 	path := filepath.Join(e.taskDir, "triage-task-"+task.ID+".md")
 	body := fmt.Sprintf("%s\n\n## Issue under triage\n\n# %s\n\n%s\n", rubric, issue.Title, issue.Body)
@@ -153,8 +153,8 @@ func (e *Engine) triageTask(ctx context.Context, task *store.Task, decisionName 
 	}
 	vp := verdictPath(e.taskDir, task.ID)
 	kickoff = fmt.Sprintf(
-		"Triage issue #%d following the rubric in %s. When done, write your verdict as JSON {\"verdict\": one of %v, \"feedback\": \"...\"} to %s. Stop when the verdict file is written.",
-		task.Issue, path, d.Verdicts, vp)
+		"Triage issue %s following the rubric in %s. When done, write your verdict as JSON {\"verdict\": one of %v, \"feedback\": \"...\"} to %s. Stop when the verdict file is written.",
+		sourceDisplay(task), path, d.Verdicts, vp)
 	return path, kickoff, nil
 }
 

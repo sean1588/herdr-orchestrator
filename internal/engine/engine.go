@@ -34,6 +34,7 @@ import (
 	"github.com/sean1588/herdr-orchestrator/internal/exec"
 	"github.com/sean1588/herdr-orchestrator/internal/github"
 	"github.com/sean1588/herdr-orchestrator/internal/notify"
+	"github.com/sean1588/herdr-orchestrator/internal/source"
 	"github.com/sean1588/herdr-orchestrator/internal/store"
 )
 
@@ -87,10 +88,11 @@ const CancelState = "cancelled"
 
 // Config wires the engine's dependencies and tunables.
 type Config struct {
-	Workflow *config.Workflow
-	Backend  exec.ExecutionBackend
-	GitHub   github.Client
-	Store    *store.Store
+	Workflow     *config.Workflow
+	Backend      exec.ExecutionBackend
+	PullRequests github.PullRequests
+	Source       source.Source
+	Store        *store.Store
 
 	// WorkflowSource is the raw config bytes snapshotted onto each new task, so
 	// every later drive resumes against the graph the task started under (see
@@ -122,7 +124,8 @@ type Config struct {
 type Engine struct {
 	wf             *config.Workflow
 	backend        exec.ExecutionBackend
-	gh             github.Client
+	gh             github.PullRequests
+	source         source.Source
 	store          *store.Store
 	workflowSource []byte
 
@@ -143,7 +146,8 @@ func New(c Config) *Engine {
 	e := &Engine{
 		wf:             c.Workflow,
 		backend:        c.Backend,
-		gh:             c.GitHub,
+		gh:             c.PullRequests,
+		source:         c.Source,
 		store:          c.Store,
 		workflowSource: c.WorkflowSource,
 		repoDir:        c.RepoDir,
@@ -1064,9 +1068,9 @@ func (e *Engine) agentTask(ctx context.Context, task *store.Task, st config.Stat
 // writeTaskFile fetches the issue and writes its title+body to a context file.
 // The multi-line body is NEVER sent through the pane — only the kickoff is.
 func (e *Engine) writeTaskFile(ctx context.Context, task *store.Task) (string, error) {
-	issue, err := e.gh.Issue(ctx, e.repoDir, task.Issue)
+	issue, err := e.sourceItem(ctx, task)
 	if err != nil {
-		return "", fmt.Errorf("fetch issue %d: %w", task.Issue, err)
+		return "", fmt.Errorf("fetch source item %q: %w", sourceKey(task), err)
 	}
 	path := filepath.Join(e.taskDir, "task-"+task.ID+".md")
 	body := fmt.Sprintf("# %s\n\n%s\n", issue.Title, issue.Body)
@@ -1164,36 +1168,20 @@ func (e *Engine) advance(ctx context.Context, task *store.Task, next, trigger, r
 		return fmt.Errorf("persist transition %s->%s: %w", from, next, err)
 	}
 	e.log.Info("transition", "task", task.ID, "from", from, "to", next, "trigger", trigger, "result", result)
-	e.maybeDrainLabel(ctx, task)
+	e.maybeAcknowledgeSource(ctx, task)
 	return nil
 }
 
-// maybeDrainLabel removes the source label once a task settles, so the label
-// stops meaning "the backlog plus everything ever completed".
-//
-// The daemon also drains it from doneChecker.done, but that path is only reached
-// for an issue ListIssues just returned — and `gh issue list` defaults to open
-// issues, while the success path closes the issue as part of the merge. So for
-// the one outcome the pipeline exists to produce, the poll-time drain can never
-// run. Draining here instead keys on the settle itself, which every terminal
-// reaches through advance: merged, closed, escalated, and the detached writes
-// that settle an operator cancel or a reaped drive.
-//
-// Best-effort and deliberately after the state write: the transition is the
-// durable fact, and a label left behind must never fail a drive or re-run a
-// terminal transition. The poll-time drain remains as the idempotent backstop
-// for tasks that settle while their issue is still open.
-func (e *Engine) maybeDrainLabel(ctx context.Context, task *store.Task) {
+// maybeAcknowledgeSource removes settled work from discovery. This is separate
+// from successful completion: rejection, escalation, and cancellation must not
+// mark an external item done. Run after the durable transition and best-effort,
+// so an unavailable source cannot undo a merge. The poller can retry the ack.
+func (e *Engine) maybeAcknowledgeSource(ctx context.Context, task *store.Task) {
 	if !e.isSettled(task.CurrentState) {
 		return
 	}
-	label := e.wf.SourceLabel()
-	if label == "" {
-		return // no labeled source: nothing to drain
-	}
-	if err := e.gh.RemoveLabel(ctx, e.repoDir, task.Issue, label); err != nil {
-		e.log.Warn("remove source label after settle failed", "task", task.ID,
-			"issue", task.Issue, "label", label, "err", err)
+	if err := e.acknowledge(ctx, task); err != nil {
+		e.log.Warn("acknowledge source after settle failed", "task", task.ID, "err", err)
 	}
 }
 

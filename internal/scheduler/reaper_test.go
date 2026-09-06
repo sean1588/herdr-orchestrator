@@ -98,7 +98,7 @@ func TestReaperLeavesAHealthyDriveAlone(t *testing.T) {
 // worker. There is no drive to bound, and its zero start time would otherwise
 // read as "infinitely old" and be reaped instantly.
 func TestReapSkipsClaimedButUnarmedIssues(t *testing.T) {
-	set := &inflightSet{m: map[int]*driveHandle{}}
+	set := &inflightSet[int]{m: map[int]*driveHandle{}}
 	set.add(7)
 
 	if got := set.reap(time.Nanosecond, time.Now(), errTestDeadline); len(got) != 0 {

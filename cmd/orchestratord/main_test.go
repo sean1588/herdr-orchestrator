@@ -259,7 +259,7 @@ func TestDoneChecker_DrainsLabelOnSettled(t *testing.T) {
 				}
 			}
 			gh := &fakeGH{}
-			dc := doneChecker{gh: gh, store: st, settled: settled, repoDir: "/repo", label: "agent-ready", log: discardLogger()}
+			dc := doneChecker{source: github.IssueSource{Client: gh, RepoDir: "/repo"}, store: st, settled: settled, label: "agent-ready", log: discardLogger()}
 
 			done, err := dc.done(ctx, issue)
 			if err != nil {
@@ -297,7 +297,7 @@ func TestDoneChecker_LabelRemovalFailureDoesNotBlock(t *testing.T) {
 		t.Fatalf("CreateTask: %v", err)
 	}
 	gh := &fakeGH{removeErr: errors.New("gh offline")}
-	dc := doneChecker{gh: gh, store: st, settled: map[string]bool{"merging": true}, repoDir: "/repo", label: "agent-ready", log: discardLogger()}
+	dc := doneChecker{source: github.IssueSource{Client: gh, RepoDir: "/repo"}, store: st, settled: map[string]bool{"merging": true}, label: "agent-ready", log: discardLogger()}
 
 	done, err := dc.done(ctx, issue)
 	if err != nil {

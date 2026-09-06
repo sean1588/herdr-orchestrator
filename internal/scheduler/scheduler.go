@@ -10,7 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"sort"
+	"slices"
 	"sync"
 	"time"
 )
@@ -25,11 +25,17 @@ const defaultInterval = 30 * time.Second
 
 // Scheduler drives discovered issues concurrently. All external dependencies are
 // injected as funcs so it is unit-testable without the engine, store, or gh.
-type Scheduler struct {
-	List     func(ctx context.Context) ([]int, error)           // discover candidate issues
-	Done     func(ctx context.Context, issue int) (bool, error) // true iff a SETTLED task exists (terminal or cancelled)
-	RunTask  func(ctx context.Context, issue int) error         // drive one issue to completion
-	SeedFrom func(ctx context.Context) ([]int, error)           // non-settled issues to resume at startup
+// Scheduler preserves the numeric GitHub control API.
+type Scheduler = SchedulerOf[int]
+
+// SchedulerOf also accepts opaque string keys for sources such as Notion.
+// A scheduler serves one source collection; use source-qualified keys when
+// multiplexing collections to avoid sharing claims between unrelated items.
+type SchedulerOf[K ~int | ~string] struct {
+	List     func(ctx context.Context) ([]K, error)           // discover candidate issues
+	Done     func(ctx context.Context, issue K) (bool, error) // true iff a SETTLED task exists (terminal or cancelled)
+	RunTask  func(ctx context.Context, issue K) error         // drive one issue to completion
+	SeedFrom func(ctx context.Context) ([]K, error)           // non-settled issues to resume at startup
 	Interval time.Duration
 	Workers  int
 	Log      *slog.Logger
@@ -55,7 +61,7 @@ type Scheduler struct {
 	// Control seam (nil unless EnableControl): the MCP server submits commands
 	// here and Serve processes them in the poller goroutine. cancelCause is the
 	// cause an operator cancel carries (the daemon wires engine.ErrOperatorCancel).
-	commands    chan command
+	commands    chan command[K]
 	cancelCause error
 }
 
@@ -66,35 +72,35 @@ const (
 	cmdCancel
 )
 
-type command struct {
+type command[K ~int | ~string] struct {
 	kind  cmdKind
-	issue int
+	issue K
 	reply chan error // buffered(1); the poller never blocks replying
 }
 
 // EnableControl turns on the external control surface: Enqueue/Cancel become
 // live and Serve processes their commands. cancelCause is the cause an operator
 // cancel carries (the daemon passes engine.ErrOperatorCancel).
-func (s *Scheduler) EnableControl(cancelCause error) {
-	s.commands = make(chan command)
+func (s *SchedulerOf[K]) EnableControl(cancelCause error) {
+	s.commands = make(chan command[K])
 	s.cancelCause = cancelCause
 }
 
 // Enqueue re-drives an issue by number. Idempotent: a no-op if the issue is
 // already in flight. Satisfies the MCP control surface.
-func (s *Scheduler) Enqueue(ctx context.Context, issue int) error {
-	return s.submit(ctx, command{kind: cmdEnqueue, issue: issue})
+func (s *SchedulerOf[K]) Enqueue(ctx context.Context, issue K) error {
+	return s.submit(ctx, command[K]{kind: cmdEnqueue, issue: issue})
 }
 
 // Cancel cancels the running drive for an issue, erroring if none is running.
 // Satisfies the MCP control surface.
-func (s *Scheduler) Cancel(ctx context.Context, issue int) error {
-	return s.submit(ctx, command{kind: cmdCancel, issue: issue})
+func (s *SchedulerOf[K]) Cancel(ctx context.Context, issue K) error {
+	return s.submit(ctx, command[K]{kind: cmdCancel, issue: issue})
 }
 
 // submit sends a command to the poller and waits for its reply, honoring ctx so
 // a caller (an MCP request) is never wedged if the daemon is shutting down.
-func (s *Scheduler) submit(ctx context.Context, c command) error {
+func (s *SchedulerOf[K]) submit(ctx context.Context, c command[K]) error {
 	if s.commands == nil {
 		return errors.New("scheduler control not enabled")
 	}
@@ -118,7 +124,7 @@ func (s *Scheduler) submit(ctx context.Context, c command) error {
 // blocked_on_gate merge-gate wait that suspended rather than pinning its slot for
 // the whole wait — is resumed to re-check its gate. On cancellation it stops the
 // poller, lets the workers drain (each drive returns when ctx is done), and returns.
-func (s *Scheduler) Serve(ctx context.Context) error {
+func (s *SchedulerOf[K]) Serve(ctx context.Context) error {
 	if s.Log == nil {
 		s.Log = slog.Default()
 	}
@@ -129,8 +135,8 @@ func (s *Scheduler) Serve(ctx context.Context) error {
 	if s.Now == nil {
 		s.Now = time.Now
 	}
-	work := make(chan int, queueDepth)
-	inflight := &inflightSet{m: map[int]*driveHandle{}}
+	work := make(chan K, queueDepth)
+	inflight := &inflightSet[K]{m: map[K]*driveHandle{}}
 
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
@@ -195,7 +201,7 @@ const maxReapInterval = 30 * time.Second
 // startReaper launches the deadline sweep and returns a channel closed when it
 // stops. A zero DriveDeadline disables it, and the returned channel is already
 // closed so Serve's shutdown path need not special-case it.
-func (s *Scheduler) startReaper(ctx context.Context, inflight *inflightSet) <-chan struct{} {
+func (s *SchedulerOf[K]) startReaper(ctx context.Context, inflight *inflightSet[K]) <-chan struct{} {
 	done := make(chan struct{})
 	if s.DriveDeadline <= 0 {
 		close(done)
@@ -236,7 +242,7 @@ func (s *Scheduler) startReaper(ctx context.Context, inflight *inflightSet) <-ch
 // at startup and on every poll so a task that yielded its worker mid-drive (a
 // suspended blocked_on_gate wait) is resumed; enqueue's inflight and Done checks
 // keep it from racing a task already being driven or one that has since settled.
-func (s *Scheduler) seed(ctx context.Context, work chan int, inflight *inflightSet) {
+func (s *SchedulerOf[K]) seed(ctx context.Context, work chan K, inflight *inflightSet[K]) {
 	if s.SeedFrom == nil {
 		return
 	}
@@ -250,7 +256,7 @@ func (s *Scheduler) seed(ctx context.Context, work chan int, inflight *inflightS
 
 // enqueue adds issues that are neither in-flight nor already done. It never
 // blocks: a full channel means the issue is skipped and re-discovered next poll.
-func (s *Scheduler) enqueue(ctx context.Context, work chan int, inflight *inflightSet, issues []int) {
+func (s *SchedulerOf[K]) enqueue(ctx context.Context, work chan K, inflight *inflightSet[K], issues []K) {
 	for _, issue := range issues {
 		if inflight.has(issue) {
 			continue
@@ -280,7 +286,7 @@ func (s *Scheduler) enqueue(ctx context.Context, work chan int, inflight *inflig
 // so an enqueue keeps Serve the single sender on the work channel, and a cancel
 // reads the inflight set without a second owner. The reply channel is buffered,
 // so this never blocks on a caller that has already given up (a cancelled request).
-func (s *Scheduler) handleCommand(ctx context.Context, c command, work chan int, inflight *inflightSet) {
+func (s *SchedulerOf[K]) handleCommand(ctx context.Context, c command[K], work chan K, inflight *inflightSet[K]) {
 	switch c.kind {
 	case cmdEnqueue:
 		c.reply <- s.enqueueOne(ctx, work, inflight, c.issue)
@@ -288,7 +294,7 @@ func (s *Scheduler) handleCommand(ctx context.Context, c command, work chan int,
 		if inflight.cancel(c.issue, s.cancelCause) {
 			c.reply <- nil
 		} else {
-			c.reply <- fmt.Errorf("issue %d is not currently running", c.issue)
+			c.reply <- fmt.Errorf("issue %v is not currently running", c.issue)
 		}
 	default:
 		c.reply <- fmt.Errorf("unknown command kind %d", c.kind)
@@ -301,17 +307,17 @@ func (s *Scheduler) handleCommand(ctx context.Context, c command, work chan int,
 // poller's batch enqueue (fire-and-forget: a labelled issue is re-discovered next
 // poll), a manual enqueue has no such backstop, so its disposition must be honest.
 // An already-in-flight issue is a benign success (it is being driven).
-func (s *Scheduler) enqueueOne(ctx context.Context, work chan int, inflight *inflightSet, issue int) error {
+func (s *SchedulerOf[K]) enqueueOne(ctx context.Context, work chan K, inflight *inflightSet[K], issue K) error {
 	if inflight.has(issue) {
 		return nil // already being driven
 	}
 	if s.Done != nil {
 		done, err := s.Done(ctx, issue)
 		if err != nil {
-			return fmt.Errorf("issue %d: readiness check failed: %w", issue, err)
+			return fmt.Errorf("issue %v: readiness check failed: %w", issue, err)
 		}
 		if done {
-			return fmt.Errorf("issue %d has already settled; not re-driven", issue)
+			return fmt.Errorf("issue %v has already settled; not re-driven", issue)
 		}
 	}
 	if !inflight.add(issue) {
@@ -322,7 +328,7 @@ func (s *Scheduler) enqueueOne(ctx context.Context, work chan int, inflight *inf
 		return nil
 	default:
 		inflight.remove(issue)
-		return fmt.Errorf("issue %d not enqueued: work queue full, retry", issue)
+		return fmt.Errorf("issue %v not enqueued: work queue full, retry", issue)
 	}
 }
 
@@ -333,9 +339,9 @@ func (s *Scheduler) enqueueOne(ctx context.Context, work chan int, inflight *inf
 // dies with the same per-issue claim, needing no second structure. Per-issue
 // registration is serialized (one worker per issue at a time), so a mutex-guarded
 // map is race-free.
-type inflightSet struct {
+type inflightSet[K ~int | ~string] struct {
 	mu sync.Mutex
-	m  map[int]*driveHandle
+	m  map[K]*driveHandle
 }
 
 // driveHandle is one issue's claim: its cancel func once a worker picks it up
@@ -349,7 +355,7 @@ type driveHandle struct {
 	started time.Time
 }
 
-func (s *inflightSet) add(issue int) bool { // true if newly claimed
+func (s *inflightSet[K]) add(issue K) bool { // true if newly claimed
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.m[issue]; ok {
@@ -361,7 +367,7 @@ func (s *inflightSet) add(issue int) bool { // true if newly claimed
 
 // arm records the running drive's cancel func and start time for an
 // already-claimed issue.
-func (s *inflightSet) arm(issue int, cancel context.CancelCauseFunc, started time.Time) {
+func (s *inflightSet[K]) arm(issue K, cancel context.CancelCauseFunc, started time.Time) {
 	s.mu.Lock()
 	if h, ok := s.m[issue]; ok {
 		h.cancel, h.started = cancel, started
@@ -371,7 +377,7 @@ func (s *inflightSet) arm(issue int, cancel context.CancelCauseFunc, started tim
 
 // cancel invokes the issue's cancel func with cause, returning false if the issue
 // is not currently being driven (unclaimed, or claimed but not yet armed).
-func (s *inflightSet) cancel(issue int, cause error) bool {
+func (s *inflightSet[K]) cancel(issue K, cause error) bool {
 	s.mu.Lock()
 	var cancel context.CancelCauseFunc
 	if h, ok := s.m[issue]; ok {
@@ -391,10 +397,10 @@ func (s *inflightSet) cancel(issue int, cause error) bool {
 // the worker for ownership. Cancelling twice is harmless — the second call on an
 // already-cancelled context is a no-op — so a drive that finished between the
 // sweep and the cancel is unaffected.
-func (s *inflightSet) reap(deadline time.Duration, now time.Time, cause error) []int {
+func (s *inflightSet[K]) reap(deadline time.Duration, now time.Time, cause error) []K {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var reaped []int
+	var reaped []K
 	for issue, h := range s.m {
 		if h.cancel == nil || h.started.IsZero() {
 			continue // claimed but not yet running; no drive to bound
@@ -404,17 +410,17 @@ func (s *inflightSet) reap(deadline time.Duration, now time.Time, cause error) [
 			reaped = append(reaped, issue)
 		}
 	}
-	sort.Ints(reaped) // deterministic log order
+	slices.Sort(reaped) // deterministic log order
 	return reaped
 }
 
-func (s *inflightSet) remove(issue int) {
+func (s *inflightSet[K]) remove(issue K) {
 	s.mu.Lock()
 	delete(s.m, issue)
 	s.mu.Unlock()
 }
 
-func (s *inflightSet) has(issue int) bool {
+func (s *inflightSet[K]) has(issue K) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, ok := s.m[issue]

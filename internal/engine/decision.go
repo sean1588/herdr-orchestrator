@@ -139,9 +139,9 @@ func (e *Engine) triageTask(ctx context.Context, task *store.Task, decisionName 
 	if err != nil {
 		return "", "", fmt.Errorf("decision %q: %w", decisionName, err)
 	}
-	issue, err := e.gh.Issue(ctx, e.repoDir, task.Issue)
+	issue, err := e.sourceItem(ctx, task)
 	if err != nil {
-		return "", "", fmt.Errorf("triage: fetch issue %d: %w", task.Issue, err)
+		return "", "", fmt.Errorf("triage: fetch source item %q: %w", sourceKey(task), err)
 	}
 	path := filepath.Join(e.taskDir, "triage-task-"+task.ID+".md")
 	body := fmt.Sprintf("%s\n\n## Issue under triage\n\n# %s\n\n%s\n", rubric, issue.Title, issue.Body)

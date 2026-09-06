@@ -44,18 +44,15 @@ func (s PRStatus) ChecksGreen() bool { return s.ChecksFailed == 0 && s.ChecksPen
 // Client reads (and, for Merge, mutates) GitHub state. repoDir is the local
 // checkout to run gh in.
 type Client interface {
+	IssueClient
+	PullRequests
+}
+
+// PullRequests is the code-host boundary. It has no work-intake operations.
+type PullRequests interface {
 	// FindPR returns the open PR whose head branch is `branch`, or (nil, nil) if
 	// none exists. This is the authoritative artifact-detection signal.
 	FindPR(ctx context.Context, repoDir, branch string) (*PR, error)
-	// Issue fetches an issue's title and body by number.
-	Issue(ctx context.Context, repoDir string, number int) (*Issue, error)
-	// ListIssues returns the numbers of issues matching label, via
-	// `gh issue list --label <label> --json number` in repoDir.
-	ListIssues(ctx context.Context, repoDir, label string) ([]int, error)
-	// RemoveLabel removes label from an issue via
-	// `gh issue edit <number> --remove-label <label>` in repoDir. Removing a
-	// label the issue does not carry is a no-op, not an error (gh is idempotent).
-	RemoveLabel(ctx context.Context, repoDir string, number int, label string) error
 	// PRStatus reads the merge-gate inputs (state, checks, reviews, mergeability)
 	// for a PR in one call.
 	PRStatus(ctx context.Context, repoDir string, pr int) (*PRStatus, error)
@@ -67,8 +64,16 @@ type Client interface {
 	// engine calls it best-effort after a confirmed merge, so a branch that
 	// cannot be deleted never fails the merge.
 	DeleteRemoteBranch(ctx context.Context, repoDir, branch string) error
-	// CloseIssue closes an issue with a comment. The orchestrator owns the merge,
-	// so it also settles the issue rather than relying on a "Closes #N" trailer
-	// the implementing agent may not have written.
+}
+
+// IssueClient is the GitHub issue API, separate from pull-request operations.
+type IssueClient interface {
+	// Issue loads an issue's title and body from the given checkout's repository.
+	Issue(ctx context.Context, repoDir string, number int) (*Issue, error)
+	// ListIssues discovers open issues matching label.
+	ListIssues(ctx context.Context, repoDir, label string) ([]int, error)
+	// RemoveLabel acknowledges an issue. Removing an absent label is a no-op.
+	RemoveLabel(ctx context.Context, repoDir string, number int, label string) error
+	// CloseIssue marks successful work complete with a result comment.
 	CloseIssue(ctx context.Context, repoDir string, number int, comment string) error
 }

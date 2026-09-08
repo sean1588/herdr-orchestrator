@@ -75,6 +75,7 @@ func Checks() []Check {
 		{Name: "repo-base-branch", Run: checkBaseBranch},
 		{Name: "repo-base-current", Run: checkBaseCurrent},
 		{Name: "worktrees-dir", Run: checkWorktreesDir},
+		{Name: "task-dir", Run: checkTaskDir},
 		{Name: "store", Run: checkStore},
 		{Name: "kickoff-delivery", Expensive: true, Run: checkKickoffDelivery},
 	}

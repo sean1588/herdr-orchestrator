@@ -63,6 +63,7 @@ func (cf commonFlags) doctorEnv() (doctor.Env, error) {
 		Base:         cf.base,
 		DBPath:       cf.db,
 		WorktreesDir: cf.worktreesDir,
+		TaskDir:      cf.taskDir,
 	}
 	if cf.repo != "" {
 		abs, err := filepath.Abs(cf.repo)

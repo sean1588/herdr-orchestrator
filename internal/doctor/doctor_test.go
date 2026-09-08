@@ -98,6 +98,7 @@ func healthyEnv(t *testing.T) (Env, *proc.Fake) {
 		Base:         "main",
 		Label:        "agent-ready",
 		WorktreesDir: filepath.Join(dir, "wt"),
+		TaskDir:      filepath.Join(dir, "tasks"),
 		DBPath:       filepath.Join(dir, "test.db"),
 		TempDir:      dir,
 		Getenv:       func(string) string { return "" },
@@ -203,6 +204,25 @@ func TestChecks_FailureModes(t *testing.T) {
 			},
 			wantStatus: StatusWarn,
 			wantDetail: "does not exist",
+		},
+		{
+			name:  "task dir not given is a skip, not a silent pass",
+			check: "task-dir",
+			mutate: func(e *Env, f *proc.Fake) {
+				e.TaskDir = ""
+			},
+			wantStatus: StatusSkip,
+			wantDetail: "temp dir",
+		},
+		{
+			name:  "task dir cannot be created",
+			check: "task-dir",
+			mutate: func(e *Env, f *proc.Fake) {
+				// A path below an existing FILE cannot be MkdirAll'd.
+				e.TaskDir = filepath.Join(e.ConfigPath, "tasks")
+			},
+			wantStatus: StatusFail,
+			wantDetail: "cannot create",
 		},
 		{
 			name:  "herdr server unreachable",

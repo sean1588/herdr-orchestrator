@@ -32,6 +32,7 @@ type Env struct {
 	Base         string
 	Label        string
 	WorktreesDir string
+	TaskDir      string
 	DBPath       string
 
 	GitBin, GHBin, HerdrBin string

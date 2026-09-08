@@ -210,6 +210,25 @@ func newEngine(t *testing.T, st *store.Store, b exec.ExecutionBackend, gh github
 	})
 }
 
+func TestNew_CreatesTaskDir(t *testing.T) {
+	// A fresh run dir has no task dir yet, and nothing else creates it: a
+	// missing one used to fail every drive with a per-poll WARN while the task
+	// wedged in intake until its state timeout.
+	wf, _, err := config.Load("../config/testdata/default-pipeline.yaml")
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	dir := filepath.Join(t.TempDir(), "tasks", "nested")
+	New(Config{
+		Workflow: wf,
+		TaskDir:  dir,
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		t.Fatalf("task dir was not created by New: %v", err)
+	}
+}
+
 func newStore(t *testing.T) *store.Store {
 	t.Helper()
 	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))

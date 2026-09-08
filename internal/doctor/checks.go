@@ -259,6 +259,29 @@ func checkWorktreesDir(ctx context.Context, env Env) Result {
 	return pass(name, dir)
 }
 
+// checkTaskDir creates the task-file directory and proves it writable — the
+// engine writes every rubric, context, and verdict file there, and a missing
+// dir used to fail every drive with a per-poll WARN while the task wedged in
+// intake until its state timeout.
+func checkTaskDir(ctx context.Context, env Env) Result {
+	const name = "task-dir"
+	if env.TaskDir == "" {
+		return skip(name, "no --task-dir given; the engine defaults to the OS temp dir")
+	}
+	if err := os.MkdirAll(env.TaskDir, 0o755); err != nil {
+		return fail(name, fmt.Sprintf("cannot create %s: %v", env.TaskDir, err),
+			"point --task-dir at a writable directory")
+	}
+	f, err := os.CreateTemp(env.TaskDir, ".orchestratord-doctor-*")
+	if err != nil {
+		return fail(name, fmt.Sprintf("%s is not writable: %v", env.TaskDir, err),
+			"point --task-dir at a writable directory; every task's context and verdict files live there")
+	}
+	_ = f.Close()
+	_ = os.Remove(f.Name())
+	return pass(name, env.TaskDir)
+}
+
 // checkStore opens the task database, which also applies migrations — so a
 // schema that cannot be brought up to date surfaces here rather than on the
 // first task write.

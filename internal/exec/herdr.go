@@ -30,11 +30,15 @@ const waitBudgetSlack = 30 * time.Second
 type Herdr struct {
 	r proc.Runner
 
-	GitBin       string        // default "git"
-	HerdrBin     string        // default "herdr"
-	WorktreesDir string        // parent dir for worktrees; "" => sibling of the repo
-	RepoDir      string        // main checkout; lets Cleanup resolve a task's worktree path without a live pane
-	ReadyMatch   string        // readiness marker awaited before the kickoff; default ">"
+	GitBin       string // default "git"
+	HerdrBin     string // default "herdr"
+	WorktreesDir string // parent dir for worktrees; "" => sibling of the repo
+	RepoDir      string // main checkout; lets Cleanup resolve a task's worktree path without a live pane
+	// ReadyMatch is the readiness marker awaited before the kickoff, as a regex
+	// against pane output. Claude Code's prompt has rendered both ">" and "❯"
+	// across builds, so the default matches either; a literal ">" silently never
+	// matched on v2.1.236 and the kickoff raced the TUI's startup.
+	ReadyMatch   string
 	ReadyTimeout time.Duration // bound on the readiness wait; default 20s
 	WaitTimeout  time.Duration // WaitState bound when ctx has no sooner deadline; default 45m
 	PollInterval time.Duration // Events poll cadence; default 2s
@@ -62,7 +66,7 @@ func NewHerdr(r proc.Runner) *Herdr {
 		r:            r,
 		GitBin:       "git",
 		HerdrBin:     "herdr",
-		ReadyMatch:   ">",
+		ReadyMatch:   "[>❯]",
 		ReadyTimeout: 20 * time.Second,
 		WaitTimeout:  45 * time.Minute,
 		PollInterval: defaultEventPollInterval,
@@ -123,7 +127,7 @@ func (h *Herdr) Spawn(ctx context.Context, s Spawn) (Handle, error) {
 
 	// Readiness: wait for the prompt before sending the kickoff, instead of a
 	// fixed sleep (Spike 0). A timeout here is non-fatal — proceed to the kickoff.
-	_, _ = h.r.Run(ctx, "", h.HerdrBin, "pane", "wait-output", pane, "--match", h.ReadyMatch, "--timeout", msString(h.ReadyTimeout))
+	_, _ = h.r.Run(ctx, "", h.HerdrBin, "pane", "wait-output", pane, "--regex", h.ReadyMatch, "--timeout", msString(h.ReadyTimeout))
 
 	if err := h.deliverKickoff(ctx, pane, s.Kickoff); err != nil {
 		return hd, err
@@ -166,7 +170,7 @@ func (h *Herdr) SmokeKickoff(ctx context.Context, dir string, launch []string, k
 	if _, err := h.r.Run(ctx, "", h.HerdrBin, "pane", "run", pane, strings.Join(launch, " ")); err != nil {
 		return fmt.Errorf("launch %q on %s: %w", strings.Join(launch, " "), pane, err)
 	}
-	_, _ = h.r.Run(ctx, "", h.HerdrBin, "pane", "wait-output", pane, "--match", h.ReadyMatch, "--timeout", msString(h.ReadyTimeout))
+	_, _ = h.r.Run(ctx, "", h.HerdrBin, "pane", "wait-output", pane, "--regex", h.ReadyMatch, "--timeout", msString(h.ReadyTimeout))
 	return h.deliverKickoff(ctx, pane, kickoff)
 }
 
@@ -243,14 +247,20 @@ func (h *Herdr) kickoffAccepted(ctx context.Context, pane string, before AgentSt
 		switch st := h.currentStatus(ctx, pane); st {
 		case StateWorking, StateDone:
 			return true
-		case before:
-			// no movement yet
+		case before, StateUnknown:
+			// No movement yet; an unknown reading proves nothing either way.
 		default:
-			// Any other change (e.g. idle -> blocked on a permission prompt) still
-			// proves the agent read something.
-			if st != StateUnknown {
-				return true
+			// A change off an UNKNOWN baseline is herdr's classifier settling on
+			// its first real status for a fresh pane, not evidence the kickoff
+			// landed — unknown -> idle is exactly what a dropped kickoff looks
+			// like. Adopt it as the baseline and keep waiting for movement.
+			if before == StateUnknown {
+				before = st
+				continue
 			}
+			// Off a KNOWN baseline, any other change (e.g. idle -> blocked on a
+			// permission prompt) still proves the agent read something.
+			return true
 		}
 		if !time.Now().Before(deadline) {
 			return false

@@ -171,6 +171,12 @@ func New(c Config) *Engine {
 	if abs, err := filepath.Abs(e.taskDir); err == nil {
 		e.taskDir = abs
 	}
+	// The dir must exist before the first task file is written: a missing dir
+	// used to fail every drive with a per-poll WARN and no escalation, wedging
+	// tasks in intake until their state timeout. Best-effort here — a dir that
+	// genuinely cannot be created still fails loudly at the doctor/preflight
+	// task-dir check and on the first write.
+	_ = os.MkdirAll(e.taskDir, 0o755)
 	if e.goal == "" {
 		e.goal = "merged"
 	}

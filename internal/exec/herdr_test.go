@@ -561,3 +561,52 @@ func TestSpawn_KickoffNeverAccepted_FailsLoudly(t *testing.T) {
 		t.Errorf("expected exactly one `pane run` fallback attempt, got %d", n)
 	}
 }
+
+// unknownBaselineFake models the third delivery regression: before the kickoff,
+// herdr's classifier has not settled and `pane list` reports "unknown". After
+// send-text (which drops the kickoff), the status settles to "idle" — the
+// signature of a launched agent with no instruction. Only a `pane run` kickoff
+// lands and flips it to "working".
+func unknownBaselineFake() *proc.Fake {
+	var sentText, delivered atomic.Bool
+	return &proc.Fake{Responder: func(c proc.Call) ([]byte, error) {
+		if c.Name != "herdr" || len(c.Args) < 2 {
+			return nil, nil
+		}
+		switch {
+		case c.Args[0] == "workspace" && c.Args[1] == "create":
+			return []byte(`{"result":{"root_pane":{"pane_id":"w7:p1"}}}`), nil
+		case c.Args[0] == "pane" && c.Args[1] == "send-text":
+			sentText.Store(true)
+		case c.Args[0] == "pane" && c.Args[1] == "run" && len(c.Args) > 3 && strings.HasPrefix(c.Args[3], "Read the task"):
+			delivered.Store(true)
+		case c.Args[0] == "pane" && c.Args[1] == "list":
+			status := "unknown"
+			if sentText.Load() {
+				status = "idle"
+			}
+			if delivered.Load() {
+				status = "working"
+			}
+			return []byte(`{"result":{"panes":[{"pane_id":"w7:p1","agent_status":"` + status + `","workspace_id":"w7"}]}}`), nil
+		}
+		return nil, nil
+	}}
+}
+
+func TestSpawn_ClassifierSettlingIsNotAcceptance(t *testing.T) {
+	// unknown -> idle is herdr's classifier settling on its first real status,
+	// not evidence the kickoff landed. Treating it as acceptance skipped the
+	// fallback and left a mute agent that looked delivered (strata bring-up,
+	// 2026-09-08). The settle must rebaseline, the fallback must fire, and the
+	// spawn must succeed off the fallback's real "working" signal.
+	f := unknownBaselineFake()
+	if _, err := kickoffHerdr(f).Spawn(context.Background(), testSpawn()); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	calls := f.Snapshot()
+	hasExactCall(t, calls, "herdr", "pane", "send-text", "w7:p1", testSpawn().Kickoff)
+	if n := len(kickoffRunCalls(calls)); n != 1 {
+		t.Errorf("expected exactly one `pane run` fallback after the false settle, got %d", n)
+	}
+}

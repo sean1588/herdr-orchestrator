@@ -31,7 +31,8 @@ registered, and a short summary of where everything lives.
   outcomes, never in flag names.
 
 Paths used below. `<clone>` is this repo's checkout (you are in it).
-`<name>` is the target repo's name. The run directory is `~/orchestrator-<name>`.
+`<name>` is the target repo's name. The run directory is `~/orchestrator-runs/<name>`
+(one parent for every run on this machine, so the other skills can list them).
 
 ## 1. herdr
 
@@ -127,18 +128,23 @@ gh repo view <owner>/<name> --json name,defaultBranchRef --jq '.defaultBranchRef
   of `<clone>` named `<name>` first). If none, `gh repo clone <owner>/<name>
   <clone-parent>/<name>`. Call it `<repo-dir>`, absolute.
 
-Trust: the agents run inside `<repo-dir>/.orchestrator/worktrees`, so the
-trust the user already granted the checkout covers them. If the user has never
-opened `claude` in `<repo-dir>`, `doctor` (step 8) will say so.
+Trust: the agents run inside `<repo-dir>/.orchestrator/worktrees`, so whatever
+trust the user granted the checkout covers them. **If you cloned or created
+`<repo-dir>` in this step, the user has never opened `claude` there, and every
+agent would hit Claude Code's folder-trust prompt.** Handle it now, not when
+`doctor` fails on it: tell the user "Open a terminal in `<repo-dir>`, run
+`claude`, accept the trust prompt, then `/exit`, and tell me when that's done."
+Wait for them, then continue. (Nothing can accept that prompt for them; it is
+the one dialog Claude Code reserves for the human.)
 
 ## 6. The run directory
 
 ```bash
-ls ~/orchestrator-<name>/pipeline.yaml   # exists → skip init
-orchestratord init --repo <owner>/<name> --dir ~/orchestrator-<name>
+ls ~/orchestrator-runs/<name>/pipeline.yaml   # exists → skip init
+orchestratord init --repo <owner>/<name> --dir ~/orchestrator-runs/<name>
 gh label list -R <owner>/<name> --json name --jq '.[].name' | grep -qx agent-ready \
   || gh label create agent-ready -R <owner>/<name> --description "Queued for the orchestrator"
-orchestratord validate ~/orchestrator-<name>/pipeline.yaml
+orchestratord validate ~/orchestrator-runs/<name>/pipeline.yaml
 ```
 
 `init` writes `pipeline.yaml` and `prompts/`. Edit nothing else yet.
@@ -154,7 +160,7 @@ Ask, in these words:
 > that stops short is finished as far as the orchestrator is concerned, and you
 > merge that PR by hand.
 
-- Merge itself → set `dry_run: false` in `~/orchestrator-<name>/pipeline.yaml`.
+- Merge itself → set `dry_run: false` in `~/orchestrator-runs/<name>/pipeline.yaml`.
 - Stop short → leave `dry_run: true`.
 
 Write a one-line comment above the setting with the date and the user's
@@ -164,9 +170,9 @@ answer, so the next reader knows it was chosen, not defaulted. Re-run
 ## 8. doctor, until green
 
 ```bash
-orchestratord doctor --config ~/orchestrator-<name>/pipeline.yaml \
-  --repo <repo-dir> --db ~/orchestrator-<name>/orchestrator.db \
-  --task-dir ~/orchestrator-<name>/tasks
+orchestratord doctor --config ~/orchestrator-runs/<name>/pipeline.yaml \
+  --repo <repo-dir> --db ~/orchestrator-runs/<name>/orchestrator.db \
+  --task-dir ~/orchestrator-runs/<name>/tasks
 ```
 
 Every failing line comes with its fix. Apply fixes you can (create a dir, a
@@ -189,12 +195,12 @@ Pick a free loopback port (start at 7777; `lsof -nP -iTCP:<port> -sTCP:LISTEN`).
 Start the daemon in its **own** herdr pane, not this one:
 
 ```bash
-WS=$(herdr workspace create --cwd ~/orchestrator-<name> --label orchestratord-<name> --no-focus)
+WS=$(herdr workspace create --cwd ~/orchestrator-runs/<name> --label orchestratord-<name> --no-focus)
 PANE=$(printf '%s' "$WS" | python3 -c 'import sys,json;print(json.load(sys.stdin)["result"]["root_pane"]["pane_id"])')
-herdr pane run "$PANE" "orchestratord daemon --config ~/orchestrator-<name>/pipeline.yaml \
-  --repo <repo-dir> --db ~/orchestrator-<name>/orchestrator.db \
-  --task-dir ~/orchestrator-<name>/tasks --mcp-listen 127.0.0.1:<port> \
-  --event-log ~/orchestrator-<name>/events.jsonl 2>&1 | tee -a ~/orchestrator-<name>/daemon.log"
+herdr pane run "$PANE" "orchestratord daemon --config ~/orchestrator-runs/<name>/pipeline.yaml \
+  --repo <repo-dir> --db ~/orchestrator-runs/<name>/orchestrator.db \
+  --task-dir ~/orchestrator-runs/<name>/tasks --mcp-listen 127.0.0.1:<port> \
+  --event-log ~/orchestrator-runs/<name>/events.jsonl 2>&1 | tee -a ~/orchestrator-runs/<name>/daemon.log"
 ```
 
 Verify: `daemon starting` in the log, the port listening, and
@@ -211,7 +217,7 @@ claude mcp add --transport http orchestrator http://127.0.0.1:<port>/mcp
 
 (Its tools appear in the next Claude session; this one uses the `curl` form.)
 
-Write `~/orchestrator-<name>/run.env` with `REPO=<owner>/<name>`,
+Write `~/orchestrator-runs/<name>/run.env` with `REPO=<owner>/<name>`,
 `REPO_DIR=<repo-dir>`, `BASE=<base>`, `PORT=<port>`, `PANE=$PANE`,
 `DRY_RUN=<true|false>`, and `PERMISSIONS_ADDED=<yes|no>`, so the other skills
 and a later session can find the run without asking.

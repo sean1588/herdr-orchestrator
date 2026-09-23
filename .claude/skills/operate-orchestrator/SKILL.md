@@ -77,7 +77,7 @@ If a task is legitimately in progress or in a gate wait the daemon re-checks,
 ## Find the run
 
 `setup-orchestrator` starts the daemon and records where the run lives in
-`~/orchestrator-<name>/run.env`. Read it (ask for `<name>` only if more than one
+`~/orchestrator-runs/<name>/run.env`. Read it (ask for `<name>` only if more than one
 `~/orchestrator-*/run.env` exists):
 
 - `PORT` — the MCP endpoint, `http://127.0.0.1:<PORT>/mcp`.
@@ -87,7 +87,7 @@ If a task is legitimately in progress or in a gate wait the daemon re-checks,
 No `run.env` means the daemon is not set up: say so and point at
 `setup-orchestrator`. Do not start a daemon from this skill.
 
-Then read the run's `~/orchestrator-<name>/pipeline.yaml` so you know its
+Then read the run's `~/orchestrator-runs/<name>/pipeline.yaml` so you know its
 **state timeouts** and **source label** — you need them to diagnose. The daemon
 also needs a herdr server reachable from this session (`herdr status`), an
 authenticated `gh`, and (for unattended agent runs) the permission setup

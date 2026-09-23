@@ -105,3 +105,7 @@ go build ./... && go test ./... && go vet ./... && gofmt -l .
 Pure Go, no cgo, three dependencies. [CLAUDE.md](CLAUDE.md) has the
 conventions. This repo runs its own issues through the orchestrator; most
 recent PRs were written, reviewed, and merged by it.
+
+## License
+
+[Apache 2.0](LICENSE).

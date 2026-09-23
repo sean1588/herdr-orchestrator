@@ -249,7 +249,8 @@ you registered them — `mcp__orchestrator` if agents ever call `get_task`).
 > a task sits with no audit movement, read its pane read-only (`herdr pane read
 > <pane>`); a prompt means a missing allow-list entry — add it, then let the task
 > re-drive. **Never send keystrokes into an agent pane** to answer the prompt: the
-> daemon can misread the keypress as `agent.done` and tear the task down.
+> daemon can misread the keypress as `agent.done` and tear the task down. That
+> includes `message_task`, which is for an idle prompt only (§5).
 
 Treat this as temporary global state and **revert it after the run**. Full recipe
 in [TUTORIAL.md](TUTORIAL.md) §11.
@@ -322,6 +323,7 @@ tools are your surface:
 | `get_audit` | `issue` | primary diagnosis: a task's full transition history |
 | `enqueue_task` | `issue` | nudge a **non-settled** idle issue (refused if settled) |
 | `cancel_task` | `issue` | stop an actively-running drive; settles it to `cancelled` |
+| `message_task` | `issue`, `text` | tell a parked agent something, one line (see below) |
 
 **Two semantics that bound what you can do autonomously:**
 
@@ -362,6 +364,26 @@ approaching `blocked_timeout` is about to escalate. Read its pane read-only
 removes the label on settle, and **re-seeds all in-flight work on restart**. Only
 do the meta-layer it structurally cannot: restart the dead process, diagnose and
 explain escalations, and judge pathological patterns.
+
+### Telling a parked agent something: `message_task`
+
+An agent that has done what it can and is waiting on you ("run `gh auth refresh
+-s workflow`, then I'll push") sits idle at its prompt. Once you have done the
+thing, `message_task {issue, text}` tells it so. This is the only sanctioned way
+to talk to a running agent; it replaces typing into its pane by hand.
+
+- **Only when the pane shows an idle prompt, never a dialog.** Read the pane
+  first (`herdr pane read <pane>`). A permission or question dialog would take
+  the text as its answer; those are fixed in the allow-list (§3.1), not answered.
+- `text` is **one line**. Put multi-line content in a file and reference its
+  path, the same rule the kickoff follows.
+- Delivery is the kickoff's verified path (send-text + Enter, `pane run` as the
+  fallback), so a success means the agent's status moved: it took the message.
+- Refused with a tool error for an unknown issue, a settled task, or a task with
+  no pane. The audit gets a `message_task` row carrying the text's length, not
+  the text.
+- Nothing else to trigger: the agent goes `working`, then `idle`/`done`, and the
+  drive decides from the artifact (the PR, CI) as it does for any agent activity.
 
 ---
 

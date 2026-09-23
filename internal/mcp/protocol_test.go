@@ -76,7 +76,7 @@ func TestToolsList(t *testing.T) {
 	if err := json.Unmarshal(raw, &out); err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]bool{"list_tasks": true, "get_task": true, "get_audit": true, "cancel_task": true, "enqueue_task": true}
+	want := map[string]bool{"list_tasks": true, "get_task": true, "get_audit": true, "cancel_task": true, "enqueue_task": true, "message_task": true}
 	if len(out.Result.Tools) != len(want) {
 		t.Fatalf("got %d tools, want %d", len(out.Result.Tools), len(want))
 	}

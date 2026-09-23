@@ -490,10 +490,11 @@ func TestParseRootPaneID(t *testing.T) {
 /* when neither takes.                                                         */
 /* -------------------------------------------------------------------------- */
 
-// kickoffFake builds a runner whose `pane list` reports `status` until the
+// kickoffFake builds a runner whose `pane list` reports `baseline` until the
 // kickoff is delivered by `lands` ("send-text", "run", or "" for neither), after
-// which it reports "working". Also records every call for assertions.
-func kickoffFake(lands string) *proc.Fake {
+// which it reports `landed` ("working" when the agent took it). Also records
+// every call for assertions.
+func kickoffFake(baseline, lands, landed string) *proc.Fake {
 	var delivered atomic.Bool
 	return &proc.Fake{Responder: func(c proc.Call) ([]byte, error) {
 		if c.Name != "herdr" || len(c.Args) < 2 {
@@ -512,9 +513,9 @@ func kickoffFake(lands string) *proc.Fake {
 				delivered.Store(true)
 			}
 		case c.Args[0] == "pane" && c.Args[1] == "list":
-			status := "idle"
+			status := baseline
 			if delivered.Load() {
-				status = "working"
+				status = landed
 			}
 			return []byte(`{"result":{"panes":[{"pane_id":"w7:p1","agent_status":"` + status + `","workspace_id":"w7"}]}}`), nil
 		}
@@ -543,7 +544,7 @@ func kickoffRunCalls(calls []proc.Call) []proc.Call {
 }
 
 func TestSpawn_KickoffAccepted_DoesNotFallBack(t *testing.T) {
-	f := kickoffFake("send-text")
+	f := kickoffFake("idle", "send-text", "working")
 	if _, err := kickoffHerdr(f).Spawn(context.Background(), testSpawn()); err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
@@ -559,7 +560,7 @@ func TestSpawn_KickoffAccepted_DoesNotFallBack(t *testing.T) {
 func TestSpawn_KickoffDropped_FallsBackToPaneRun(t *testing.T) {
 	// send-text silently fails to land (Claude Code v2.1.236): the agent stays
 	// idle at an empty prompt. `pane run` gets through.
-	f := kickoffFake("run")
+	f := kickoffFake("idle", "run", "working")
 	if _, err := kickoffHerdr(f).Spawn(context.Background(), testSpawn()); err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
@@ -571,7 +572,7 @@ func TestSpawn_KickoffDropped_FallsBackToPaneRun(t *testing.T) {
 func TestSpawn_KickoffNeverAccepted_FailsLoudly(t *testing.T) {
 	// Neither method lands. The spawn must error rather than return a handle to a
 	// mute agent — that silence previously cost a task its whole blocked_timeout.
-	f := kickoffFake("")
+	f := kickoffFake("idle", "", "working")
 	_, err := kickoffHerdr(f).Spawn(context.Background(), testSpawn())
 	if err == nil {
 		t.Fatal("Spawn succeeded despite the kickoff never being accepted")
@@ -630,5 +631,43 @@ func TestSpawn_ClassifierSettlingIsNotAcceptance(t *testing.T) {
 	hasExactCall(t, calls, "herdr", "pane", "send-text", "w7:p1", testSpawn().Kickoff)
 	if n := len(kickoffRunCalls(calls)); n != 1 {
 		t.Errorf("expected exactly one `pane run` fallback after the false settle, got %d", n)
+	}
+}
+
+func TestMessage_UsesVerifiedKickoffDelivery(t *testing.T) {
+	// Message is the kickoff path pointed at a live pane: the same send-text,
+	// the same pane-run fallback, the same "status must move" proof.
+	const text = "the token scope is fixed; push the branch now"
+	hd := Handle{PaneID: "w7:p1", Workdir: "/wt"}
+	// A live agent parked at its prompt after a turn usually reads "done", so a
+	// done baseline must not count as acceptance on its own. Nor does done -> idle:
+	// herdr reads text left unsent in the prompt box as idle, which is exactly
+	// what a swallowed Enter looks like.
+	cases := []struct {
+		name     string
+		baseline string
+		lands    string
+		landed   string
+		wantErr  string
+	}{
+		{"idle: status moves to working", "idle", "send-text", "working", ""},
+		{"idle: status never leaves baseline", "idle", "", "working", "kickoff not accepted"},
+		{"done: status moves to working", "done", "send-text", "working", ""},
+		{"done: status never leaves baseline", "done", "", "working", "kickoff not accepted"},
+		{"done: text sits unsent in the prompt box", "done", "send-text", "idle", "kickoff not accepted"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := kickoffFake(tc.baseline, tc.lands, tc.landed)
+			err := kickoffHerdr(f).Message(context.Background(), hd, text)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Message: %v", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Message error = %v, want one containing %q", err, tc.wantErr)
+			}
+			hasExactCall(t, f.Snapshot(), "herdr", "pane", "send-text", "w7:p1", text)
+		})
 	}
 }

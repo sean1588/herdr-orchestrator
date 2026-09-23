@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/sean1588/herdr-orchestrator/internal/exec"
 	"github.com/sean1588/herdr-orchestrator/internal/store"
 )
 
@@ -16,8 +18,12 @@ type toolDef struct {
 }
 
 var (
-	issueSchema  = json.RawMessage(`{"type":"object","properties":{"issue":{"type":"integer","description":"GitHub issue number"}},"required":["issue"]}`)
-	noArgsSchema = json.RawMessage(`{"type":"object","properties":{}}`)
+	issueSchema   = json.RawMessage(`{"type":"object","properties":{"issue":{"type":"integer","description":"GitHub issue number"}},"required":["issue"]}`)
+	noArgsSchema  = json.RawMessage(`{"type":"object","properties":{}}`)
+	messageSchema = json.RawMessage(`{"type":"object","properties":{` +
+		`"issue":{"type":"integer","description":"GitHub issue number"},` +
+		`"text":{"type":"string","description":"One line to submit at the agent's prompt. No newlines: put multi-line content in a file and reference its path."}` +
+		`},"required":["issue","text"]}`)
 )
 
 func toolDefs() []toolDef {
@@ -27,6 +33,7 @@ func toolDefs() []toolDef {
 		{"get_audit", "Get a task's audit trail (state transitions) by issue number.", issueSchema},
 		{"cancel_task", "Cancel the running drive for an issue; it settles to 'cancelled'.", issueSchema},
 		{"enqueue_task", "Re-drive an issue by number (idempotent if already running).", issueSchema},
+		{"message_task", "Send one line to a running task's agent, delivered and verified like its kickoff. Use only when the agent's pane shows an idle prompt, never a dialog.", messageSchema},
 	}
 }
 
@@ -117,7 +124,8 @@ func toAuditView(a store.AuditEntry) AuditEntryView {
 type callParams struct {
 	Name      string `json:"name"`
 	Arguments struct {
-		Issue *int `json:"issue"` // pointer so a missing arg is distinguishable from 0
+		Issue *int   `json:"issue"` // pointer so a missing arg is distinguishable from 0
+		Text  string `json:"text"`
 	} `json:"arguments"`
 }
 
@@ -177,9 +185,54 @@ func (h *handler) callTool(ctx context.Context, req request) response {
 			return okResp(req.ID, h.toolErr(err.Error()))
 		}
 		return okResp(req.ID, h.toolText(fmt.Sprintf("enqueued issue %d", issue)))
+	case "message_task":
+		return okResp(req.ID, h.messageTask(ctx, issue, p.Arguments.Text))
 	default:
 		return okResp(req.ID, h.toolErr("unknown tool: "+p.Name))
 	}
+}
+
+// messageTask types one line into a running task's agent prompt.
+//
+// The engine needs no part in this. A delivered message makes the pane report
+// working, then idle or done, and the drive's wait loop decides from the
+// authoritative artifact exactly as it does for any other agent activity — a
+// message is just more agent activity, not a transition.
+func (h *handler) messageTask(ctx context.Context, issue int, text string) map[string]any {
+	// The kickoff's rule: a prompt takes one line, anything longer goes in a file.
+	if strings.TrimSpace(text) == "" {
+		return h.toolErr("missing required argument: text")
+	}
+	if strings.ContainsAny(text, "\r\n") {
+		return h.toolErr("text must be a single line: put multi-line content in a file and reference its path")
+	}
+	if h.messenger == nil {
+		return h.toolErr("message_task is not available: no execution backend wired")
+	}
+	t, err := h.reader.GetTask(ctx, h.taskID(issue))
+	if err != nil {
+		return h.toolErr(fmt.Sprintf("issue %d not found", issue))
+	}
+	if h.settled[t.CurrentState] {
+		return h.toolErr(fmt.Sprintf("issue %d is settled (%s): no running agent to message", issue, t.CurrentState))
+	}
+	if t.PaneID == "" {
+		return h.toolErr(fmt.Sprintf("issue %d has no agent pane (never spawned, or its pane is gone)", issue))
+	}
+	if err := h.messenger.Message(ctx, exec.Handle{PaneID: t.PaneID}, text); err != nil {
+		return h.toolErr(fmt.Sprintf("message issue %d: %s", issue, err.Error()))
+	}
+	// The length, not the text: the audit trail is not a transcript. A failed
+	// write is logged, not returned — the agent already has the message, and an
+	// error here would invite a retry that delivers it twice.
+	entry := store.AuditEntry{
+		TaskID: t.ID, FromState: t.CurrentState, ToState: t.CurrentState,
+		Trigger: "message_task", Result: fmt.Sprintf("text_len=%d", len(text)),
+	}
+	if err := h.auditor.AppendAudit(ctx, entry); err != nil {
+		h.log.Warn("message_task: could not record audit entry", "task", t.ID, "err", err)
+	}
+	return h.toolText(fmt.Sprintf("message delivered to issue %d", issue))
 }
 
 // An MCP tool result is a list of typed content blocks; isError flags a

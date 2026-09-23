@@ -311,6 +311,7 @@ func registerCommon(fs *flag.FlagSet, cf *commonFlags) {
 type wired struct {
 	eng     *engine.Engine
 	store   *store.Store
+	backend exec.ExecutionBackend
 	source  source.Source
 	wf      *config.Workflow
 	repoDir string
@@ -395,7 +396,7 @@ func (cf commonFlags) wire(ctx context.Context) (*wired, error) {
 		PaneClassifier: classifier,
 		StartState:     start,
 	})
-	return &wired{eng: eng, store: st, source: issues, wf: wf, repoDir: absRepo}, nil
+	return &wired{eng: eng, store: st, backend: backend, source: issues, wf: wf, repoDir: absRepo}, nil
 }
 
 // paneClassifierFor builds the --pane-classifier classifier. Empty is nil — the
@@ -628,7 +629,8 @@ func cmdDaemon(args []string) int {
 			return 1
 		}
 		srv := mcp.New(w.store, sched, engine.TaskID, slog.Default()).
-			WithDeadlines(deadlinesFor(w.wf))
+			WithDeadlines(deadlinesFor(w.wf)).
+			WithMessaging(w.backend, w.store, settled)
 		go func() {
 			if err := srv.Serve(ctx, ln); err != nil {
 				slog.Error("mcp server stopped", "err", err)

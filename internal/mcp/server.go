@@ -38,6 +38,15 @@ func (s *Server) WithDeadlines(d Deadlines) *Server {
 	return s
 }
 
+// WithMessaging wires message_task: the backend that delivers the text, the
+// audit trail that records it, and the settled states (no live drive to talk
+// to) it refuses. Optional and chainable: without it message_task is a tool
+// error, never a nil dereference.
+func (s *Server) WithMessaging(m Messenger, a Auditor, settled map[string]bool) *Server {
+	s.h.messenger, s.h.auditor, s.h.settled = m, a, settled
+	return s
+}
+
 // Serve runs the HTTP server on ln until ctx is cancelled, then shuts it down
 // gracefully. It returns a non-nil error only on an unexpected serve failure.
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {

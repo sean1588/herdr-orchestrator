@@ -137,6 +137,7 @@ non-loopback address.
 | `get_audit` | `issue` | a task's state-transition history |
 | `cancel_task` | `issue` | cancel the running drive; it settles to `cancelled` |
 | `enqueue_task` | `issue` | (re-)drive an issue by number (idempotent) |
+| `message_task` | `issue`, `text` | submit one line at a running agent's idle prompt (verified like the kickoff; never into a dialog) |
 
 **Liveness.** State says *where* a task is; it cannot say whether it is *moving* —
 blocking doesn't change state, so an agent parked on a permission prompt looks

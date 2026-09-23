@@ -55,6 +55,11 @@ type ExecutionBackend interface {
 	Spawn(ctx context.Context, s Spawn) (Handle, error)
 	// WaitState blocks until the agent reaches target (or ctx/timeout fires).
 	WaitState(ctx context.Context, h Handle, target AgentState) (AgentState, error)
+	// Message delivers a single line of text to a live agent's prompt and
+	// verifies it was accepted, exactly as Spawn delivers the kickoff: nil means
+	// the agent took it, an error means it did not. It is how an operator tells
+	// a parked agent something without typing into its pane.
+	Message(ctx context.Context, h Handle, text string) error
 	// Read returns the last `lines` of the agent pane's recent output.
 	Read(ctx context.Context, h Handle, lines int) (string, error)
 	// Events returns a stream of agent status changes across all panes; the

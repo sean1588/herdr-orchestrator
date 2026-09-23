@@ -53,6 +53,7 @@ func (f *fakeBackend) Spawn(ctx context.Context, s exec.Spawn) (exec.Handle, err
 func (f *fakeBackend) WaitState(ctx context.Context, h exec.Handle, target exec.AgentState) (exec.AgentState, error) {
 	return target, nil
 }
+func (f *fakeBackend) Message(ctx context.Context, h exec.Handle, text string) error { return nil }
 func (f *fakeBackend) Read(ctx context.Context, h exec.Handle, lines int) (string, error) {
 	if f.readFunc != nil {
 		return f.readFunc(lines)

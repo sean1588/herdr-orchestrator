@@ -245,10 +245,12 @@ func (h *Herdr) kickoffAccepted(ctx context.Context, pane string, before AgentSt
 	deadline := time.Now().Add(h.KickoffAckTimeout)
 	for {
 		switch st := h.currentStatus(ctx, pane); st {
+		case before, StateUnknown:
+			// No movement yet; an unknown reading proves nothing either way. This
+			// arm comes first so a reading equal to the baseline never counts: a
+			// live agent parked after a turn reads "done" before the message too.
 		case StateWorking, StateDone:
 			return true
-		case before, StateUnknown:
-			// No movement yet; an unknown reading proves nothing either way.
 		default:
 			// A change off an UNKNOWN baseline is herdr's classifier settling on
 			// its first real status for a fresh pane, not evidence the kickoff

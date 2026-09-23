@@ -364,6 +364,13 @@ the verdict file or a passing gate. An unsure answer or a failed call escalates
 `no_progress` exactly as without it. The classifier runs only here — never on a
 moving pane, never on a gate or decision — and each call costs about $0.00004.
 
+Without a key, `--pane-classifier heuristic` recognises the one wedge that has a
+fixed shape: a Claude Code tool-permission or trust prompt, matched by its
+rendered box and escalated at once as `blocked_on_prompt`. It answers nothing
+else — a pattern cannot tell a silent test run from a dead pane — so every other
+static pane escalates `no_progress` exactly as with the flag off. It makes no
+network call and does not chain to Jev.
+
 **`drive_deadline`** (a duration; absent ⇒ twice the longest state timeout,
 floored at `1h`) is the hard ceiling on a single drive, enforced by a reaper in
 the scheduler — **outside** the drive it watches. The engine's own timer is armed

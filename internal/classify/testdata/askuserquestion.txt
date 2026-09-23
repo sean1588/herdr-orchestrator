@@ -1,0 +1,20 @@
+▗ ▗   ▖ ▖  Claude Code v2.1.280
+           Opus 5.5 (1M context) · Claude Max
+  ▘▘ ▝▝    /Users/dev/projects/ledger-api
+
+
+❯ Use the AskUserQuestion tool to ask me: Do you want to proceed with the migration? Options: Yes, No
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ Migration
+
+Do you want to proceed with the migration?
+
+❯ 1. Yes
+     Proceed with the migration.
+  2. No
+     Do not proceed with the migration.
+  3. Type something.
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel

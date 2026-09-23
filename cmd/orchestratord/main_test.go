@@ -370,8 +370,9 @@ func TestCmdDoctor_RequiresAConfig(t *testing.T) {
 }
 
 // --pane-classifier off must mean no classifier at all — the engine then skips
-// the arm, so no network call can happen. On, it must reach the endpoint it
-// names; on without a key, it is refused at startup.
+// the arm, so no network call can happen. heuristic needs no key and makes no
+// call. A URL must reach the endpoint it names; without a key, it is refused at
+// startup.
 func TestPaneClassifierFor(t *testing.T) {
 	hits := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -389,7 +390,22 @@ func TestPaneClassifierFor(t *testing.T) {
 		t.Fatalf("flag off made %d requests, want 0", hits)
 	}
 
-	if _, err := paneClassifierFor(srv.URL, func(string) string { return "" }); err == nil ||
+	// heuristic needs no key and never touches the network: with no key set it
+	// still starts, and classifying a permission prompt reaches no endpoint.
+	noKey := func(string) string { return "" }
+	h, err := paneClassifierFor("heuristic", noKey)
+	if err != nil || h == nil {
+		t.Fatalf("heuristic without a key: got (%v, %v), want a classifier", h, err)
+	}
+	prompt := "────\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n"
+	if r, err := h.Classify(context.Background(), prompt); err != nil || r.Activity != classify.AwaitingPermission {
+		t.Fatalf("heuristic on a permission prompt = (%+v, %v)", r, err)
+	}
+	if hits != 0 {
+		t.Fatalf("heuristic made %d requests, want 0", hits)
+	}
+
+	if _, err := paneClassifierFor(srv.URL, noKey); err == nil ||
 		!strings.Contains(err.Error(), classify.KeyEnv) {
 		t.Fatalf("flag on without a key: err = %v, want one naming %s", err, classify.KeyEnv)
 	}

@@ -7,7 +7,8 @@
 // labels the tail the engine already read, and the engine decides what to do.
 //
 // The engine depends only on the PaneClassifier interface (a small seam at the
-// boundary, like notify/exec/github). Jev is the one real implementation. A
+// boundary, like notify/exec/github). Jev asks a model and answers every label;
+// Heuristic needs no key and recognises only Claude Code's permission prompts. A
 // classifier failure must never change what the engine would have done without
 // one, so implementations return errors rather than guesses.
 package classify

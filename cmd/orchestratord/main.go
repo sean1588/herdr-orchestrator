@@ -121,7 +121,8 @@ run/recover/daemon flags:
   --worktrees-dir PATH   parent dir for worktrees (default: sibling of repo)
   --task-dir PATH        dir for task context files (default: temp dir)
   --notify-webhook URL   POST escalation/alert events as JSON (default: none)
-  --pane-classifier URL  classify static agent panes via Jev at this endpoint, e.g.
+  --pane-classifier C    classify static agent panes: "heuristic" (keyless; recognises
+                         Claude Code permission prompts only) or a Jev endpoint URL, e.g.
                          https://openrouter.ai/api/v1/systemone; needs OPENROUTER_API_KEY (default: off)
   --poll-interval DUR    daemon source poll cadence (default 30s)
   --mcp-listen ADDR      daemon MCP control server address, e.g. 127.0.0.1:7777 (default: off)
@@ -301,7 +302,7 @@ func registerCommon(fs *flag.FlagSet, cf *commonFlags) {
 	fs.StringVar(&cf.worktreesDir, "worktrees-dir", "", "parent dir for worktrees (default: sibling of repo)")
 	fs.StringVar(&cf.taskDir, "task-dir", "", "dir for task context files (default: temp dir)")
 	fs.StringVar(&cf.notifyWebhook, "notify-webhook", "", "POST escalation/alert events as JSON to this URL (default: none)")
-	fs.StringVar(&cf.paneClassifier, "pane-classifier", "", "classify static agent panes via Jev at this endpoint; needs "+classify.KeyEnv+" (default: off)")
+	fs.StringVar(&cf.paneClassifier, "pane-classifier", "", "classify static agent panes: \"heuristic\" (keyless, permission prompts only) or a Jev endpoint URL, which needs "+classify.KeyEnv+" (default: off)")
 	fs.DurationVar(&cf.commandTimeout, "command-timeout", proc.DefaultTimeout,
 		"per-call budget for every git/gh/herdr subprocess; raise it on a very large repo, 0 disables (unbounded)")
 }
@@ -397,18 +398,22 @@ func (cf commonFlags) wire(ctx context.Context) (*wired, error) {
 	return &wired{eng: eng, store: st, source: issues, wf: wf, repoDir: absRepo}, nil
 }
 
-// paneClassifierFor builds the --pane-classifier classifier. An empty URL is
-// nil — the engine skips the arm, so a static pane escalates as no_progress with
-// no network call. A URL without its key is refused at startup rather than
-// failing every classification silently at runtime.
-func paneClassifierFor(url string, getenv func(string) string) (classify.PaneClassifier, error) {
-	if url == "" {
+// paneClassifierFor builds the --pane-classifier classifier. Empty is nil — the
+// engine skips the arm, so a static pane escalates as no_progress with no
+// network call. "heuristic" is the keyless prompt matcher. Anything else is a
+// Jev URL, which without its key is refused at startup rather than failing
+// every classification silently at runtime.
+func paneClassifierFor(value string, getenv func(string) string) (classify.PaneClassifier, error) {
+	switch value {
+	case "":
 		return nil, nil
+	case "heuristic":
+		return classify.Heuristic{}, nil
 	}
 	if getenv(classify.KeyEnv) == "" {
 		return nil, fmt.Errorf("--pane-classifier needs %s set", classify.KeyEnv)
 	}
-	return classify.Jev{URL: url, Getenv: getenv}, nil
+	return classify.Jev{URL: value, Getenv: getenv}, nil
 }
 
 func cmdRun(args []string) int {

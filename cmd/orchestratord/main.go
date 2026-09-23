@@ -118,7 +118,7 @@ run/recover/daemon flags:
   --issue N              issue number (run only, required)
   --base BRANCH          base branch (default "main")
   --db PATH              sqlite store path (default "orchestrator.db")
-  --worktrees-dir PATH   parent dir for worktrees (default: sibling of repo)
+  --worktrees-dir PATH   parent dir for worktrees (default: <repo>/.orchestrator/worktrees)
   --task-dir PATH        dir for task context files (default: temp dir)
   --notify-webhook URL   POST escalation/alert events as JSON (default: none)
   --pane-classifier C    classify static agent panes: "heuristic" (keyless; recognises
@@ -299,7 +299,7 @@ func registerCommon(fs *flag.FlagSet, cf *commonFlags) {
 	fs.StringVar(&cf.repo, "repo", "", "local repo checkout dir (required)")
 	fs.StringVar(&cf.base, "base", "main", "base branch")
 	fs.StringVar(&cf.db, "db", "orchestrator.db", "sqlite store path")
-	fs.StringVar(&cf.worktreesDir, "worktrees-dir", "", "parent dir for worktrees (default: sibling of repo)")
+	fs.StringVar(&cf.worktreesDir, "worktrees-dir", "", "parent dir for worktrees (default: <repo>/.orchestrator/worktrees)")
 	fs.StringVar(&cf.taskDir, "task-dir", "", "dir for task context files (default: temp dir)")
 	fs.StringVar(&cf.notifyWebhook, "notify-webhook", "", "POST escalation/alert events as JSON to this URL (default: none)")
 	fs.StringVar(&cf.paneClassifier, "pane-classifier", "", "classify static agent panes: \"heuristic\" (keyless, permission prompts only) or a Jev endpoint URL, which needs "+classify.KeyEnv+" (default: off)")

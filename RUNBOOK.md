@@ -169,7 +169,8 @@ runnable by an agent; no human hands required.
    ```
 
 4. **Clone the target repo locally** if you don't have a checkout — the daemon
-   needs one (`--repo`, absolute path) and creates per-task worktrees beside it.
+   needs one (`--repo`, absolute path) and creates per-task worktrees inside it
+   (`<repo>/.orchestrator/worktrees`).
 
 5. **Validate**, then continue with §3.1 (prerequisites) and §3.2 (start the
    daemon):
@@ -226,7 +227,7 @@ diagnosing by hand when `doctor` is not available:
 | --- | --- | --- |
 | Running **inside a herdr pane** | `echo $HERDR_ENV` → `1` | the backend shells out to `herdr`; outside a pane it can't reach the session |
 | **`gh` authenticated** for the target repo | `gh auth status` | issue reads, PR detection, reviews, merge |
-| A **local checkout** of the target repo | `ls <repo-dir>` | the engine makes per-task worktrees beside it (`--repo`, absolute path) |
+| A **local checkout** of the target repo | `ls <repo-dir>` | the engine makes per-task worktrees inside it, under `.orchestrator/worktrees` (`--repo`, absolute path) |
 | The **agent CLI** on `PATH` | `which claude` (or whatever `roles.*.launch` names) | the daemon launches it per task |
 | A **valid config** + its `prompts/` rubrics | `orchestratord validate <config>` → exit 0 | run/daemon refuse to start on any error; rubric paths resolve beside the config |
 | **Unattended permissions armed** (for hands-off runs) | see below | a coding agent otherwise stalls on per-command permission prompts |

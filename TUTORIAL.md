@@ -243,8 +243,8 @@ From a herdr pane (`echo $HERDR_ENV` → `1`):
 ```
 
 - `--repo` is your **local checkout** (the worktree is branched from it).
-- `--worktrees-dir` / `--task-dir` are optional (defaults: a sibling dir of the
-  repo, and a temp dir) — naming them explicitly makes the run easy to inspect.
+- `--worktrees-dir` / `--task-dir` are optional (defaults: `<repo>/.orchestrator/worktrees`,
+  and a temp dir) — naming them explicitly makes the run easy to inspect.
 
 What happens: the engine creates a task row, spawns the **triager** on the issue,
 and reads its verdict. On `accept` the task moves to `queued`, which immediately

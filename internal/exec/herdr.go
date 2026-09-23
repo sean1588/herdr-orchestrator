@@ -32,7 +32,7 @@ type Herdr struct {
 
 	GitBin       string // default "git"
 	HerdrBin     string // default "herdr"
-	WorktreesDir string // parent dir for worktrees; "" => sibling of the repo
+	WorktreesDir string // parent dir for worktrees; "" => <repo>/.orchestrator/worktrees
 	RepoDir      string // main checkout; lets Cleanup resolve a task's worktree path without a live pane
 	// ReadyMatch is the readiness marker awaited before the kickoff, as a regex
 	// against pane output. Claude Code's prompt has rendered both ">" and "❯"
@@ -414,13 +414,15 @@ func (h *Herdr) Cleanup(ctx context.Context, taskID string) error {
 
 func (h *Herdr) worktreePath(s Spawn) string { return h.worktreeDir(s.RepoDir, s.TaskID) }
 
-// worktreeDir is a task's deterministic worktree path: WorktreesDir (or the repo's
-// sibling dir when unset) + "wt-<taskID>". Shared by Spawn (via the Spawn's RepoDir)
-// and Cleanup (via the backend's RepoDir) so setup and teardown agree on the path.
+// worktreeDir is a task's deterministic worktree path: WorktreesDir (or
+// <repo>/.orchestrator/worktrees when unset) + "wt-<taskID>". The default sits
+// inside the checkout so the folder trust the user granted it covers every spawn;
+// doctor.spawnsDir mirrors it. Shared by Spawn (via the Spawn's RepoDir) and
+// Cleanup (via the backend's RepoDir) so setup and teardown agree on the path.
 func (h *Herdr) worktreeDir(repoDir, taskID string) string {
 	base := h.WorktreesDir
 	if base == "" {
-		base = filepath.Dir(repoDir)
+		base = filepath.Join(repoDir, ".orchestrator", "worktrees")
 	}
 	return filepath.Join(base, "wt-"+taskID)
 }

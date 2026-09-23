@@ -364,8 +364,8 @@ func TestKickoffSmokeRunsInsideTheWorktreesDir(t *testing.T) {
 	tests := []struct {
 		name string
 		err  error
-		// worktreesDir is --worktrees-dir; "" exercises the backend's default,
-		// a sibling of the repo.
+		// worktreesDir is --worktrees-dir; false exercises the backend's default,
+		// <repo>/.orchestrator/worktrees.
 		worktreesDir bool
 		wantStatus   Status
 	}{
@@ -380,7 +380,7 @@ func TestKickoffSmokeRunsInsideTheWorktreesDir(t *testing.T) {
 			env.TempDir = ""
 			env.RepoDir = filepath.Join(root, "repo")
 			env.WorktreesDir = ""
-			parent := root
+			parent := filepath.Join(env.RepoDir, ".orchestrator", "worktrees")
 			if tc.worktreesDir {
 				env.WorktreesDir = filepath.Join(root, "wt")
 				parent = env.WorktreesDir
@@ -412,6 +412,81 @@ func TestKickoffSmokeRunsInsideTheWorktreesDir(t *testing.T) {
 			}
 			if after := dirEntries(t, parent); fmt.Sprint(after) != fmt.Sprint(before) {
 				t.Errorf("%s left behind: before %v, after %v", parent, before, after)
+			}
+		})
+	}
+}
+
+// spawnsDir mirrors the backend's worktreeDir: inside the checkout by default,
+// so the folder trust the user granted the repo covers every spawn.
+func TestSpawnsDir(t *testing.T) {
+	tests := []struct {
+		name         string
+		repoDir      string
+		worktreesDir string
+		want         string
+	}{
+		{name: "default is inside the repo", repoDir: "/home/u/repo", want: "/home/u/repo/.orchestrator/worktrees"},
+		{name: "explicit dir wins", repoDir: "/home/u/repo", worktreesDir: "/elsewhere", want: "/elsewhere"},
+		{name: "nothing known", want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := spawnsDir(Env{RepoDir: tc.repoDir, WorktreesDir: tc.worktreesDir}); got != tc.want {
+				t.Errorf("spawnsDir = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// The default worktrees dir sits inside the checkout, so the check keeps it out
+// of `git status` through the local info/exclude — once, however often doctor
+// runs — and leaves the repo alone when --worktrees-dir points elsewhere.
+func TestWorktreesDirExcludesTheDefaultFromGit(t *testing.T) {
+	tests := []struct {
+		name      string
+		outside   bool
+		wantLines int
+	}{
+		{name: "default dir is excluded exactly once", wantLines: 1},
+		{name: "explicit dir outside the repo leaves exclude alone", outside: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			runner := proc.New()
+			repo := t.TempDir()
+			if _, err := runner.Run(ctx, "", "git", "init", "-q", repo); err != nil {
+				t.Fatalf("git init: %v", err)
+			}
+			exclude := filepath.Join(repo, ".git", "info", "exclude")
+			before, _ := os.ReadFile(exclude)
+
+			env, _ := healthyEnv(t)
+			env.Runner = runner
+			env.RepoDir = repo
+			env.WorktreesDir = ""
+			if tc.outside {
+				env.WorktreesDir = filepath.Join(t.TempDir(), "wt")
+			}
+			for range 2 {
+				if got := checkWorktreesDir(ctx, env.withDefaults()); got.Status != StatusPass {
+					t.Fatalf("worktrees-dir = %s (%s), want pass", got.Status, got.Detail)
+				}
+			}
+
+			after, _ := os.ReadFile(exclude)
+			if tc.outside && string(after) != string(before) {
+				t.Errorf("exclude changed with --worktrees-dir outside the repo:\nbefore %q\nafter  %q", before, after)
+			}
+			lines := 0
+			for _, l := range strings.Split(string(after), "\n") {
+				if l == ".orchestrator/" {
+					lines++
+				}
+			}
+			if lines != tc.wantLines {
+				t.Errorf("exclude has %d .orchestrator/ lines, want %d:\n%s", lines, tc.wantLines, after)
 			}
 		})
 	}

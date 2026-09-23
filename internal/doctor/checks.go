@@ -236,14 +236,9 @@ func checkBaseCurrent(ctx context.Context, env Env) Result {
 
 func checkWorktreesDir(ctx context.Context, env Env) Result {
 	const name = "worktrees-dir"
-	dir := env.WorktreesDir
+	dir := spawnsDir(env)
 	if dir == "" {
-		// The backend defaults to a sibling of the repo; check that instead of
-		// reporting a pass for a directory nobody will use.
-		if env.RepoDir == "" {
-			return skip(name, "no --repo or --worktrees-dir given")
-		}
-		dir = filepath.Dir(env.RepoDir)
+		return skip(name, "no --repo or --worktrees-dir given")
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fail(name, fmt.Sprintf("cannot create %s: %v", dir, err),
@@ -257,6 +252,18 @@ func checkWorktreesDir(ctx context.Context, env Env) Result {
 	_ = f.Close()
 	_ = os.Remove(f.Name())
 	return pass(name, dir)
+}
+
+// spawnsDir is the directory task worktrees are created in: --worktrees-dir, or
+// the backend's default, a sibling of the repo ("" when neither is known).
+func spawnsDir(env Env) string {
+	if env.WorktreesDir != "" {
+		return env.WorktreesDir
+	}
+	if env.RepoDir == "" {
+		return ""
+	}
+	return filepath.Dir(env.RepoDir)
 }
 
 // checkTaskDir creates the task-file directory and proves it writable — the
@@ -319,21 +326,32 @@ func checkKickoffDelivery(ctx context.Context, env Env) Result {
 		return skip(name, "no role declares a launch command")
 	}
 
+	// The scratch dir lives where real spawns run, not under $TMPDIR: the agent's
+	// behavior depends on its directory (Claude Code's folder-trust dialog appears
+	// only where no ancestor is trusted), so a smoke test run anywhere else can
+	// pass while every spawn dies, or fail for a reason no task will ever hit.
 	dir := env.TempDir
 	if dir == "" {
-		d, err := os.MkdirTemp("", "orchestratord-doctor-")
+		parent := spawnsDir(env)
+		if parent == "" {
+			return skip(name, "no --repo or --worktrees-dir given")
+		}
+		d, err := os.MkdirTemp(parent, ".doctor-")
 		if err != nil {
-			return fail(name, fmt.Sprintf("cannot create a scratch dir: %v", err), "check TMPDIR")
+			return fail(name, fmt.Sprintf("cannot create a scratch dir in %s: %v", parent, err),
+				"see the worktrees-dir check")
 		}
 		defer os.RemoveAll(d)
 		dir = d
 	}
 
 	if err := env.Smoker.SmokeKickoff(ctx, dir, launch, smokeKickoffText); err != nil {
-		return fail(name, fmt.Sprintf("%s did not accept a kickoff: %v", strings.Join(launch, " "), err),
-			"this is the failure that escalates tasks having done nothing. Check the agent CLI version "+
-				"and that it starts cleanly by hand in a herdr pane; if it opens but ignores the kickoff, "+
-				"its input handling has changed and exec.deliverKickoff needs a new delivery method")
+		return fail(name, fmt.Sprintf("%s did not accept a kickoff in %s: %v", strings.Join(launch, " "), dir, err),
+			"this is the failure that escalates tasks having done nothing. If the agent opened a first-launch "+
+				"dialog in that directory (e.g. a folder-trust prompt), launch it once by hand in the worktrees "+
+				"dir and accept. Otherwise check the agent CLI version and that it starts cleanly by hand in a "+
+				"herdr pane; if it opens but ignores the kickoff, its input handling has changed and "+
+				"exec.deliverKickoff needs a new delivery method")
 	}
 	return pass(name, fmt.Sprintf("%s accepted a kickoff", strings.Join(launch, " ")))
 }

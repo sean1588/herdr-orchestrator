@@ -203,7 +203,9 @@ One line per check, a fix under anything not passing, exit non-zero on failure.
 It covers every row of the table below plus the store, the source label, whether
 the base branch is behind origin, and — the check the command exists for — an
 end-to-end kickoff-delivery smoke test that launches the real agent in a scratch
-workspace. Run it until green, then start the daemon. `--quick` skips the agent
+workspace inside the worktrees dir (where real spawns run, so a first-launch
+dialog such as a folder-trust prompt shows up there if and only if it would for
+a task). Run it until green, then start the daemon. `--quick` skips the agent
 launch. The daemon runs the cheap subset itself at startup and refuses to start
 on a failure; `--skip-preflight` overrides that.
 

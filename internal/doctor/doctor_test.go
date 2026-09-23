@@ -50,14 +50,19 @@ states:
 `
 
 type fakeSmoker struct {
-	err    error
-	calls  int
-	launch []string
+	err       error
+	calls     int
+	launch    []string
+	dir       string
+	dirExists bool // whether dir existed when the smoke test ran in it
 }
 
 func (f *fakeSmoker) SmokeKickoff(ctx context.Context, dir string, launch []string, kickoff string) error {
 	f.calls++
 	f.launch = launch
+	f.dir = dir
+	_, err := os.Stat(dir)
+	f.dirExists = err == nil
 	return f.err
 }
 
@@ -347,4 +352,89 @@ func TestKickoffSmokeUsesADeterministicRoleLaunch(t *testing.T) {
 			t.Fatalf("firstLaunch = %v on iteration %d, want the alphabetically-first role's argv", got, i)
 		}
 	}
+}
+
+// The smoke test must launch the agent where real spawns launch it: the agent's
+// behavior depends on its directory (a folder-trust dialog appears only where no
+// ancestor is trusted), so a scratch dir under $TMPDIR tests the wrong thing. The
+// scratch dir must also be gone afterwards, pass or fail.
+func TestKickoffSmokeRunsInsideTheWorktreesDir(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		// worktreesDir is --worktrees-dir; "" exercises the backend's default,
+		// a sibling of the repo.
+		worktreesDir bool
+		wantStatus   Status
+	}{
+		{name: "accepted", worktreesDir: true, wantStatus: StatusPass},
+		{name: "not accepted", worktreesDir: true, err: errors.New("agent still unknown"), wantStatus: StatusFail},
+		{name: "default worktrees dir", worktreesDir: false, wantStatus: StatusPass},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env, _ := healthyEnv(t)
+			root := t.TempDir()
+			env.TempDir = ""
+			env.RepoDir = filepath.Join(root, "repo")
+			env.WorktreesDir = ""
+			parent := root
+			if tc.worktreesDir {
+				env.WorktreesDir = filepath.Join(root, "wt")
+				parent = env.WorktreesDir
+			}
+			if err := os.MkdirAll(parent, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(parent, "existing"), nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			before := dirEntries(t, parent)
+			smoker := &fakeSmoker{err: tc.err}
+			env.Smoker = smoker
+
+			got := checkKickoffDelivery(context.Background(), env)
+
+			if got.Status != tc.wantStatus {
+				t.Fatalf("kickoff-delivery = %s (%s), want %s", got.Status, got.Detail, tc.wantStatus)
+			}
+			rel, err := filepath.Rel(parent, smoker.dir)
+			if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+				t.Errorf("smoke test ran in %s, want a scratch dir inside %s", smoker.dir, parent)
+			}
+			if !smoker.dirExists {
+				t.Errorf("scratch dir %s did not exist when the agent launched", smoker.dir)
+			}
+			if _, err := os.Stat(smoker.dir); !os.IsNotExist(err) {
+				t.Errorf("scratch dir %s still exists after the check (stat err %v)", smoker.dir, err)
+			}
+			if after := dirEntries(t, parent); fmt.Sprint(after) != fmt.Sprint(before) {
+				t.Errorf("%s left behind: before %v, after %v", parent, before, after)
+			}
+		})
+	}
+}
+
+// An operator who hits the folder-trust dialog needs to be told it is the likely
+// cause, not sent to debug the agent CLI's input handling.
+func TestKickoffFailureNamesFirstLaunchDialog(t *testing.T) {
+	env, _ := healthyEnv(t)
+	env.Smoker = &fakeSmoker{err: errors.New("agent still unknown")}
+	got := checkKickoffDelivery(context.Background(), env)
+	if got.Status != StatusFail || !strings.Contains(got.Fix, "first-launch dialog") {
+		t.Errorf("fix = %q, want it to name a first-launch dialog", got.Fix)
+	}
+}
+
+func dirEntries(t *testing.T, dir string) []string {
+	t.Helper()
+	es, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(es))
+	for _, e := range es {
+		names = append(names, e.Name())
+	}
+	return names
 }

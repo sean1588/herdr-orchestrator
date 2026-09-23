@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -175,6 +176,124 @@ func checkGHLabel(ctx context.Context, env Env) Result {
 	return warn(name, fmt.Sprintf("%q does not exist on %s", env.Label, env.RepoSlug),
 		fmt.Sprintf("create it (`gh label create %s --repo %s`) or the daemon will poll forever and find nothing",
 			env.Label, env.RepoSlug))
+}
+
+// mergeFix names the two real remedies for a base branch this account cannot
+// squash-merge into, rather than restating the symptom.
+const mergeFix = "either remove the requirement for this account (drop required approvals — GitHub " +
+	"forbids approving your own PR — or add the account as a bypass actor, and enable squash merging), " +
+	"or keep it and run with `dry_run: true` so tasks stop at the merge gate for a human to merge"
+
+// checkGHMergeAllowed asks whether the pipeline's last step can succeed: is this
+// account allowed to squash-merge into the base branch? Without it, a protected
+// base lets a task pass every signal from triage to the merge gate and then
+// fail at `gh pr merge --squash` — the worst possible moment on a first run.
+//
+// A blocker fails only when the daemon would actually merge (dry_run: false);
+// under dry_run nothing merges yet, so it is said, not refused. Classic
+// protection that cannot be read is a warning: like a pane that cannot be read,
+// a missing admin scope must never be what stops the daemon.
+func checkGHMergeAllowed(ctx context.Context, env Env) Result {
+	const name = "gh-merge-allowed"
+	if env.RepoSlug == "" || env.Workflow == nil {
+		return skip(name, "no source repo declared in the workflow")
+	}
+	target := env.RepoSlug + ":" + env.Base
+	blockers, unreadable, err := mergeBlockers(ctx, env)
+	if err != nil {
+		return warn(name, err.Error(), fmt.Sprintf("verify by hand that this account can squash-merge into %s", target))
+	}
+	if len(blockers) > 0 {
+		detail := fmt.Sprintf("a squash merge into %s would be refused: %s", target, strings.Join(blockers, "; "))
+		if env.Workflow.Policies.DryRunEnabled() {
+			return warn(name, detail+" (dry_run is on, so nothing merges yet)", mergeFix)
+		}
+		return fail(name, detail, mergeFix)
+	}
+	if unreadable != nil {
+		return warn(name, fmt.Sprintf("no ruleset blocks a squash merge into %s, but classic branch protection is unreadable: %v",
+			target, unreadable),
+			fmt.Sprintf("confirm by hand (or as a repo admin) that %s requires no approvals; if it does, %s", env.Base, mergeFix))
+	}
+	return pass(name, fmt.Sprintf("nothing blocks a squash merge into %s", target))
+}
+
+// mergeBlockers makes the three reads that together answer the question. The
+// ruleset and classic-protection endpoints are both needed: a repo can carry
+// either or both, and neither reports the other's rules. unreadable carries a
+// classic-protection read that failed for any reason other than "not
+// protected" — it needs admin, and a non-admin gets 403 (or, on a repo it
+// cannot push to, 404 "Not Found", which is why the message is matched rather
+// than the status).
+func mergeBlockers(ctx context.Context, env Env) (blockers []string, unreadable, err error) {
+	api := func(path string) ([]byte, error) {
+		return env.Runner.Run(ctx, env.RepoDir, env.GHBin, "api", path)
+	}
+
+	out, err := api("repos/" + env.RepoSlug)
+	if err != nil {
+		return nil, nil, fmt.Errorf("cannot read %s: %w", env.RepoSlug, err)
+	}
+	var repo struct {
+		// Absent for an account without push access; only an explicit false blocks.
+		AllowSquashMerge *bool `json:"allow_squash_merge"`
+	}
+	if err := json.Unmarshal(out, &repo); err != nil {
+		return nil, nil, fmt.Errorf("cannot parse %s: %w", env.RepoSlug, err)
+	}
+	if repo.AllowSquashMerge != nil && !*repo.AllowSquashMerge {
+		blockers = append(blockers, "squash merging is disabled on the repo (allow_squash_merge: false)")
+	}
+
+	out, err = api(fmt.Sprintf("repos/%s/rules/branches/%s", env.RepoSlug, env.Base))
+	if err != nil {
+		return nil, nil, fmt.Errorf("cannot read the rulesets on %s: %w", env.Base, err)
+	}
+	var rules []struct {
+		Type       string `json:"type"`
+		RulesetID  int64  `json:"ruleset_id"`
+		Parameters struct {
+			RequiredApprovingReviewCount int      `json:"required_approving_review_count"`
+			AllowedMergeMethods          []string `json:"allowed_merge_methods"`
+		} `json:"parameters"`
+	}
+	if err := json.Unmarshal(out, &rules); err != nil {
+		return nil, nil, fmt.Errorf("cannot parse the rulesets on %s: %w", env.Base, err)
+	}
+	for _, r := range rules {
+		switch r.Type {
+		case "pull_request":
+			if n := r.Parameters.RequiredApprovingReviewCount; n > 0 {
+				blockers = append(blockers, fmt.Sprintf("ruleset %d requires %d approving review(s)", r.RulesetID, n))
+			}
+			if m := r.Parameters.AllowedMergeMethods; len(m) > 0 && !slices.Contains(m, "squash") {
+				blockers = append(blockers, fmt.Sprintf("ruleset %d does not allow squash merges", r.RulesetID))
+			}
+		case "update":
+			blockers = append(blockers, fmt.Sprintf("ruleset %d restricts updates to bypass actors", r.RulesetID))
+		}
+	}
+
+	out, err = api(fmt.Sprintf("repos/%s/branches/%s/protection", env.RepoSlug, env.Base))
+	switch {
+	case err != nil && strings.Contains(err.Error(), "Branch not protected"):
+		// No classic protection: nothing to add.
+	case err != nil:
+		unreadable = err
+	default:
+		var prot struct {
+			RequiredPullRequestReviews *struct {
+				RequiredApprovingReviewCount int `json:"required_approving_review_count"`
+			} `json:"required_pull_request_reviews"`
+		}
+		if err := json.Unmarshal(out, &prot); err != nil {
+			return nil, nil, fmt.Errorf("cannot parse the branch protection on %s: %w", env.Base, err)
+		}
+		if r := prot.RequiredPullRequestReviews; r != nil && r.RequiredApprovingReviewCount > 0 {
+			blockers = append(blockers, fmt.Sprintf("branch protection requires %d approving review(s)", r.RequiredApprovingReviewCount))
+		}
+	}
+	return blockers, unreadable, nil
 }
 
 func checkRepoCheckout(ctx context.Context, env Env) Result {

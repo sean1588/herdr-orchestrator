@@ -90,6 +90,10 @@ func healthyEnv(t *testing.T) (Env, *proc.Fake) {
 			return []byte(`[{"name":"agent-ready"},{"name":"bug"}]`), nil
 		case c.Name == "git" && c.Args[0] == "rev-list":
 			return []byte("0\n"), nil
+		case c.Name == "git" && c.Args[0] == "remote":
+			return []byte("https://github.com/owner/name.git\n"), nil
+		case c.Name == "git" && c.Args[0] == "config":
+			return []byte("\n!/usr/local/bin/gh auth git-credential\n"), nil
 		case c.Name == "gh" && c.Args[0] == "api":
 			return ghAPI(repoSquashAllowed, rulesNone, protectionNone)(c)
 		}
@@ -427,6 +431,88 @@ func TestFailed_TokenScopes(t *testing.T) {
 				t.Errorf("Failed() = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// withGit scripts origin's url and the credential.helper lookup over the healthy
+// responder. A nil helper is `git config` exiting 1: nothing set.
+func withGit(f *proc.Fake, remote string, helper []byte) {
+	healthy := f.Responder
+	f.Responder = func(c proc.Call) ([]byte, error) {
+		switch {
+		case c.Name == "git" && c.Args[0] == "remote":
+			return []byte(remote + "\n"), nil
+		case c.Name == "git" && c.Args[0] == "config":
+			if helper == nil {
+				return nil, errors.New("exit status 1")
+			}
+			return helper, nil
+		}
+		return healthy(c)
+	}
+}
+
+// gh-token-scopes reads gh's token; git pushes with its credential helper's.
+// Only a helper that asks gh carries a scope added with `gh auth refresh`.
+func TestGitCredentialHelper(t *testing.T) {
+	tests := []struct {
+		name       string
+		remote     string
+		helper     []byte
+		wantStatus Status
+		wantDetail string
+	}{
+		{"keychain helper warns", "https://github.com/o/r.git", []byte("osxkeychain\n"), StatusWarn, "helper: osxkeychain"},
+		{"gh after a clearing line passes", "https://github.com/o/r.git", []byte("\n!/usr/local/bin/gh auth git-credential\n"), StatusPass, "git pushes with gh's credential"},
+		{"scp-like ssh remote passes", "git@github.com:o/r.git", nil, StatusPass, "pushes use ssh"},
+		{"ssh url passes", "ssh://git@github.com/o/r.git", nil, StatusPass, "pushes use ssh"},
+		{"no helper warns with none", "https://github.com/o/r.git", nil, StatusWarn, "helper: none"},
+		{"gh listed before another helper still passes", "https://github.com/o/r.git", []byte("!/usr/local/bin/gh auth git-credential\nstore\n"), StatusPass, "gh's credential"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env, f := healthyEnv(t)
+			withGit(f, tc.remote, tc.helper)
+			got := byName(Run(context.Background(), env, true), "git-credential-helper")
+			if got.Status != tc.wantStatus {
+				t.Fatalf("git-credential-helper = %s (%s), want %s", got.Status, got.Detail, tc.wantStatus)
+			}
+			if !strings.Contains(got.Detail, tc.wantDetail) {
+				t.Errorf("detail = %q, want it to mention %q", got.Detail, tc.wantDetail)
+			}
+			if got.Status == StatusWarn && !strings.Contains(got.Fix, "gh auth setup-git") {
+				t.Errorf("fix = %q, want it to name gh auth setup-git", got.Fix)
+			}
+		})
+	}
+}
+
+// The helper lookup is keyed on origin's scheme and host, which is what git's
+// credential config matches on, and runs in the repo so its local config counts.
+func TestGitCredentialHelperLooksUpOriginsHost(t *testing.T) {
+	env, f := healthyEnv(t)
+	withGit(f, "https://github.com/o/r.git", []byte("osxkeychain\n"))
+	Run(context.Background(), env, true)
+	for _, c := range f.Snapshot() {
+		if c.Name == "git" && c.Args[0] == "config" {
+			if want := "config --get-urlmatch credential.helper https://github.com/"; strings.Join(c.Args, " ") != want {
+				t.Errorf("lookup = %q, want %q", strings.Join(c.Args, " "), want)
+			}
+			if c.Dir != env.RepoDir {
+				t.Errorf("lookup ran in %q, want %q", c.Dir, env.RepoDir)
+			}
+			return
+		}
+	}
+	t.Fatal("no credential.helper lookup was made")
+}
+
+// A keychain helper may well work today; it must not stop the daemon.
+func TestFailed_KeychainHelperDoesNotRefuseStart(t *testing.T) {
+	env, f := healthyEnv(t)
+	withGit(f, "https://github.com/o/r.git", []byte("osxkeychain\n"))
+	if Failed(Run(context.Background(), env, false)) {
+		t.Error("an osxkeychain helper must warn, not fail")
 	}
 }
 

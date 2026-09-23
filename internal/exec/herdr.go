@@ -245,17 +245,20 @@ func (h *Herdr) kickoffAccepted(ctx context.Context, pane string, before AgentSt
 	deadline := time.Now().Add(h.KickoffAckTimeout)
 	for {
 		switch st := h.currentStatus(ctx, pane); st {
-		case before, StateUnknown:
+		case before, StateUnknown, StateIdle:
 			// No movement yet; an unknown reading proves nothing either way. This
 			// arm comes first so a reading equal to the baseline never counts: a
 			// live agent parked after a turn reads "done" before the message too.
+			// Idle is never proof either: a delivered instruction makes the agent
+			// work, and herdr reads text left unsent in the prompt box as idle —
+			// so done -> idle is exactly what a swallowed Enter looks like, and
+			// unknown -> idle is a fresh pane settling with no kickoff.
 		case StateWorking, StateDone:
 			return true
 		default:
 			// A change off an UNKNOWN baseline is herdr's classifier settling on
 			// its first real status for a fresh pane, not evidence the kickoff
-			// landed — unknown -> idle is exactly what a dropped kickoff looks
-			// like. Adopt it as the baseline and keep waiting for movement.
+			// landed. Adopt it as the baseline and keep waiting for movement.
 			if before == StateUnknown {
 				before = st
 				continue

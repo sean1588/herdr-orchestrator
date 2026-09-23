@@ -1500,25 +1500,26 @@ func (e *Engine) isTerminal(state string) bool {
 }
 
 // maybeCleanup tears down a settled task's isolated worktree + herdr workspace when
-// it halts at a terminal state with no PR. This covers every no-PR terminal: a
-// triage reject (-> closed), an intake needs_human (-> escalated), and a failed
-// implementation that escalates before opening a PR (-> escalated) — each of which
-// would otherwise leave a wt-issue-<n> worktree and workspace registered. Terminal
-// states that produced a PR keep their branch/PR on GitHub (a human may still want
-// the local worktree), and the dry-run `merging` halt is not terminal; both are
-// left alone. Cleanup is best-effort: a failure is logged and never fails the drive.
+// it halts at a non-alerting terminal state: a merge (-> merged) or a clean reject
+// (-> closed). After a squash merge every commit is on the base branch and the PR
+// is on GitHub, so nothing local outlives it; a reject never produced anything.
+// Whether the task has a PR is irrelevant — cleanup follows the reason the terminal
+// was reached. An alerting terminal (escalated) is always preserved, PR or not, and
+// the dry-run `merging` halt is not terminal; both are left alone. Cleanup is
+// best-effort: a failure is logged and never fails the drive. The remote branch is
+// not this function's concern.
 //
 // Only called on the drive that actually transitions into the terminal (see the
 // `transitioned` guard at the halt site), so a re-run of an already-settled task
 // does not repeat the teardown.
 func (e *Engine) maybeCleanup(ctx context.Context, task *store.Task) {
-	if task.PRNumber != nil || !e.isTerminal(task.CurrentState) {
+	if !e.isTerminal(task.CurrentState) {
 		return
 	}
 	// A needs_human escalation (an alerting terminal) can hold uncommitted work a
 	// human wants to inspect — force-removing the worktree here is the data loss
 	// that destroyed a completed-but-uncommitted task. Preserve it (mirrors
-	// settleCancelled); only a clean reject (closed) is torn down.
+	// settleCancelled).
 	if e.wf.States[task.CurrentState].Alert {
 		return
 	}

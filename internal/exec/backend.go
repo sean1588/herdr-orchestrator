@@ -68,7 +68,8 @@ type ExecutionBackend interface {
 	Close(ctx context.Context, h Handle) error
 	// Cleanup removes the task's isolated worktree and closes its herdr workspace,
 	// keyed by the durable label (= Spawn.TaskID). Called when a task settles with
-	// no artifact to preserve (a no-PR terminal halt). It is idempotent-safe: an
+	// nothing local to preserve (a merged or closed terminal halt; never an
+	// alerting one). It is idempotent-safe: an
 	// already-removed worktree or already-closed workspace is not an error.
 	Cleanup(ctx context.Context, taskID string) error
 }

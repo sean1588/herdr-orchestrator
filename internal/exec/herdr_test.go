@@ -83,8 +83,8 @@ func TestSpawn_ConstructsCommandsAndParsesPane(t *testing.T) {
 	if hd.PaneID != "w7:p1" {
 		t.Errorf("pane id = %q, want w7:p1 (must be parsed from output, never hardcoded)", hd.PaneID)
 	}
-	if hd.Workdir != "/home/u/wt-issue-5" {
-		t.Errorf("workdir = %q, want /home/u/wt-issue-5", hd.Workdir)
+	if hd.Workdir != "/home/u/repo/.orchestrator/worktrees/wt-issue-5" {
+		t.Errorf("workdir = %q, want /home/u/repo/.orchestrator/worktrees/wt-issue-5", hd.Workdir)
 	}
 
 	calls := f.Snapshot()
@@ -95,9 +95,9 @@ func TestSpawn_ConstructsCommandsAndParsesPane(t *testing.T) {
 	// --no-track: the branch must NOT inherit origin/<base> as its upstream, or a
 	// bare `git push` under push.default=upstream pushes the agent's work straight
 	// to the base branch (this happened — a commit landed on main).
-	hasExactCall(t, calls, "git", "-C", "/home/u/repo", "worktree", "add", "-b", "agent/issue-5", "--no-track", "/home/u/wt-issue-5", "origin/main")
+	hasExactCall(t, calls, "git", "-C", "/home/u/repo", "worktree", "add", "-b", "agent/issue-5", "--no-track", "/home/u/repo/.orchestrator/worktrees/wt-issue-5", "origin/main")
 	// herdr workspace labeled with the durable task id.
-	hasExactCall(t, calls, "herdr", "workspace", "create", "--cwd", "/home/u/wt-issue-5", "--label", "issue-5", "--no-focus")
+	hasExactCall(t, calls, "herdr", "workspace", "create", "--cwd", "/home/u/repo/.orchestrator/worktrees/wt-issue-5", "--label", "issue-5", "--no-focus")
 
 	// One pane-run launches the agent verbatim; the kickoff is delivered as a
 	// separate send-text + send-keys Enter — a single text+Enter raced Claude
@@ -183,7 +183,7 @@ func TestSpawn_PreserveBranch_KeepsExistingBranch(t *testing.T) {
 	}
 	// Fetch the branch, then check it out (no -b, no base) into the worktree.
 	hasExactCall(t, calls, "git", "-C", "/home/u/repo", "fetch", "origin", "agent/issue-5")
-	hasExactCall(t, calls, "git", "-C", "/home/u/repo", "worktree", "add", "/home/u/wt-issue-5", "agent/issue-5")
+	hasExactCall(t, calls, "git", "-C", "/home/u/repo", "worktree", "add", "/home/u/repo/.orchestrator/worktrees/wt-issue-5", "agent/issue-5")
 }
 
 func TestSpawn_PropagatesWorktreeFailure(t *testing.T) {
@@ -308,7 +308,7 @@ func TestResolve_ByLabel(t *testing.T) {
 		case len(c.Args) >= 2 && c.Args[0] == "workspace" && c.Args[1] == "list":
 			return []byte(`{"result":{"workspaces":[{"workspace_id":"w7","label":"issue-5"},{"workspace_id":"w5","label":"other"}]}}`), nil
 		case len(c.Args) >= 2 && c.Args[0] == "pane" && c.Args[1] == "list":
-			return []byte(`{"result":{"panes":[{"pane_id":"w7:p1","agent_status":"working","workspace_id":"w7","cwd":"/home/u/wt-issue-5"}]}}`), nil
+			return []byte(`{"result":{"panes":[{"pane_id":"w7:p1","agent_status":"working","workspace_id":"w7","cwd":"/home/u/repo/.orchestrator/worktrees/wt-issue-5"}]}}`), nil
 		}
 		return nil, nil
 	}}
@@ -318,7 +318,7 @@ func TestResolve_ByLabel(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("resolve: ok=%v err=%v", ok, err)
 	}
-	if hd.PaneID != "w7:p1" || hd.Workdir != "/home/u/wt-issue-5" {
+	if hd.PaneID != "w7:p1" || hd.Workdir != "/home/u/repo/.orchestrator/worktrees/wt-issue-5" {
 		t.Errorf("resolved handle = %+v", hd)
 	}
 
@@ -370,6 +370,28 @@ func cleanupBackend(r proc.Runner) *Herdr {
 	h.WorktreesDir = "/wt"
 	h.RepoDir = "/repo"
 	return h
+}
+
+// The default worktrees dir lives inside the checkout, so the folder trust the
+// user granted the repo covers every spawn; an explicit --worktrees-dir wins.
+func TestWorktreeDir(t *testing.T) {
+	tests := []struct {
+		name         string
+		worktreesDir string
+		want         string
+	}{
+		{name: "default is inside the repo", want: "/home/u/repo/.orchestrator/worktrees/wt-issue-5"},
+		{name: "explicit dir wins", worktreesDir: "/elsewhere", want: "/elsewhere/wt-issue-5"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := NewHerdr(&proc.Fake{})
+			h.WorktreesDir = tc.worktreesDir
+			if got := h.worktreeDir("/home/u/repo", "issue-5"); got != tc.want {
+				t.Errorf("worktreeDir = %q, want %q", got, tc.want)
+			}
+		})
+	}
 }
 
 // Cleanup removes the task's worktree at its DETERMINISTIC path and closes its

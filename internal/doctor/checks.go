@@ -370,11 +370,26 @@ func checkWorktreesDir(ctx context.Context, env Env) Result {
 	}
 	_ = f.Close()
 	_ = os.Remove(f.Name())
+	// The default dir sits inside the checkout; keep it out of the user's
+	// `git status` without touching their committed .gitignore.
+	if env.WorktreesDir == "" {
+		if err := excludeFromGit(ctx, env, orchestratorDirPattern); err != nil {
+			return warn(name, fmt.Sprintf("%s is writable, but %s could not be added to the repo's git exclude: %v",
+				dir, orchestratorDirPattern, err),
+				fmt.Sprintf("add the line %s to .git/info/exclude in %s by hand, or `git status` there will list it",
+					orchestratorDirPattern, env.RepoDir))
+		}
+	}
 	return pass(name, dir)
 }
 
+// orchestratorDirPattern is the exclude line covering the default worktrees dir.
+const orchestratorDirPattern = ".orchestrator/"
+
 // spawnsDir is the directory task worktrees are created in: --worktrees-dir, or
-// the backend's default, a sibling of the repo ("" when neither is known).
+// the backend's default, <repo>/.orchestrator/worktrees ("" when neither is
+// known). It mirrors exec.Herdr.worktreeDir: inside the checkout, so the folder
+// trust the user granted the repo covers every spawn.
 func spawnsDir(env Env) string {
 	if env.WorktreesDir != "" {
 		return env.WorktreesDir
@@ -382,7 +397,43 @@ func spawnsDir(env Env) string {
 	if env.RepoDir == "" {
 		return ""
 	}
-	return filepath.Dir(env.RepoDir)
+	return filepath.Join(env.RepoDir, ".orchestrator", "worktrees")
+}
+
+// excludeFromGit ensures pattern is a line of the repo's info/exclude, which is
+// local and never committed. The git dir is asked of git, not assumed to be
+// <repo>/.git: in a linked worktree .git is a file, and exclude lives in the
+// common dir.
+func excludeFromGit(ctx context.Context, env Env, pattern string) error {
+	out, err := env.Runner.Run(ctx, env.RepoDir, env.GitBin, "rev-parse", "--git-common-dir")
+	if err != nil {
+		return fmt.Errorf("resolve the git dir: %w", err)
+	}
+	gitDir := firstLine(out)
+	if gitDir == "" {
+		return fmt.Errorf("git rev-parse --git-common-dir printed nothing")
+	}
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(env.RepoDir, gitDir)
+	}
+	path := filepath.Join(gitDir, "info", "exclude")
+	b, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if strings.TrimSpace(line) == pattern {
+			return nil
+		}
+	}
+	if len(b) > 0 && b[len(b)-1] != '\n' {
+		b = append(b, '\n')
+	}
+	b = append(b, pattern+"\n"...)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, b, 0o644)
 }
 
 // checkTaskDir creates the task-file directory and proves it writable — the

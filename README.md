@@ -185,10 +185,12 @@ The daemon runs the cheap subset at startup and refuses to start on a failure
 - **`gh` authenticated** for the target repo — verify with `gh auth status`.
   (Confirm it from inside a herdr pane too; PR creation fails silently otherwise.)
 - A **local checkout** of the repo the agent will work in, passed as `--repo`
-  (absolute path). The engine creates per-task worktrees beside it.
+  (absolute path). The engine creates per-task worktrees inside it, under
+  `.orchestrator/worktrees` (kept out of `git status` via `.git/info/exclude`).
 - The agent CLI named in the workflow's `roles.*.launch` on `PATH` (default
   `claude`). Agents run **non-root** with no `--dangerously-skip-permissions`; on
-  a brand-new worktree the agent TUI may prompt to trust the folder.
+  a first run the agent TUI may prompt to trust the folder — run `claude` once in
+  the checkout and accept, and that trust covers every worktree inside it.
 - An issue to work — in the repo your config's `sources` block names (set by
   `init --repo`). `run` drives the `--issue` number you pass directly; the
   `daemon` instead polls the source `select:` label (`agent-ready`).
@@ -209,7 +211,7 @@ Exit code is `0` when the task reaches `merged` (a real merge) or halts at
 `merging` (a dry run withheld the merge), non-zero otherwise (e.g. `escalated`).
 Task state and a per-transition audit log persist in the `--db` SQLite file. Two
 more optional flags are accepted: `--worktrees-dir` (parent dir for the per-task
-git worktrees; defaults to the repo's sibling) and `--task-dir` (where task
+git worktrees; defaults to `<repo>/.orchestrator/worktrees`) and `--task-dir` (where task
 context files are written; defaults to the system temp dir).
 
 Reconcile and resume in-flight tasks after a restart (crash recovery) — keys on

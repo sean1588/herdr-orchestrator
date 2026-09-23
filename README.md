@@ -45,7 +45,8 @@ until the queue drains and only speaks up when something needs you.
 
 Prefer to drive it yourself, or use a different agent? Every step is plain
 markdown and plain commands: [TUTORIAL.md](TUTORIAL.md) walks through it by
-hand, and [RUNBOOK.md](RUNBOOK.md) is the operator's reference.
+hand, and [RUNBOOK.md](RUNBOOK.md) is the reference the agent operates from
+(written for it, readable by you).
 
 ## Install
 
@@ -89,7 +90,7 @@ until you say otherwise.
 | | |
 |---|---|
 | [TUTORIAL.md](TUTORIAL.md) | Human-paced walkthrough: build, validate, drive one issue, go live |
-| [RUNBOOK.md](RUNBOOK.md) | Operating it: bring-up, supervision, escalations, teardown |
+| [RUNBOOK.md](RUNBOOK.md) | The agent's operating reference: bring-up, supervision, escalations, teardown. Written for the agent, readable by a human |
 | [docs/WORKFLOW.md](docs/WORKFLOW.md) | The YAML config: states, gates, decisions, liveness bounds, the seven safety invariants |
 | [docs/CLI.md](docs/CLI.md) | Every `orchestratord` command and the MCP control surface |
 | [docs/DESIGN.md](docs/DESIGN.md) | Architecture and the review → merge loop in detail |

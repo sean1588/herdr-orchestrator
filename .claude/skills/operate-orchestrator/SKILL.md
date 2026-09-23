@@ -194,7 +194,7 @@ transition's `from → to (trigger/result)`:
     the static pane was classified as parked on an interactive prompt. Read the pane
     read-only to see which one, add the tool to the allow-list, then open a fresh
     issue — never send keystrokes into the pane.
-  - from *any* state on `agent_crashed` → (daemon run with `--pane-classifier`) the
+  - from *any* state on `agent_crashed` → (daemon run with a Jev `--pane-classifier`) the
     static pane shows an error or a bare shell with no agent running. Read the pane
     read-only for the error and check herdr.
   - from *any* state on `drive_deadline` → the scheduler's reaper stopped a drive

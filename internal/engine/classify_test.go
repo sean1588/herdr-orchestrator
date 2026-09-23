@@ -3,6 +3,9 @@ package engine
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -178,5 +181,42 @@ func TestNoProgress_ClassifierNotConsultedWhilePaneMoves(t *testing.T) {
 	}
 	if c := fc.callCount(); c != 0 {
 		t.Errorf("classifier called %d times on a moving pane, want 0", c)
+	}
+}
+
+// With the keyless Heuristic configured, the engine's outcome on a static pane
+// is decided by the real fixture corpus. A permission prompt escalates at once
+// as blocked_on_prompt, long before the state timeout. Every other pane —
+// working, finished, crashed, a question to the human — escalates no_progress
+// exactly as on main: the heuristic does not pretend to fix what a pattern
+// cannot see.
+func TestNoProgress_HeuristicOnTheFixtureCorpus(t *testing.T) {
+	paths, err := filepath.Glob("../classify/testdata/panes/*.txt")
+	if err != nil || len(paths) == 0 {
+		t.Fatalf("no fixtures found: %v", err)
+	}
+	for i, p := range paths {
+		name := strings.TrimSuffix(filepath.Base(p), ".txt")
+		t.Run(name, func(t *testing.T) {
+			tail, err := os.ReadFile(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := [4]string{"implementing", "escalated", "no_progress", "state_timeout_target"}
+			if strings.HasPrefix(name, string(classify.AwaitingPermission)+"-") {
+				want[2] = "blocked_on_prompt"
+			}
+
+			st := newStore(t)
+			b := &fakeBackend{pane: "w1:p1", readFunc: func(int) (string, error) { return string(tail), nil }}
+			e := newEngine(t, st, b, &fakeGH{}, time.Hour)
+			e.noProgress = 30 * time.Millisecond
+			e.classifier = classify.Heuristic{}
+
+			final, rows := driveFrom(t, e, st, 200+i, "implementing", nil)
+			if final != "escalated" || !hasAudit(rows, want[0], want[1], want[2], want[3]) {
+				t.Fatalf("final = %q, audit %+v; want %v", final, rows, want)
+			}
+		})
 	}
 }

@@ -375,7 +375,7 @@ the trigger tells you why:
   static pane was classified as a permission or question prompt. Read the pane
   read-only to see which one, add the tool to `permissions.allow`, then open a
   fresh issue — never send keystrokes into the pane.
-- *any state* `→ escalated` on `agent_crashed` → with `--pane-classifier`, the
+- *any state* `→ escalated` on `agent_crashed` → with a Jev `--pane-classifier`, the
   static pane shows an error or a bare shell with no agent running. Read the pane
   for the error and check herdr.
 - *any state* `→ escalated` on `drive_deadline` → the scheduler's reaper stopped
@@ -450,7 +450,8 @@ When you're done operating:
 
 **Daemon flags:** `--config` · `--repo` · `--base` (main) · `--db`
 (orchestrator.db) · `--task-dir` · `--worktrees-dir` · `--poll-interval` (30s) ·
-`--notify-webhook` · `--pane-classifier` (off; needs `OPENROUTER_API_KEY`) ·
+`--notify-webhook` · `--pane-classifier` (off; `heuristic`, or a Jev URL that
+needs `OPENROUTER_API_KEY`) ·
 `--event-log` (off) · `--mcp-listen` (off).
 
 **Preflight:** `orchestratord doctor --config <c> --repo <dir> [--quick]` —

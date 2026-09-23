@@ -46,6 +46,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sean1588/herdr-orchestrator/internal/classify"
 	"github.com/sean1588/herdr-orchestrator/internal/config"
 	"github.com/sean1588/herdr-orchestrator/internal/doctor"
 	"github.com/sean1588/herdr-orchestrator/internal/engine"
@@ -120,6 +121,8 @@ run/recover/daemon flags:
   --worktrees-dir PATH   parent dir for worktrees (default: sibling of repo)
   --task-dir PATH        dir for task context files (default: temp dir)
   --notify-webhook URL   POST escalation/alert events as JSON (default: none)
+  --pane-classifier URL  classify static agent panes via Jev at this endpoint, e.g.
+                         https://openrouter.ai/api/v1/systemone; needs OPENROUTER_API_KEY (default: off)
   --poll-interval DUR    daemon source poll cadence (default 30s)
   --mcp-listen ADDR      daemon MCP control server address, e.g. 127.0.0.1:7777 (default: off)
   --skip-preflight       daemon: start even if the startup preflight fails
@@ -286,7 +289,7 @@ func cycleBounded(comp []string, wf *config.Workflow) bool {
 // commonFlags are shared by run and recover.
 type commonFlags struct {
 	config, repo, base, db, worktreesDir, taskDir string
-	notifyWebhook                                 string
+	notifyWebhook, paneClassifier                 string
 	commandTimeout                                time.Duration
 }
 
@@ -298,6 +301,7 @@ func registerCommon(fs *flag.FlagSet, cf *commonFlags) {
 	fs.StringVar(&cf.worktreesDir, "worktrees-dir", "", "parent dir for worktrees (default: sibling of repo)")
 	fs.StringVar(&cf.taskDir, "task-dir", "", "dir for task context files (default: temp dir)")
 	fs.StringVar(&cf.notifyWebhook, "notify-webhook", "", "POST escalation/alert events as JSON to this URL (default: none)")
+	fs.StringVar(&cf.paneClassifier, "pane-classifier", "", "classify static agent panes via Jev at this endpoint; needs "+classify.KeyEnv+" (default: off)")
 	fs.DurationVar(&cf.commandTimeout, "command-timeout", proc.DefaultTimeout,
 		"per-call budget for every git/gh/herdr subprocess; raise it on a very large repo, 0 disables (unbounded)")
 }
@@ -334,6 +338,11 @@ func (cf commonFlags) wire(ctx context.Context) (*wired, error) {
 	absRepo, err := filepath.Abs(cf.repo)
 	if err != nil {
 		return nil, fmt.Errorf("resolve repo dir: %w", err)
+	}
+
+	classifier, err := paneClassifierFor(cf.paneClassifier, os.Getenv)
+	if err != nil {
+		return nil, err
 	}
 
 	st, err := store.Open(ctx, cf.db)
@@ -382,9 +391,24 @@ func (cf commonFlags) wire(ctx context.Context) (*wired, error) {
 		ConfigDir:      filepath.Dir(cf.config),
 		TaskDir:        cf.taskDir,
 		Notifier:       notifier,
+		PaneClassifier: classifier,
 		StartState:     start,
 	})
 	return &wired{eng: eng, store: st, source: issues, wf: wf, repoDir: absRepo}, nil
+}
+
+// paneClassifierFor builds the --pane-classifier classifier. An empty URL is
+// nil — the engine skips the arm, so a static pane escalates as no_progress with
+// no network call. A URL without its key is refused at startup rather than
+// failing every classification silently at runtime.
+func paneClassifierFor(url string, getenv func(string) string) (classify.PaneClassifier, error) {
+	if url == "" {
+		return nil, nil
+	}
+	if getenv(classify.KeyEnv) == "" {
+		return nil, fmt.Errorf("--pane-classifier needs %s set", classify.KeyEnv)
+	}
+	return classify.Jev{URL: url, Getenv: getenv}, nil
 }
 
 func cmdRun(args []string) int {

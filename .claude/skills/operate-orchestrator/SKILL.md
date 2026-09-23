@@ -190,6 +190,13 @@ transition's `from → to (trigger/result)`:
     whole `policies.no_progress_timeout` window, confirmed against the pane's own
     bytes. "Nothing happened at all", rather than "this took too long". Read the
     pane read-only to see where it died.
+  - from *any* state on `blocked_on_prompt` → (daemon run with `--pane-classifier`)
+    the static pane was classified as parked on an interactive prompt. Read the pane
+    read-only to see which one, add the tool to the allow-list, then open a fresh
+    issue — never send keystrokes into the pane.
+  - from *any* state on `agent_crashed` → (daemon run with `--pane-classifier`) the
+    static pane shows an error or a bare shell with no agent running. Read the pane
+    read-only for the error and check herdr.
   - from *any* state on `drive_deadline` → the scheduler's reaper stopped a drive
     that outlived `policies.drive_deadline`. This is the backstop for a drive wedged
     where the engine has no timer armed at all — a spawn, a gate read, a decision, a

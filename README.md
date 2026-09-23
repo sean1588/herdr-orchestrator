@@ -262,8 +262,9 @@ holding the config in your head. Unknown ages are omitted, never reported as `0`
 **Escalations explain themselves.** An escalation delivered via
 `--notify-webhook` carries the diagnosis the daemon already had when it
 escalated: the `Cause` (`timeout`, `blocked_timeout`, `retry_exhausted`,
-`no_progress`, `drive_deadline`, or a gate/decision result), the last few
-transitions, the tail of the agent's pane, and a concrete recommended action.
+`no_progress`, `blocked_on_prompt`, `agent_crashed`, `drive_deadline`, or a
+gate/decision result), the last few transitions, the tail of the agent's pane,
+and a concrete recommended action.
 Since a settled task can never be re-driven, the recommendation is always "fix
 the cause and open a fresh issue", never "retry it".
 
@@ -351,6 +352,17 @@ working steadily for an hour emits no events at all. A pane that cannot be read
 counts as progress: a herdr blip must never be what escalates a task. Disabling
 it is allowed only if every agent state declares its own timeout; the validator
 rejects the combination that would leave a state unbounded.
+
+Static bytes say only that nothing moved, not why. With `--pane-classifier URL`
+(off by default; needs `OPENROUTER_API_KEY`) the daemon asks TypeSafe's Jev
+(`typesafe/jev-1.13`, via OpenRouter's `/systemone`) what the unmoving tail
+means, and acts only on an answer at p ≥ 0.9: a permission or question prompt
+escalates at once as `blocked_on_prompt`; a crash as `agent_crashed`; `working`
+(a long quiet build or test run) resets the window instead of escalating;
+`finished` runs the same artifact check an idle agent gets, and advances only on
+the verdict file or a passing gate. An unsure answer or a failed call escalates
+`no_progress` exactly as without it. The classifier runs only here — never on a
+moving pane, never on a gate or decision — and each call costs about $0.00004.
 
 **`drive_deadline`** (a duration; absent ⇒ twice the longest state timeout,
 floored at `1h`) is the hard ceiling on a single drive, enforced by a reaper in

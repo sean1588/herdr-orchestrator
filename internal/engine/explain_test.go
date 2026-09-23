@@ -113,6 +113,8 @@ func TestRecommendFor_CoversEveryEscalationCause(t *testing.T) {
 	for _, tc := range []struct{ cause, want string }{
 		{"blocked_timeout", "permissions.allow"},
 		{"no_progress", "no observable output"},
+		{"blocked_on_prompt", "never send keystrokes"},
+		{"agent_crashed", "check herdr"},
 		{"drive_deadline", "wall-clock ceiling"},
 		{"timeout", "state timeout"},
 		{"retry_exhausted", "retry cap"},

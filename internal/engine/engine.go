@@ -30,6 +30,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sean1588/herdr-orchestrator/internal/classify"
 	"github.com/sean1588/herdr-orchestrator/internal/config"
 	"github.com/sean1588/herdr-orchestrator/internal/exec"
 	"github.com/sean1588/herdr-orchestrator/internal/github"
@@ -118,6 +119,10 @@ type Config struct {
 	Logger            *slog.Logger
 	// Notifier forwards escalation/alert events out-of-band; default notify.Nop.
 	Notifier notify.Notifier
+	// PaneClassifier explains a pane the no-progress bound found static, so a
+	// prompt escalates at once and a long quiet build is not mistaken for a dead
+	// agent. Nil => the static pane escalates as no_progress, as it always has.
+	PaneClassifier classify.PaneClassifier
 }
 
 // Engine drives tasks through the workflow.
@@ -139,6 +144,7 @@ type Engine struct {
 	now        func() time.Time // injectable clock; drives the blocked_on_gate wait timeout
 	log        *slog.Logger
 	notifier   notify.Notifier
+	classifier classify.PaneClassifier
 }
 
 // New builds an Engine, applying defaults.
@@ -160,6 +166,7 @@ func New(c Config) *Engine {
 		parseDur:       c.DurationFunc,
 		log:            c.Logger,
 		notifier:       c.Notifier,
+		classifier:     c.PaneClassifier,
 	}
 	if e.taskDir == "" {
 		e.taskDir = os.TempDir()
@@ -718,9 +725,38 @@ func (e *Engine) awaitAgentState(ctx context.Context, task *store.Task, st confi
 			// evidence of a dead agent. Confirm against the pane's own bytes before
 			// giving up on it, which is what keeps a legitimately slow agent from
 			// being mistaken for a wedged one.
-			moved, digest := e.paneMoved(ctx, task, lastDigest)
+			moved, digest, tail := e.paneMoved(ctx, task, lastDigest)
 			if moved {
 				lastDigest = digest
+				resetProgress()
+				continue
+			}
+			// Static bytes say only that nothing moved, not why. Ask what the
+			// stillness means. The artifact still decides success — "finished"
+			// only runs the check the idle arm runs — and an unsure or failed
+			// classification falls through to exactly the escalation below.
+			switch e.classifyStatic(ctx, task, tail) {
+			case classify.AwaitingPermission, classify.AwaitingAnswer:
+				target, why := e.escalationTarget(task.CurrentState)
+				e.log.Warn("blocked on prompt", "task", task.ID, "state", task.CurrentState, "to", target, "via", why)
+				return target, "blocked_on_prompt", why, nil
+			case classify.Crashed:
+				target, why := e.escalationTarget(task.CurrentState)
+				e.log.Warn("agent crashed", "task", task.ID, "state", task.CurrentState, "to", target, "via", why)
+				return target, "agent_crashed", why, nil
+			case classify.Finished:
+				v, found, aerr := e.idleArtifact(ctx, task, doneT, blockedTimer != nil)
+				if aerr != nil {
+					return "", "", "", aerr
+				}
+				if found {
+					return doneT.Branch[v], "agent.done", v, nil
+				}
+				resetProgress()
+				continue
+			case classify.Working:
+				// A long compile or test run emits nothing; this is the case that
+				// used to escalate an agent that was doing its job.
 				resetProgress()
 				continue
 			}
@@ -760,37 +796,12 @@ func (e *Engine) awaitAgentState(ctx context.Context, task *store.Task, st confi
 				// status. An idle that has produced nothing keeps waiting, so the
 				// "dead pane wrote nothing" case still surfaces on the timeout
 				// rather than being masked here.
-				if dec := decisionRefOf(doneT); dec != "" {
-					// Decision state (intake, pr_open): the verdict file is the artifact.
-					v, found, derr := e.tryDecisionVerdict(task, dec)
-					if derr != nil {
-						return "", "", "", derr
-					}
-					if found {
-						return doneT.Branch[v], "agent.done", v, nil
-					}
-				} else if len(doneT.GateRefs()) > 0 && blockedTimer == nil {
-					// Gate state (implementing, changes_requested): GitHub is the
-					// artifact. Only a pass advances. A fail means the agent has not
-					// opened its PR yet — not a reason to escalate while the state
-					// timeout is still running — so we keep waiting exactly as before.
-					// A transient gh error is logged and waited through rather than
-					// failing the drive: idle fires once per status change (the event
-					// hub broadcasts only diffs), and the timeout still bounds us.
-					//
-					// The blockedTimer guard keeps this from reopening the hole the
-					// blocked bound exists to close: an agent parked on an
-					// unanswerable prompt can report idle rather than blocked, so
-					// inside an open blocked window idle stays non-recovery. Only
-					// *working* clears that window, so an agent that was blocked,
-					// recovered, then finished still takes the shortcut.
-					v, gerr := e.evaluateGate(ctx, task, doneT)
-					if gerr != nil {
-						e.log.Warn("idle gate check failed; still waiting",
-							"task", task.ID, "state", task.CurrentState, "err", gerr)
-					} else if v == "pass" {
-						return doneT.Branch[v], "agent.done", v, nil
-					}
+				v, found, aerr := e.idleArtifact(ctx, task, doneT, blockedTimer != nil)
+				if aerr != nil {
+					return "", "", "", aerr
+				}
+				if found {
+					return doneT.Branch[v], "agent.done", v, nil
 				}
 			case exec.StateBlocked:
 				if blockedT != nil && blockedT.Action != nil {
@@ -823,22 +834,77 @@ func (e *Engine) awaitAgentState(ctx context.Context, task *store.Task, st confi
 const progressReadLines = 80
 
 // paneMoved reports whether the agent pane's tail has changed since prev,
-// returning the new digest. A read failure counts as movement: a herdr blip must
-// never be the thing that escalates a task. That deliberately means a persistently
-// unreadable pane keeps this bound from firing — the state timeout and the
-// scheduler's drive deadline are the backstops for that case.
-func (e *Engine) paneMoved(ctx context.Context, task *store.Task, prev string) (bool, string) {
+// returning the new digest and the tail it hashed. A read failure counts as
+// movement: a herdr blip must never be the thing that escalates a task. That
+// deliberately means a persistently unreadable pane keeps this bound from firing
+// — the state timeout and the scheduler's drive deadline are the backstops for
+// that case.
+func (e *Engine) paneMoved(ctx context.Context, task *store.Task, prev string) (moved bool, digest, tail string) {
 	if task.PaneID == "" {
-		return true, prev
+		return true, prev, ""
 	}
 	out, err := e.backend.Read(ctx, exec.Handle{PaneID: task.PaneID}, progressReadLines)
 	if err != nil {
 		e.log.Warn("progress check: pane read failed; assuming progress",
 			"task", task.ID, "pane", task.PaneID, "err", err)
-		return true, prev
+		return true, prev, ""
 	}
 	d := digestOf(out)
-	return d != prev, d
+	return d != prev, d, out
+}
+
+// classifyStatic asks the pane classifier what a static tail means. It returns
+// "" — which the caller treats exactly as it did before classifiers existed —
+// when there is no classifier, the call fails, or the answer is below
+// classify.Threshold. A classifier blip must never change what the engine would
+// otherwise have done.
+func (e *Engine) classifyStatic(ctx context.Context, task *store.Task, tail string) classify.Activity {
+	if e.classifier == nil {
+		return ""
+	}
+	r, err := e.classifier.Classify(ctx, tail)
+	if err != nil {
+		e.log.Warn("pane classifier failed; treating as unclassified", "task", task.ID, "err", err)
+		return ""
+	}
+	e.log.Info("static pane classified", "task", task.ID, "state", task.CurrentState,
+		"activity", r.Activity, "p", r.Confidence)
+	if !r.Confident() {
+		return ""
+	}
+	return r.Activity
+}
+
+// idleArtifact checks whether an agent that looks finished — idle status, or a
+// static pane classified as finished — has actually produced its artifact. The
+// artifact decides, never the pane: found is true only for a decision verdict on
+// disk or a passing gate, and anything else means keep waiting.
+//
+// blocked is whether a blocked window is open. It keeps the gate shortcut from
+// reopening the hole the blocked bound exists to close: an agent parked on an
+// unanswerable prompt can read as idle rather than blocked, so inside an open
+// blocked window idle stays non-recovery. Only *working* clears that window, so
+// an agent that was blocked, recovered, then finished still takes the shortcut.
+func (e *Engine) idleArtifact(ctx context.Context, task *store.Task, doneT *config.Transition, blocked bool) (verdict string, found bool, err error) {
+	if dec := decisionRefOf(doneT); dec != "" {
+		// Decision state (intake, pr_open): the verdict file is the artifact.
+		return e.tryDecisionVerdict(task, dec)
+	}
+	if doneT == nil || len(doneT.GateRefs()) == 0 || blocked {
+		return "", false, nil
+	}
+	// Gate state (implementing, changes_requested): GitHub is the artifact. Only
+	// a pass advances. A fail means the agent has not opened its PR yet — not a
+	// reason to escalate while the state timeout is still running. A transient gh
+	// error is logged and waited through rather than failing the drive: the
+	// timeout still bounds us.
+	v, gerr := e.evaluateGate(ctx, task, doneT)
+	if gerr != nil {
+		e.log.Warn("idle gate check failed; still waiting",
+			"task", task.ID, "state", task.CurrentState, "err", gerr)
+		return "", false, nil
+	}
+	return v, v == "pass", nil
 }
 
 // paneDigest takes the baseline the first confirmation read compares against.
@@ -1362,6 +1428,10 @@ func recommendFor(cause string) string {
 	switch {
 	case strings.HasPrefix(cause, "blocked_timeout"):
 		return "The agent sat blocked on an interactive prompt. Read its pane (read-only) to see which one, add the tool to permissions.allow, then open a fresh issue — a settled task cannot be re-driven."
+	case strings.HasPrefix(cause, "blocked_on_prompt"):
+		return "The agent is parked on an interactive prompt. Read its pane (read-only) to see which one, add the tool to permissions.allow, then open a fresh issue — never send keystrokes into the pane."
+	case strings.HasPrefix(cause, "agent_crashed"):
+		return "The agent's pane shows an error or a bare shell with no agent running. Read its pane (read-only) for the error and check herdr, then open a fresh issue."
 	case strings.HasPrefix(cause, "no_progress"):
 		return "The agent produced no observable output for the no_progress window. Read its pane (read-only): a prompt means fix the allow-list; a dead pane means check herdr. Then open a fresh issue."
 	case strings.HasPrefix(cause, "drive_deadline"):

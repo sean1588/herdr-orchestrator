@@ -220,6 +220,14 @@ a task). Run it until green, then start the daemon. `--quick` skips the agent
 launch. The daemon runs the cheap subset itself at startup and refuses to start
 on a failure; `--skip-preflight` overrides that.
 
+**The herdr version** is judged against the range this build was tested with,
+`HerdrTestedMin`–`HerdrTestedMax` in `internal/exec/herdr.go` (today 0.8.2–0.9.1).
+Older fails (`herdr update`); newer only warns, because the full `doctor` — the
+kickoff smoke test — is the real test of a new herdr. To bump the range after a
+herdr release: run the full `doctor` (without `--quick`) on the new herdr, drive
+one issue to `merged` on it, then raise `HerdrTestedMax` and the range named in
+`README.md`'s prerequisites. The constants are the only code a bump touches.
+
 The table remains as the explanation of *why* each requirement matters, and for
 diagnosing by hand when `doctor` is not available:
 

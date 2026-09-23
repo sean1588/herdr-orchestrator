@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -115,6 +116,26 @@ func TestCmdVersion(t *testing.T) {
 	}
 	if !strings.Contains(out, version) {
 		t.Errorf("cmdVersion output %q does not contain version %q", out, version)
+	}
+}
+
+// TestVersionStampedByLdflags pins the contract .github/workflows/release.yml
+// relies on: -ldflags "-X main.version=<tag>" stamps what `orchestratord version`
+// prints. -X on a variable that does not exist is silently ignored, so renaming
+// `version` would leave release binaries printing "dev"; this test fails instead.
+func TestVersionStampedByLdflags(t *testing.T) {
+	const want = "v9.9.9-test"
+	bin := filepath.Join(t.TempDir(), "orchestratord")
+	build := exec.Command("go", "build", "-o", bin, "-ldflags", "-X main.version="+want, ".")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, out)
+	}
+	out, err := exec.Command(bin, "version").Output()
+	if err != nil {
+		t.Fatalf("orchestratord version: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != "orchestratord "+want {
+		t.Errorf("orchestratord version = %q, want %q", got, "orchestratord "+want)
 	}
 }
 

@@ -378,7 +378,7 @@ func (cf commonFlags) wire(ctx context.Context) (*wired, error) {
 	// a PAT lacking checks:read 403s the check-runs API and breaks the ci_green gate.
 	// The exec backend keeps the full env (agent launches may need it).
 	gh := github.New(proc.WithTimeout(proc.NewScrubbed("GITHUB_TOKEN", "GH_TOKEN"), cf.commandTimeout))
-	issues := github.IssueSource{Client: gh, RepoDir: absRepo}
+	issues := github.IssueSource{Client: gh, RepoDir: absRepo, Log: slog.Default()}
 	eng := engine.New(engine.Config{
 		Workflow:       wf,
 		WorkflowSource: raw,

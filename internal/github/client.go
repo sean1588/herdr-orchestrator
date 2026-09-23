@@ -66,12 +66,21 @@ type PullRequests interface {
 	DeleteRemoteBranch(ctx context.Context, repoDir, branch string) error
 }
 
+// ListedIssue is a labeled open issue and the numbers of the issues it is
+// blocked by that are not yet closed. An empty OpenBlockers means the issue is
+// on the frontier: nothing it depends on is still outstanding.
+type ListedIssue struct {
+	Number       int
+	OpenBlockers []int
+}
+
 // IssueClient is the GitHub issue API, separate from pull-request operations.
 type IssueClient interface {
 	// Issue loads an issue's title and body from the given checkout's repository.
 	Issue(ctx context.Context, repoDir string, number int) (*Issue, error)
-	// ListIssues discovers open issues matching label.
-	ListIssues(ctx context.Context, repoDir, label string) ([]int, error)
+	// ListIssues discovers open issues matching label, with each one's open
+	// blockers.
+	ListIssues(ctx context.Context, repoDir, label string) ([]ListedIssue, error)
 	// RemoveLabel acknowledges an issue. Removing an absent label is a no-op.
 	RemoveLabel(ctx context.Context, repoDir string, number int, label string) error
 	// CloseIssue marks successful work complete with a result comment.

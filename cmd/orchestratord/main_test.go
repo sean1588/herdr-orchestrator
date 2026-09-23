@@ -39,7 +39,7 @@ func (f *fakeGH) FindPR(ctx context.Context, repoDir, branch string) (*github.PR
 func (f *fakeGH) Issue(ctx context.Context, repoDir string, number int) (*github.Issue, error) {
 	return nil, nil
 }
-func (f *fakeGH) ListIssues(ctx context.Context, repoDir, label string) ([]int, error) {
+func (f *fakeGH) ListIssues(ctx context.Context, repoDir, label string) ([]github.ListedIssue, error) {
 	return nil, nil
 }
 func (f *fakeGH) RemoveLabel(ctx context.Context, repoDir string, number int, label string) error {

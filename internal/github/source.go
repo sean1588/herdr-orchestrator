@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strconv"
 
 	"github.com/sean1588/herdr-orchestrator/internal/source"
@@ -13,6 +14,9 @@ import (
 type IssueSource struct {
 	Client  IssueClient
 	RepoDir string
+	// Log, when set, records each labeled issue a poll holds back on open
+	// blockers. nil is silent.
+	Log *slog.Logger
 }
 
 var _ source.Source = IssueSource{}
@@ -44,13 +48,21 @@ func (s IssueSource) List(ctx context.Context, selector source.Selector) ([]stri
 	if label == "" {
 		return nil, fmt.Errorf("GitHub discovery requires a nonempty label")
 	}
-	numbers, err := s.Client.ListIssues(ctx, s.RepoDir, label)
+	issues, err := s.Client.ListIssues(ctx, s.RepoDir, label)
 	if err != nil {
 		return nil, err
 	}
-	keys := make([]string, len(numbers))
-	for i, n := range numbers {
-		keys[i] = strconv.Itoa(n)
+	// Only the frontier is discoverable: an issue waits until every issue it is
+	// blocked by is closed.
+	keys := make([]string, 0, len(issues))
+	for _, is := range issues {
+		if len(is.OpenBlockers) > 0 {
+			if s.Log != nil {
+				s.Log.Info("issue waiting on open blockers", "issue", is.Number, "blockers", is.OpenBlockers)
+			}
+			continue
+		}
+		keys = append(keys, strconv.Itoa(is.Number))
 	}
 	return keys, nil
 }

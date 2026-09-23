@@ -1,9 +1,14 @@
 package github
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/sean1588/herdr-orchestrator/internal/proc"
@@ -88,5 +93,75 @@ func TestIssueSourceSelectorAndErrors(t *testing.T) {
 	}
 	if _, err := s.Get(ctx, "1"); !errors.Is(err, sentinel) {
 		t.Fatalf("error not preserved: %v", err)
+	}
+}
+
+func TestIssueSourceListsOnlyTheFrontier(t *testing.T) {
+	// blocker renders one blockedBy node in the verified gh shape.
+	blocker := func(n int, state string) string {
+		return fmt.Sprintf(`{"id":"I_kwFIXTURE%d","number":%d,"state":%q,"title":"Synthetic","url":"https://github.com/example/repo/issues/%d"}`, n, n, state, n)
+	}
+	issue := func(n int, blockers ...string) string {
+		return fmt.Sprintf(`{"number":%d,"blockedBy":{"nodes":[%s],"totalCount":%d}}`, n, strings.Join(blockers, ","), len(blockers))
+	}
+	type held struct {
+		Issue    int   `json:"issue"`
+		Blockers []int `json:"blockers"`
+	}
+	for _, tc := range []struct {
+		name     string
+		issues   []string
+		wantKeys []string
+		wantHeld []held
+	}{
+		{"no blockers", []string{issue(1)}, []string{"1"}, nil},
+		{"all blockers closed", []string{issue(2, blocker(1, "CLOSED"), blocker(3, "CLOSED"))}, []string{"2"}, nil},
+		{"open blocker holds", []string{issue(72, blocker(71, "OPEN"))}, []string{}, []held{{72, []int{71}}}},
+		{"mixed holds on the open one", []string{issue(9, blocker(7, "CLOSED"), blocker(8, "OPEN"))}, []string{}, []held{{9, []int{8}}}},
+		{
+			"frontier of a chain",
+			[]string{issue(10), issue(11, blocker(10, "OPEN")), issue(12, blocker(10, "OPEN"), blocker(11, "OPEN"))},
+			[]string{"10"},
+			[]held{{11, []int{10}}, {12, []int{10, 11}}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := "[" + strings.Join(tc.issues, ",") + "]"
+			f := &proc.Fake{Responder: func(proc.Call) ([]byte, error) { return []byte(out), nil }}
+			var buf bytes.Buffer
+			s := IssueSource{Client: New(f), Log: slog.New(slog.NewJSONHandler(&buf, nil))}
+			keys, err := s.List(context.Background(), source.Selector{"label": "ready"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(keys, tc.wantKeys) {
+				t.Fatalf("keys = %v, want %v", keys, tc.wantKeys)
+			}
+			var got []held
+			dec := json.NewDecoder(&buf)
+			for dec.More() {
+				var rec struct {
+					Level string `json:"level"`
+					Msg   string `json:"msg"`
+					held
+				}
+				if err := dec.Decode(&rec); err != nil {
+					t.Fatal(err)
+				}
+				if rec.Level != "INFO" || rec.Msg != "issue waiting on open blockers" {
+					t.Fatalf("unexpected record %+v", rec)
+				}
+				got = append(got, rec.held)
+			}
+			if !reflect.DeepEqual(got, tc.wantHeld) {
+				t.Fatalf("held records = %+v, want %+v", got, tc.wantHeld)
+			}
+
+			// A nil logger filters identically and stays silent.
+			s.Log = nil
+			if keys, err := s.List(context.Background(), source.Selector{"label": "ready"}); err != nil || !reflect.DeepEqual(keys, tc.wantKeys) {
+				t.Fatalf("nil logger: keys = %v %v, want %v", keys, err, tc.wantKeys)
+			}
+		})
 	}
 }

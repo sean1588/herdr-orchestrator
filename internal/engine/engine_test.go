@@ -133,7 +133,7 @@ func (g *fakeGH) Issue(ctx context.Context, repoDir string, n int) (*github.Issu
 	}
 	return &github.Issue{Number: n, Title: "Test", Body: "Body"}, nil
 }
-func (g *fakeGH) ListIssues(ctx context.Context, repoDir, label string) ([]int, error) {
+func (g *fakeGH) ListIssues(ctx context.Context, repoDir, label string) ([]github.ListedIssue, error) {
 	return nil, nil
 }
 func (g *fakeGH) RemoveLabel(ctx context.Context, repoDir string, number int, label string) error {

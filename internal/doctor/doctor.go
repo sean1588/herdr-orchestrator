@@ -71,6 +71,7 @@ func Checks() []Check {
 		{Name: "gh-token-env", Run: checkGHTokenEnv},
 		{Name: "gh-repo", Run: checkGHRepo},
 		{Name: "gh-label", Run: checkGHLabel},
+		{Name: "gh-merge-allowed", Run: checkGHMergeAllowed},
 		{Name: "repo-checkout", Run: checkRepoCheckout},
 		{Name: "repo-base-branch", Run: checkBaseBranch},
 		{Name: "repo-base-current", Run: checkBaseCurrent},

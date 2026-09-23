@@ -88,6 +88,8 @@ func healthyEnv(t *testing.T) (Env, *proc.Fake) {
 			return []byte(`[{"name":"agent-ready"},{"name":"bug"}]`), nil
 		case c.Name == "git" && c.Args[0] == "rev-list":
 			return []byte("0\n"), nil
+		case c.Name == "gh" && c.Args[0] == "api":
+			return ghAPI(repoSquashAllowed, rulesNone, protectionNone)(c)
 		}
 		return nil, nil
 	}}
@@ -415,6 +417,119 @@ func TestKickoffSmokeRunsInsideTheWorktreesDir(t *testing.T) {
 	}
 }
 
+// apiReply is one scripted `gh api` response. stderr non-empty means the call
+// failed the way gh fails: the body still on stdout, the message on stderr, and
+// proc's runner folding stderr into the error.
+type apiReply struct{ body, stderr string }
+
+// Real response shapes. The unprotected trio is what this repo returns today
+// (criterion 1 of the issue); the 403 is GitHub's reply to a non-admin reading
+// classic protection; the "Not Found" 404 is what a repo the account cannot
+// push to returns for the same read.
+var (
+	repoSquashAllowed  = apiReply{body: `{"full_name":"owner/name","allow_squash_merge":true,"allow_merge_commit":true,"allow_rebase_merge":true}`}
+	repoSquashDisabled = apiReply{body: `{"full_name":"owner/name","allow_squash_merge":false,"allow_merge_commit":true,"allow_rebase_merge":true}`}
+
+	rulesNone            = apiReply{body: `[]`}
+	rulesRequireApproval = apiReply{body: `[{"type":"pull_request","parameters":{"required_approving_review_count":1,"dismiss_stale_reviews_on_push":false,"require_code_owner_review":false,"require_last_push_approval":false,"required_review_thread_resolution":false,"allowed_merge_methods":["merge","squash","rebase"]},"ruleset_source_type":"Repository","ruleset_source":"owner/name","ruleset_id":42}]`}
+	rulesNoSquash        = apiReply{body: `[{"type":"pull_request","parameters":{"required_approving_review_count":0,"dismiss_stale_reviews_on_push":false,"require_code_owner_review":false,"require_last_push_approval":false,"required_review_thread_resolution":false,"allowed_merge_methods":["merge","rebase"]},"ruleset_source_type":"Repository","ruleset_source":"owner/name","ruleset_id":43}]`}
+	rulesUnrelated       = apiReply{body: `[{"type":"deletion","ruleset_source_type":"Repository","ruleset_source":"owner/name","ruleset_id":44},{"type":"non_fast_forward","ruleset_source_type":"Repository","ruleset_source":"owner/name","ruleset_id":44}]`}
+
+	protectionNone = apiReply{
+		body:   `{"message":"Branch not protected","documentation_url":"https://docs.github.com/rest/branches/branch-protection#get-branch-protection","status":"404"}`,
+		stderr: "gh: Branch not protected (HTTP 404)",
+	}
+	protectionNoAdmin = apiReply{
+		body:   `{"message":"Must have admin rights to Repository.","documentation_url":"https://docs.github.com/rest/branches/branch-protection#get-branch-protection","status":"403"}`,
+		stderr: "gh: Must have admin rights to Repository. (HTTP 403)",
+	}
+	protectionHidden = apiReply{
+		body:   `{"message":"Not Found","documentation_url":"https://docs.github.com/rest/branches/branch-protection#get-branch-protection","status":"404"}`,
+		stderr: "gh: Not Found (HTTP 404)",
+	}
+	protectionRequireApproval = apiReply{body: `{"url":"https://api.github.com/repos/owner/name/branches/main/protection","required_pull_request_reviews":{"url":"https://api.github.com/repos/owner/name/branches/main/protection/required_pull_request_reviews","dismiss_stale_reviews":false,"require_code_owner_reviews":false,"require_last_push_approval":false,"required_approving_review_count":1},"enforce_admins":{"url":"https://api.github.com/repos/owner/name/branches/main/protection/enforce_admins","enabled":false}}`}
+)
+
+// ghAPI routes `gh api <path>` to the reply for the endpoint the path names.
+func ghAPI(repo, rules, protection apiReply) func(proc.Call) ([]byte, error) {
+	return func(c proc.Call) ([]byte, error) {
+		path := c.Args[1]
+		r := repo
+		switch {
+		case strings.HasSuffix(path, "/protection"):
+			r = protection
+		case strings.Contains(path, "/rules/branches/"):
+			r = rules
+		}
+		if r.stderr != "" {
+			return []byte(r.body), fmt.Errorf("gh api %s: exit status 1: %s", path, r.stderr)
+		}
+		return []byte(r.body), nil
+	}
+}
+
+// mergeEnv is the healthy environment with the merge-permission reads scripted
+// and dry_run set as given. Every other command keeps its healthy reply, so a
+// Failed() verdict speaks for this check alone.
+func mergeEnv(t *testing.T, dryRun bool, repo, rules, protection apiReply) Env {
+	t.Helper()
+	env, f := healthyEnv(t)
+	healthy := f.Responder
+	f.Responder = func(c proc.Call) ([]byte, error) {
+		if c.Name == "gh" && c.Args[0] == "api" {
+			return ghAPI(repo, rules, protection)(c)
+		}
+		return healthy(c)
+	}
+	env.Workflow.Policies.DryRun = &dryRun
+	return env
+}
+
+// Each row of the issue's warn/fail table. A blocker fails only when the daemon
+// would actually merge; everything else is said, not refused.
+func TestGHMergeAllowed(t *testing.T) {
+	tests := []struct {
+		name                    string
+		dryRun                  bool
+		repo, rules, protection apiReply
+		wantStatus              Status
+		wantDetail              string
+	}{
+		{"unprotected base passes", false, repoSquashAllowed, rulesNone, protectionNone, StatusPass, "nothing blocks"},
+		{"rules unrelated to merging pass", false, repoSquashAllowed, rulesUnrelated, protectionNone, StatusPass, "nothing blocks"},
+		{"ruleset approvals, merging for real", false, repoSquashAllowed, rulesRequireApproval, protectionNone, StatusFail, "ruleset 42 requires 1 approving review"},
+		{"ruleset approvals under dry_run", true, repoSquashAllowed, rulesRequireApproval, protectionNone, StatusWarn, "dry_run is on"},
+		{"ruleset excludes squash, merging for real", false, repoSquashAllowed, rulesNoSquash, protectionNone, StatusFail, "does not allow squash"},
+		{"classic approvals, merging for real", false, repoSquashAllowed, rulesNone, protectionRequireApproval, StatusFail, "branch protection requires 1 approving review"},
+		{"classic approvals under dry_run", true, repoSquashAllowed, rulesNone, protectionRequireApproval, StatusWarn, "dry_run is on"},
+		{"protection unreadable without admin", false, repoSquashAllowed, rulesNone, protectionNoAdmin, StatusWarn, "HTTP 403"},
+		{"protection hidden behind a 404", false, repoSquashAllowed, rulesNone, protectionHidden, StatusWarn, "unreadable"},
+		{"squash disabled, merging for real", false, repoSquashDisabled, rulesNone, protectionNone, StatusFail, "allow_squash_merge: false"},
+		{"squash disabled under dry_run", true, repoSquashDisabled, rulesNone, protectionNone, StatusWarn, "allow_squash_merge: false"},
+		{"a blocker outranks unreadable protection", false, repoSquashAllowed, rulesRequireApproval, protectionNoAdmin, StatusFail, "ruleset 42"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := mergeEnv(t, tc.dryRun, tc.repo, tc.rules, tc.protection)
+			got := byName(Run(context.Background(), env, false), "gh-merge-allowed")
+			if got.Status != tc.wantStatus {
+				t.Fatalf("gh-merge-allowed = %s (%s), want %s", got.Status, got.Detail, tc.wantStatus)
+			}
+			if !strings.Contains(got.Detail, tc.wantDetail) {
+				t.Errorf("detail = %q, want it to mention %q", got.Detail, tc.wantDetail)
+			}
+			if got.Status != StatusPass && !strings.Contains(got.Fix, "dry_run: true") {
+				t.Errorf("fix must name both remedies, got %q", got.Fix)
+			}
+			// A bypass actor clears neither this check (the rules endpoint lists
+			// every active rule) nor the merge (plain --squash, no --admin).
+			if strings.Contains(got.Fix, "bypass") {
+				t.Errorf("fix must not offer a bypass actor as a remedy, got %q", got.Fix)
+			}
+		})
+	}
+}
+
 // An operator who hits the folder-trust dialog needs to be told it is the likely
 // cause, not sent to debug the agent CLI's input handling.
 func TestKickoffFailureNamesFirstLaunchDialog(t *testing.T) {
@@ -437,4 +552,16 @@ func dirEntries(t *testing.T, dir string) []string {
 		names = append(names, e.Name())
 	}
 	return names
+}
+
+// The warn/fail split, pinned at the level that matters: a blocked base under
+// dry_run must not make the daemon refuse to start, and the same base with
+// dry_run off must.
+func TestFailed_BlockedBaseRefusesStartOnlyWhenMergingForReal(t *testing.T) {
+	for _, dryRun := range []bool{true, false} {
+		env := mergeEnv(t, dryRun, repoSquashAllowed, rulesRequireApproval, protectionNone)
+		if got := Failed(Run(context.Background(), env, false)); got == dryRun {
+			t.Errorf("dry_run=%v: Failed = %v, want %v", dryRun, got, !dryRun)
+		}
+	}
 }

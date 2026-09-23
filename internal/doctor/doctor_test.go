@@ -469,15 +469,17 @@ func ghAPI(repo, rules, protection apiReply) func(proc.Call) ([]byte, error) {
 }
 
 // mergeEnv is the healthy environment with the merge-permission reads scripted
-// and dry_run set as given.
+// and dry_run set as given. Every other command keeps its healthy reply, so a
+// Failed() verdict speaks for this check alone.
 func mergeEnv(t *testing.T, dryRun bool, repo, rules, protection apiReply) Env {
 	t.Helper()
 	env, f := healthyEnv(t)
+	healthy := f.Responder
 	f.Responder = func(c proc.Call) ([]byte, error) {
 		if c.Name == "gh" && c.Args[0] == "api" {
 			return ghAPI(repo, rules, protection)(c)
 		}
-		return nil, nil
+		return healthy(c)
 	}
 	env.Workflow.Policies.DryRun = &dryRun
 	return env
@@ -518,6 +520,11 @@ func TestGHMergeAllowed(t *testing.T) {
 			}
 			if got.Status != StatusPass && !strings.Contains(got.Fix, "dry_run: true") {
 				t.Errorf("fix must name both remedies, got %q", got.Fix)
+			}
+			// A bypass actor clears neither this check (the rules endpoint lists
+			// every active rule) nor the merge (plain --squash, no --admin).
+			if strings.Contains(got.Fix, "bypass") {
+				t.Errorf("fix must not offer a bypass actor as a remedy, got %q", got.Fix)
 			}
 		})
 	}

@@ -180,8 +180,8 @@ func checkGHLabel(ctx context.Context, env Env) Result {
 
 // mergeFix names the two real remedies for a base branch this account cannot
 // squash-merge into, rather than restating the symptom.
-const mergeFix = "either remove the requirement for this account (drop required approvals — GitHub " +
-	"forbids approving your own PR — or add the account as a bypass actor, and enable squash merging), " +
+const mergeFix = "either remove the requirement (drop required approvals — GitHub forbids approving " +
+	"your own PR — drop the squash or update restriction, and enable squash merging), " +
 	"or keep it and run with `dry_run: true` so tasks stop at the merge gate for a human to merge"
 
 // checkGHMergeAllowed asks whether the pipeline's last step can succeed: is this

@@ -84,6 +84,8 @@ func healthyEnv(t *testing.T) (Env, *proc.Fake) {
 		switch {
 		case c.Name == "herdr" && c.Args[0] == "--version":
 			return []byte("herdr 0.8.2\n"), nil
+		case c.Name == "gh" && c.Args[0] == "auth":
+			return []byte(authStatus("'gist', 'read:org', 'repo', 'workflow'")), nil
 		case c.Name == "gh" && c.Args[0] == "label":
 			return []byte(`[{"name":"agent-ready"},{"name":"bug"}]`), nil
 		case c.Name == "git" && c.Args[0] == "rev-list":
@@ -304,6 +306,127 @@ func TestGHTokenEnvNeverPrintsTheValue(t *testing.T) {
 	r := byName(Run(context.Background(), env, true), "gh-token-env")
 	if strings.Contains(r.Detail+r.Fix, secret) {
 		t.Fatalf("the token value leaked into the report: %+v", r)
+	}
+}
+
+// authStatus is a synthetic `gh auth status` for one logged-in account. An empty
+// scopes argument omits the scopes line, as gh does for a fine-grained PAT.
+func authStatus(scopes string) string {
+	s := "github.com\n" +
+		"  ✓ Logged in to github.com account someone (keyring)\n" +
+		"  - Active account: true\n" +
+		"  - Git operations protocol: https\n" +
+		"  - Token: gho_************************************\n"
+	if scopes != "" {
+		s += "  - Token scopes: " + scopes + "\n"
+	}
+	return s
+}
+
+// withAuthStatus scripts `gh auth status` over the healthy responder.
+func withAuthStatus(f *proc.Fake, status string) {
+	healthy := f.Responder
+	f.Responder = func(c proc.Call) ([]byte, error) {
+		if c.Name == "gh" && c.Args[0] == "auth" {
+			return []byte(status), nil
+		}
+		return healthy(c)
+	}
+}
+
+func TestGHTokenScopes(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     string
+		wantStatus Status
+		wantDetail string
+		wantFix    string
+	}{
+		{
+			name:       "repo and workflow",
+			status:     authStatus("'gist', 'read:org', 'repo', 'workflow'"),
+			wantStatus: StatusPass,
+			wantDetail: "token can push code and workflow files",
+		},
+		{
+			name:       "repo without workflow warns with the one-line fix",
+			status:     authStatus("'gist', 'read:org', 'repo'"),
+			wantStatus: StatusWarn,
+			wantDetail: "cannot push files under .github/workflows/",
+			wantFix:    "gh auth refresh -h github.com -s workflow",
+		},
+		{
+			name:       "no repo scope fails",
+			status:     authStatus("'gist', 'read:org'"),
+			wantStatus: StatusFail,
+			wantDetail: "cannot push branches",
+			wantFix:    "gh auth refresh -h github.com -s repo",
+		},
+		{
+			name:       "no scopes line is unreadable, not a failure",
+			status:     authStatus(""),
+			wantStatus: StatusWarn,
+			wantDetail: "unreadable",
+			wantFix:    "check the token's permissions",
+		},
+		{
+			name: "only the active account's scopes count",
+			status: authStatus("'repo'") +
+				"\n  ✓ Logged in to github.com account other (keyring)\n" +
+				"  - Active account: false\n" +
+				"  - Token scopes: 'repo', 'workflow'\n",
+			wantStatus: StatusWarn,
+			wantFix:    "-s workflow",
+		},
+		{
+			name: "an inactive account listed first is skipped",
+			status: "github.com\n" +
+				"  ✓ Logged in to github.com account other (keyring)\n" +
+				"  - Active account: false\n" +
+				"  - Token scopes: 'gist'\n" +
+				"\n  ✓ Logged in to github.com account someone (keyring)\n" +
+				"  - Active account: true\n" +
+				"  - Token scopes: 'repo', 'workflow'\n",
+			wantStatus: StatusPass,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env, f := healthyEnv(t)
+			withAuthStatus(f, tc.status)
+			got := byName(Run(context.Background(), env, true), "gh-token-scopes")
+			if got.Status != tc.wantStatus {
+				t.Fatalf("gh-token-scopes = %s (%s), want %s", got.Status, got.Detail, tc.wantStatus)
+			}
+			if !strings.Contains(got.Detail, tc.wantDetail) {
+				t.Errorf("detail = %q, want it to mention %q", got.Detail, tc.wantDetail)
+			}
+			if !strings.Contains(got.Fix, tc.wantFix) {
+				t.Errorf("fix = %q, want it to mention %q", got.Fix, tc.wantFix)
+			}
+		})
+	}
+}
+
+// A token missing only `workflow` is the stock `gh auth login` token: it must
+// not stop the daemon. A token missing `repo` cannot push anything and must.
+func TestFailed_TokenScopes(t *testing.T) {
+	tests := []struct {
+		name   string
+		scopes string
+		want   bool
+	}{
+		{"repo only", "'gist', 'read:org', 'repo'", false},
+		{"no repo", "'gist', 'read:org'", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env, f := healthyEnv(t)
+			withAuthStatus(f, authStatus(tc.scopes))
+			if got := Failed(Run(context.Background(), env, true)); got != tc.want {
+				t.Errorf("Failed() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

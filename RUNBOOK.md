@@ -226,7 +226,7 @@ diagnosing by hand when `doctor` is not available:
 | Requirement | Check | Why |
 | --- | --- | --- |
 | Running **inside a herdr pane** | `echo $HERDR_ENV` → `1` | the backend shells out to `herdr`; outside a pane it can't reach the session |
-| **`gh` authenticated** for the target repo | `gh auth status` | issue reads, PR detection, reviews, merge |
+| **`gh` authenticated** for the target repo, token scopes include `repo` and `workflow` | `gh auth status` → `Token scopes:` line | issue reads, PR detection, reviews, merge; without `workflow` an issue that touches `.github/workflows/` stalls at push (fix: `gh auth refresh -h github.com -s workflow`) |
 | A **local checkout** of the target repo | `ls <repo-dir>` | the engine makes per-task worktrees inside it, under `.orchestrator/worktrees` (`--repo`, absolute path) |
 | The **agent CLI** on `PATH` | `which claude` (or whatever `roles.*.launch` names) | the daemon launches it per task |
 | A **valid config** + its `prompts/` rubrics | `orchestratord validate <config>` → exit 0 | run/daemon refuse to start on any error; rubric paths resolve beside the config |

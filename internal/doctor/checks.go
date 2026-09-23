@@ -115,6 +115,59 @@ func checkGHAuth(ctx context.Context, env Env) Result {
 	return pass(name, "authenticated")
 }
 
+// checkGHTokenScopes says up front what the token may push. An implementer
+// whose issue touches `.github/workflows/` commits fine and is then refused at
+// push without the `workflow` scope — and the fix is an interactive
+// `gh auth refresh` only a human can run. A missing `workflow` scope warns
+// rather than fails: most issues never touch CI.
+func checkGHTokenScopes(ctx context.Context, env Env) Result {
+	const name = "gh-token-scopes"
+	out, err := env.Runner.Run(ctx, "", env.GHBin, "auth", "status")
+	if err != nil {
+		return skip(name, "gh is not authenticated; see gh-auth")
+	}
+	scopes, ok := activeTokenScopes(string(out))
+	switch {
+	case !ok:
+		return warn(name, "token scopes unreadable (a fine-grained or environment token prints none)",
+			"if pushes fail, check the token's permissions")
+	case !scopes["repo"]:
+		return fail(name, "token lacks the `repo` scope; the pipeline cannot push branches at all",
+			"run `gh auth refresh -h github.com -s repo`")
+	case !scopes["workflow"]:
+		return warn(name, "token cannot push files under .github/workflows/; an issue that touches CI will stall at push",
+			"run `gh auth refresh -h github.com -s workflow`")
+	}
+	return pass(name, "token can push code and workflow files")
+}
+
+// activeTokenScopes parses the `Token scopes:` line of the active account out of
+// `gh auth status`, e.g. `  - Token scopes: 'gist', 'read:org', 'repo'`. gh
+// lists every logged-in account, each opened by a "Logged in to" line; the
+// first scopes line outside an `Active account: false` block is the active one.
+// ok is false when no scopes line is printed at all.
+func activeTokenScopes(status string) (scopes map[string]bool, ok bool) {
+	inactive := false
+	for _, line := range strings.Split(status, "\n") {
+		line = strings.TrimLeft(strings.TrimSpace(line), "-✓ ")
+		switch {
+		case strings.HasPrefix(line, "Logged in to"):
+			inactive = false
+		case strings.HasPrefix(line, "Active account:"):
+			inactive = strings.TrimSpace(strings.TrimPrefix(line, "Active account:")) == "false"
+		case strings.HasPrefix(line, "Token scopes:") && !inactive:
+			scopes = map[string]bool{}
+			for _, s := range strings.Split(strings.TrimPrefix(line, "Token scopes:"), ",") {
+				if s = strings.Trim(strings.TrimSpace(s), `'"`); s != "" {
+					scopes[s] = true
+				}
+			}
+			return scopes, true
+		}
+	}
+	return nil, false
+}
+
 // checkGHTokenEnv warns about a token in the environment. The daemon already
 // scrubs GITHUB_TOKEN/GH_TOKEN for its own gh calls (a PAT lacking checks:read
 // 403s the check-runs API and silently breaks the ci_green gate), but agents

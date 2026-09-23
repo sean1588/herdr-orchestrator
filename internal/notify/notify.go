@@ -38,8 +38,9 @@ type Event struct {
 	Detail string // e.g. the alert message
 
 	// Cause is the trigger that produced the terminal transition — "timeout",
-	// "blocked_timeout", "retry_exhausted", "no_progress", "drive_deadline", or a
-	// decision/gate result. Empty when it could not be determined.
+	// "blocked_timeout", "retry_exhausted", "no_progress", "blocked_on_prompt",
+	// "agent_crashed", "drive_deadline", or a decision/gate result. Empty when it
+	// could not be determined.
 	Cause string `json:",omitempty"`
 	// Recent is the tail of the audit trail, most recent first, so the escalation
 	// reads as a story rather than a single row.

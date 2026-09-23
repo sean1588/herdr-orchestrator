@@ -6,10 +6,13 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/sean1588/herdr-orchestrator/internal/classify"
 	"github.com/sean1588/herdr-orchestrator/internal/config"
 	"github.com/sean1588/herdr-orchestrator/internal/doctor"
 	"github.com/sean1588/herdr-orchestrator/internal/engine"
@@ -363,5 +366,42 @@ func TestReportDoctor_ShowsFixesForNonPassingChecks(t *testing.T) {
 func TestCmdDoctor_RequiresAConfig(t *testing.T) {
 	if code := cmdDoctor(nil); code != 2 {
 		t.Errorf("cmdDoctor with no --config = %d, want 2", code)
+	}
+}
+
+// --pane-classifier off must mean no classifier at all — the engine then skips
+// the arm, so no network call can happen. On, it must reach the endpoint it
+// names; on without a key, it is refused at startup.
+func TestPaneClassifierFor(t *testing.T) {
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		_, _ = w.Write([]byte(`{"answers":{"activity":{"choice":"working","probabilities":{"working":0.99}}}}`))
+	}))
+	defer srv.Close()
+	key := func(string) string { return "sk-test" }
+
+	off, err := paneClassifierFor("", key)
+	if err != nil || off != nil {
+		t.Fatalf("flag off: got (%v, %v), want (nil, nil)", off, err)
+	}
+	if hits != 0 {
+		t.Fatalf("flag off made %d requests, want 0", hits)
+	}
+
+	if _, err := paneClassifierFor(srv.URL, func(string) string { return "" }); err == nil ||
+		!strings.Contains(err.Error(), classify.KeyEnv) {
+		t.Fatalf("flag on without a key: err = %v, want one naming %s", err, classify.KeyEnv)
+	}
+
+	on, err := paneClassifierFor(srv.URL, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := on.Classify(context.Background(), "tail"); err != nil {
+		t.Fatal(err)
+	}
+	if hits != 1 {
+		t.Fatalf("flag on made %d requests, want 1", hits)
 	}
 }

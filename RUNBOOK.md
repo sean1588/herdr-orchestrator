@@ -371,6 +371,13 @@ the trigger tells you why:
   signal for a whole `policies.no_progress_timeout` window, confirmed against the
   pane's own bytes. Distinct from `timeout`: nothing happened at all, rather than
   the state simply taking too long. Read the pane read-only to see where it died.
+- *any state* `→ escalated` on `blocked_on_prompt` → with `--pane-classifier`, the
+  static pane was classified as a permission or question prompt. Read the pane
+  read-only to see which one, add the tool to `permissions.allow`, then open a
+  fresh issue — never send keystrokes into the pane.
+- *any state* `→ escalated` on `agent_crashed` → with `--pane-classifier`, the
+  static pane shows an error or a bare shell with no agent running. Read the pane
+  for the error and check herdr.
 - *any state* `→ escalated` on `drive_deadline` → the scheduler's reaper stopped
   a drive that outlived `policies.drive_deadline`. This is the backstop for a
   drive wedged where the engine has no timer armed (a spawn, a gate read, a
@@ -443,7 +450,8 @@ When you're done operating:
 
 **Daemon flags:** `--config` · `--repo` · `--base` (main) · `--db`
 (orchestrator.db) · `--task-dir` · `--worktrees-dir` · `--poll-interval` (30s) ·
-`--notify-webhook` · `--event-log` (off) · `--mcp-listen` (off).
+`--notify-webhook` · `--pane-classifier` (off; needs `OPENROUTER_API_KEY`) ·
+`--event-log` (off) · `--mcp-listen` (off).
 
 **Preflight:** `orchestratord doctor --config <c> --repo <dir> [--quick]` —
 exit 0 means the environment is ready; every failure names its fix.

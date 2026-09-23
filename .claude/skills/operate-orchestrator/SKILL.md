@@ -58,6 +58,10 @@ If a task is legitimately in progress or in a gate wait the daemon re-checks,
      flight (a freshly-labeled issue, or a nudge for an idle one). It **refuses
      any settled task** ("already settled; not re-driven"), so it is NOT a
      restart-after-cancel or restart-after-escalate mechanism.
+   - `message_task {issue, text}` — submit one line at a running task's agent
+     prompt, delivered and verified the same way as its kickoff. Refused for an
+     unknown issue, a settled task, or a task with no pane. See "Nudging an idle
+     agent" below for when it is safe.
 
    Control tools are **dispatch-acknowledged, not completion-acknowledged**: a
    success means the command was accepted, not that the drive finished. Always
@@ -129,20 +133,17 @@ Run this each pass. Keep it cheap — most ticks do nothing but observe.
 | **A driven task whose agent sits idle at its prompt** with the state's work unfinished | Nudge the agent — see below. |
 | **Task legitimately working, or in a gate wait the daemon re-checks** | Leave it. Do nothing. |
 
-**Nudging an idle agent.** Until `message_task` exists, the sanctioned way is to
-type one turn into the agent's pane (not `PANE` — find it by its `issue-<N>`
-workspace label in `herdr workspace list`):
-
-```bash
-herdr pane send-text <pane> "<one full instruction>"
-herdr pane send-keys <pane> Enter
-```
-
-Only at an **idle prompt** — `herdr pane read <pane>` first — and **never into a
-permission dialog**: a dialog is fixed in the allow-list, not answered. Send one
-complete instruction the agent can finish by doing the state's work; in
-`changes_requested`, a turn that pushes no commit fails `head_moved` and
-escalates terminally.
+**Nudging an idle agent.** Use `message_task {issue, text}` — never type into the
+agent's pane yourself. Only when the pane shows an **idle prompt, never a
+dialog**: read it first (`herdr pane read <pane>`; find the pane by its
+`issue-<N>` workspace label in `herdr workspace list`). A permission dialog is
+fixed in the allow-list, not answered. `text` is one line; put anything longer in
+a file and reference its path. Send one complete instruction the agent can finish
+by doing the state's work; in `changes_requested`, a turn that pushes no commit
+fails `head_moved` and escalates terminally. A success means the agent took the
+message (its status moved); the audit records a `message_task` row with the
+text's length. The engine then decides from the artifact as for any other agent
+activity — there is nothing else to trigger.
 
 Cancel is destructive **and one-way** — it kills in-flight agent work and the task
 cannot be restarted through these tools (settled means settled; the engine is the
@@ -267,7 +268,7 @@ get_audit 29 → … implementing → escalated (trigger=timeout)
 - **Idempotency:** before acting, re-check state — never double-cancel or
   double-enqueue the same issue in one tick.
 - **Single-writer respect:** the engine owns task-state transitions. Your control
-  tools (`cancel`/`enqueue`) are operator signals, not state writes — a cancel
+  tools (`cancel`/`enqueue`/`message`) are operator signals, not state writes — a cancel
   settles the drive to `cancelled` through the engine, never behind its back.
   Don't edit the DB directly.
 - **Merges stay gated:** never try to force a merge. The merge gate

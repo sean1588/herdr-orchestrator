@@ -323,6 +323,13 @@ func (h *Herdr) WaitState(ctx context.Context, hd Handle, target AgentState) (Ag
 	return target, nil
 }
 
+// Message delivers text to a live agent through the same verified path as the
+// spawn kickoff. A running agent's prompt is the same prompt a fresh one sits
+// at, so the same two methods and the same "status must move" proof apply.
+func (h *Herdr) Message(ctx context.Context, hd Handle, text string) error {
+	return h.deliverKickoff(ctx, hd.PaneID, text)
+}
+
 // Read returns the last `lines` of recent pane output.
 func (h *Herdr) Read(ctx context.Context, hd Handle, lines int) (string, error) {
 	out, err := h.r.Run(ctx, "", h.HerdrBin, "pane", "read", hd.PaneID, "--source", "recent", "--lines", strconv.Itoa(lines))

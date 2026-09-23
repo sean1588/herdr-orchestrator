@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/sean1588/herdr-orchestrator/internal/exec"
 	"github.com/sean1588/herdr-orchestrator/internal/store"
 )
 
@@ -25,6 +26,16 @@ type Controller interface {
 	Cancel(ctx context.Context, issue int) error
 }
 
+// Messenger delivers text to a running agent. exec.ExecutionBackend satisfies it.
+type Messenger interface {
+	Message(ctx context.Context, h exec.Handle, text string) error
+}
+
+// Auditor appends to a task's audit trail. *store.Store satisfies it.
+type Auditor interface {
+	AppendAudit(ctx context.Context, e store.AuditEntry) error
+}
+
 // handler holds the wired dependencies and dispatches MCP methods.
 type handler struct {
 	reader Reader
@@ -35,6 +46,11 @@ type handler struct {
 	// task view simply omits them. now is injectable so age fields are testable.
 	deadlines Deadlines
 	now       func() time.Time
+	// message_task's dependencies; nil messenger => the tool reports itself
+	// unavailable. settled is the set of states a message must never reach.
+	messenger Messenger
+	auditor   Auditor
+	settled   map[string]bool
 }
 
 // clock reads the injectable now, defaulting to the real one. Defensive so a

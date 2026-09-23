@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -149,5 +150,92 @@ func TestEnqueueTool(t *testing.T) {
 	}
 	if len(fc.calls) != 1 || fc.calls[0] != "enqueue:5" {
 		t.Fatalf("controller calls = %v, want [enqueue:5]", fc.calls)
+	}
+}
+
+// messageTasks is one task per message_task case: a running agent with a pane,
+// a settled task that still records its last pane, and a running task that has
+// not spawned yet.
+func messageTasks() map[string]store.Task {
+	return map[string]store.Task{
+		"issue-8":  {ID: "issue-8", Issue: 8, CurrentState: "implementing", PaneID: "w3:p1"},
+		"issue-9":  {ID: "issue-9", Issue: 9, CurrentState: "merged", PaneID: "w4:p1"},
+		"issue-10": {ID: "issue-10", Issue: 10, CurrentState: "implementing"},
+	}
+}
+
+func messageHandler(m Messenger, a Auditor) *handler {
+	h := newTestHandler(fakeReader{tasks: messageTasks()}, &fakeController{})
+	h.messenger, h.auditor = m, a
+	h.settled = map[string]bool{"merged": true, "escalated": true}
+	return h
+}
+
+func TestMessageTool_DeliversToTheTaskPane(t *testing.T) {
+	fm, fa := &fakeMessenger{}, &fakeAuditor{}
+	const text = "auth is refreshed; push the branch"
+	res := callMessage(messageHandler(fm, fa), 8, text)
+	if res.IsError || !strings.Contains(res.Content[0].Text, "message delivered to issue 8") {
+		t.Fatalf("message_task should succeed: %+v", res)
+	}
+	if len(fm.calls) != 1 || fm.calls[0].h.PaneID != "w3:p1" || fm.calls[0].text != text {
+		t.Fatalf("backend calls = %+v, want one Message on w3:p1 with the text", fm.calls)
+	}
+	want := store.AuditEntry{
+		TaskID: "issue-8", FromState: "implementing", ToState: "implementing",
+		Trigger: "message_task", Result: fmt.Sprintf("text_len=%d", len(text)),
+	}
+	if len(fa.entries) != 1 || fa.entries[0] != want {
+		t.Fatalf("audit = %+v, want [%+v]", fa.entries, want)
+	}
+}
+
+func TestMessageTool_Refusals(t *testing.T) {
+	cases := []struct {
+		name    string
+		issue   int
+		text    string
+		unwired bool
+		sendErr error
+		want    string
+	}{
+		{name: "settled task", issue: 9, text: "hi", want: "settled"},
+		{name: "unknown issue", issue: 999, text: "hi", want: "not found"},
+		{name: "no pane", issue: 10, text: "hi", want: "no agent pane"},
+		{name: "newline", issue: 8, text: "line one\nline two", want: "single line"},
+		{name: "carriage return", issue: 8, text: "line one\rline two", want: "single line"},
+		{name: "empty text", issue: 8, text: "  ", want: "text"},
+		{name: "no backend wired", issue: 8, text: "hi", unwired: true, want: "not available"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fm, fa := &fakeMessenger{}, &fakeAuditor{}
+			h := messageHandler(fm, fa)
+			if tc.unwired {
+				h.messenger = nil
+			}
+			res := callMessage(h, tc.issue, tc.text)
+			if !res.IsError || !strings.Contains(res.Content[0].Text, tc.want) {
+				t.Fatalf("want a tool error containing %q, got %+v", tc.want, res)
+			}
+			if len(fm.calls) != 0 {
+				t.Errorf("backend must not be touched, got %+v", fm.calls)
+			}
+			if len(fa.entries) != 0 {
+				t.Errorf("a refused message must not be audited, got %+v", fa.entries)
+			}
+		})
+	}
+}
+
+func TestMessageTool_DeliveryFailureIsAToolErrorAndNotAudited(t *testing.T) {
+	fm := &fakeMessenger{err: errors.New("kickoff not accepted on w3:p1")}
+	fa := &fakeAuditor{}
+	res := callMessage(messageHandler(fm, fa), 8, "hi")
+	if !res.IsError || !strings.Contains(res.Content[0].Text, "kickoff not accepted") {
+		t.Fatalf("a failed delivery should be a tool error carrying the cause: %+v", res)
+	}
+	if len(fa.entries) != 0 {
+		t.Errorf("an undelivered message must not be audited, got %+v", fa.entries)
 	}
 }

@@ -632,3 +632,32 @@ func TestSpawn_ClassifierSettlingIsNotAcceptance(t *testing.T) {
 		t.Errorf("expected exactly one `pane run` fallback after the false settle, got %d", n)
 	}
 }
+
+func TestMessage_UsesVerifiedKickoffDelivery(t *testing.T) {
+	// Message is the kickoff path pointed at a live pane: the same send-text,
+	// the same pane-run fallback, the same "status must move" proof.
+	const text = "the token scope is fixed; push the branch now"
+	hd := Handle{PaneID: "w7:p1", Workdir: "/wt"}
+	cases := []struct {
+		name    string
+		lands   string
+		wantErr string
+	}{
+		{"status moves to working", "send-text", ""},
+		{"status never leaves baseline", "", "kickoff not accepted"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := kickoffFake(tc.lands)
+			err := kickoffHerdr(f).Message(context.Background(), hd, text)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Message: %v", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Message error = %v, want one containing %q", err, tc.wantErr)
+			}
+			hasExactCall(t, f.Snapshot(), "herdr", "pane", "send-text", "w7:p1", text)
+		})
+	}
+}

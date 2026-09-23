@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"sort"
 
+	"github.com/sean1588/herdr-orchestrator/internal/exec"
 	"github.com/sean1588/herdr-orchestrator/internal/store"
 )
 
@@ -79,4 +80,38 @@ func call(h *handler, name string, issue int) (callResult, bool) {
 	}
 	_ = json.Unmarshal(raw, &out)
 	return out.Result, isNote
+}
+
+type fakeMessenger struct {
+	err   error
+	calls []messageCall
+}
+
+type messageCall struct {
+	h    exec.Handle
+	text string
+}
+
+func (f *fakeMessenger) Message(_ context.Context, h exec.Handle, text string) error {
+	f.calls = append(f.calls, messageCall{h, text})
+	return f.err
+}
+
+type fakeAuditor struct{ entries []store.AuditEntry }
+
+func (f *fakeAuditor) AppendAudit(_ context.Context, e store.AuditEntry) error {
+	f.entries = append(f.entries, e)
+	return nil
+}
+
+// callMessage invokes message_task with an issue and text.
+func callMessage(h *handler, issue int, text string) callResult {
+	args, _ := json.Marshal(map[string]any{"issue": issue, "text": text})
+	req := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"message_task","arguments":%s}}`, args)
+	raw, _ := h.handle(context.Background(), []byte(req))
+	var out struct {
+		Result callResult `json:"result"`
+	}
+	_ = json.Unmarshal(raw, &out)
+	return out.Result
 }

@@ -87,8 +87,9 @@ failed`), never something that re-drives `merging`. A dry run does neither.
 ## 2. How work flows in: GitHub issues & labels
 
 The daemon does not invent work — it **polls a labeled source**. Every poll it
-lists the repo's open issues carrying the source label; each labeled issue
-becomes a task and is driven from the workflow's `entry_state` (triage first).
+lists the repo's open issues carrying the source label; each labeled issue with
+no open blockers becomes a task and is driven from the workflow's `entry_state`
+(triage first).
 
 Both the repo and the label live in the config's **`sources`** block:
 
@@ -115,9 +116,18 @@ Operating implications:
   **closed** and its remote branch deleted (see §1). When a task reaches a settled
   state the daemon drains the label so the poller stops re-listing it. A settled
   issue is done from the daemon's point of view.
-- **To hold work back:** don't apply the label (or let triage `reject` /
-  `needs_human` it). Removing the label from an *in-flight* issue does **not**
-  stop the drive — use `cancel_task` for that (§5).
+- **Blocked issues wait.** Only the *frontier* of the labeled set is picked up:
+  a labeled issue whose GitHub "Blocked by" list (`gh issue edit N
+  --add-blocked-by M`) still has an open issue is skipped until every blocker is
+  closed. So you can label a whole dependency graph at once; the daemon starts
+  each issue only once the issues it depends on are closed (a confirmed merge
+  closes them). While an issue is held, every poll logs one line for it:
+  `level=INFO msg="issue waiting on open blockers" issue=72 blockers=[71]`.
+  No line means nothing is being held. Needs a `gh` that knows the `blockedBy`
+  field; an older one fails the poll with gh's own "Unknown JSON field" error.
+- **To hold work back:** don't apply the label, or mark it blocked by an open
+  issue (or let triage `reject` / `needs_human` it). Removing the label from an
+  *in-flight* issue does **not** stop the drive — use `cancel_task` for that (§5).
 - Triage is the front door: a labeled issue still has to pass the `triage`
   decision (`accept` / `reject` / `needs_human`) before it reaches `implementing`.
 

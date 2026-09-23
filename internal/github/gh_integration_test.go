@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/sean1588/herdr-orchestrator/internal/github"
@@ -89,10 +90,10 @@ func TestGH_ListIssues_AgainstFakeBinary(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	// Fake gh emits the fixture only for `gh issue list --label ... --json number`.
+	// Fake gh emits the fixture only for `gh issue list --label ... --json number,blockedBy`.
 	body := "#!/bin/sh\n" +
 		"if [ \"$1\" = issue ] && [ \"$2\" = list ]; then\n" +
-		"  case \"$*\" in *--label*--json*number*) cat " + abs + "; exit 0 ;; esac\n" +
+		"  case \"$*\" in *--label*--json\\ number,blockedBy*) cat " + abs + "; exit 0 ;; esac\n" +
 		"  echo \"fake gh: unexpected issue list args: $*\" >&2; exit 3\n" +
 		"fi\n" +
 		"exit 9\n"
@@ -105,13 +106,9 @@ func TestGH_ListIssues_AgainstFakeBinary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListIssues: %v", err)
 	}
-	want := []int{5, 8, 13}
-	if len(got) != len(want) {
-		t.Fatalf("ListIssues = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("ListIssues = %v, want %v", got, want)
-		}
+	// Only blockers whose state is not CLOSED are reported.
+	want := []github.ListedIssue{{Number: 5}, {Number: 8}, {Number: 13, OpenBlockers: []int{8}}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ListIssues = %+v, want %+v", got, want)
 	}
 }

@@ -48,24 +48,37 @@ func (g *GH) Issue(ctx context.Context, repoDir string, number int) (*Issue, err
 	return &issue, nil
 }
 
-// ListIssues runs `gh issue list --label <label> --json number` in repoDir and
-// returns the matching issue numbers.
-func (g *GH) ListIssues(ctx context.Context, repoDir, label string) ([]int, error) {
-	out, err := g.run.Run(ctx, repoDir, "gh", "issue", "list", "--label", label, "--json", "number")
+// ListIssues runs `gh issue list --label <label> --json number,blockedBy` in
+// repoDir and returns the matching issues, each with the numbers of its blockers
+// whose state is not CLOSED. blockedBy carries each blocker's state, so one call
+// answers both questions.
+func (g *GH) ListIssues(ctx context.Context, repoDir, label string) ([]ListedIssue, error) {
+	out, err := g.run.Run(ctx, repoDir, "gh", "issue", "list", "--label", label, "--json", "number,blockedBy")
 	if err != nil {
 		return nil, fmt.Errorf("gh issue list --label %s: %w", label, err)
 	}
 	var items []struct {
-		Number int `json:"number"`
+		Number    int `json:"number"`
+		BlockedBy struct {
+			Nodes []struct {
+				Number int    `json:"number"`
+				State  string `json:"state"`
+			} `json:"nodes"`
+		} `json:"blockedBy"`
 	}
 	if err := json.Unmarshal(out, &items); err != nil {
 		return nil, fmt.Errorf("parse gh issue list output: %w", err)
 	}
-	nums := make([]int, len(items))
+	issues := make([]ListedIssue, len(items))
 	for i, it := range items {
-		nums[i] = it.Number
+		issues[i].Number = it.Number
+		for _, b := range it.BlockedBy.Nodes {
+			if b.State != "CLOSED" {
+				issues[i].OpenBlockers = append(issues[i].OpenBlockers, b.Number)
+			}
+		}
 	}
-	return nums, nil
+	return issues, nil
 }
 
 // RemoveLabel runs `gh issue edit <number> --remove-label <label>` in repoDir.

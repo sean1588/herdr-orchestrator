@@ -43,7 +43,8 @@ type Env struct {
 	// LookPath resolves a command on PATH; injectable so the suite is hermetic
 	// (CI has git and gh but neither herdr nor an agent CLI).
 	LookPath func(string) (string, error)
-	// TempDir is where the kickoff smoke test runs. Empty => os.MkdirTemp.
+	// TempDir is where the kickoff smoke test runs. Empty => a scratch dir inside
+	// the worktrees dir, removed afterwards, so the agent launches where spawns do.
 	TempDir string
 }
 

@@ -226,7 +226,7 @@ diagnosing by hand when `doctor` is not available:
 | Requirement | Check | Why |
 | --- | --- | --- |
 | A **herdr server** reachable from this session | `herdr status` | the backend shells out to `herdr`; without a running server it can't reach the session |
-| **`gh` authenticated** for the target repo, token scopes include `repo` and `workflow` | `gh auth status` → `Token scopes:` line | issue reads, PR detection, reviews, merge; without `workflow` an issue that touches `.github/workflows/` stalls at push (fix: `gh auth refresh -h github.com -s workflow`) |
+| **`gh` authenticated** for the target repo, token scopes include `repo` and `workflow`, and **git pushes with gh's credential** | `gh auth status` → `Token scopes:` line; `git config --get-urlmatch credential.helper https://github.com/` names `gh auth git-credential` | issue reads, PR detection, reviews, merge; without `workflow` an issue that touches `.github/workflows/` stalls at push (fix: `gh auth refresh -h github.com -s workflow`); git sends its own credential helper's token, not gh's, so a scope added with `gh auth refresh` reaches `git push` only after `gh auth setup-git` |
 | A **local checkout** of the target repo | `ls <repo-dir>` | the engine makes per-task worktrees inside it, under `.orchestrator/worktrees` (`--repo`, absolute path) |
 | The **agent CLI** on `PATH` | `which claude` (or whatever `roles.*.launch` names) | the daemon launches it per task |
 | A **valid config** + its `prompts/` rubrics | `orchestratord validate <config>` → exit 0 | run/daemon refuse to start on any error; rubric paths resolve beside the config |

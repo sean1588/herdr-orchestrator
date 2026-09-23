@@ -69,6 +69,7 @@ func Checks() []Check {
 		{Name: "agent-binary", Run: checkAgentBinary},
 		{Name: "gh-auth", Run: checkGHAuth},
 		{Name: "gh-token-scopes", Run: checkGHTokenScopes},
+		{Name: "git-credential-helper", Run: checkGitCredentialHelper},
 		{Name: "gh-token-env", Run: checkGHTokenEnv},
 		{Name: "gh-repo", Run: checkGHRepo},
 		{Name: "gh-label", Run: checkGHLabel},

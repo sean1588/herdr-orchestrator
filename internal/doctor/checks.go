@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -139,6 +140,65 @@ func checkGHTokenScopes(ctx context.Context, env Env) Result {
 			"run `gh auth refresh -h github.com -s workflow`")
 	}
 	return pass(name, "token can push code and workflow files")
+}
+
+// checkGitCredentialHelper asks whether `git push` sends gh's token.
+// gh-token-scopes reads the token gh holds, but git sends whatever its
+// credential helper returns — on a Mac, the token osxkeychain cached at the
+// first push — so a scope added with `gh auth refresh` never reaches git until
+// git is wired to gh. The scopes of any other helper's token are unknowable
+// here, so an unwired helper warns rather than fails: it may well work today.
+func checkGitCredentialHelper(ctx context.Context, env Env) Result {
+	const name = "git-credential-helper"
+	if env.RepoDir == "" {
+		return skip(name, "no --repo given")
+	}
+	const fix = "run `gh auth setup-git`"
+	out, err := env.Runner.Run(ctx, env.RepoDir, env.GitBin, "remote", "get-url", "origin")
+	if err != nil {
+		return warn(name, fmt.Sprintf("cannot read origin's url: %v", err), fix+" if pushes go over https")
+	}
+	remote := firstLine(out)
+	if isSSHRemote(remote) {
+		return pass(name, "pushes use ssh; token scopes do not apply")
+	}
+	u, err := url.Parse(remote)
+	if err != nil || u.Host == "" {
+		return warn(name, fmt.Sprintf("origin %q is neither ssh nor an http(s) url", remote), fix+" if pushes go over https")
+	}
+	// Exit 1 means no helper is set; any other failure equally leaves git not
+	// shown to be wired to gh, so the output alone decides.
+	out, _ = env.Runner.Run(ctx, env.RepoDir, env.GitBin, "config", "--get-urlmatch", "credential.helper",
+		u.Scheme+"://"+u.Host+"/")
+	// Every matching line is returned; an empty one clears the helpers before it,
+	// and gh's entry follows it. Any line naming gh means git asks gh.
+	var helpers []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if line = strings.TrimSpace(line); line == "" {
+			continue
+		}
+		if strings.Contains(line, "gh auth git-credential") {
+			return pass(name, "git pushes with gh's credential")
+		}
+		helpers = append(helpers, line)
+	}
+	helper := "none"
+	if len(helpers) > 0 {
+		helper = strings.Join(helpers, ", ")
+	}
+	return warn(name, fmt.Sprintf("git does not push with gh's credential (helper: %s); "+
+		"a token scope added with gh auth refresh does not reach git", helper), fix)
+}
+
+// isSSHRemote reports whether a remote url pushes over ssh: an ssh:// url, or
+// git's scp-like `[user@]host:path`, which it recognizes by a colon with no
+// slash before it.
+func isSSHRemote(remote string) bool {
+	if scheme, _, ok := strings.Cut(remote, "://"); ok {
+		return scheme == "ssh"
+	}
+	host, _, ok := strings.Cut(remote, ":")
+	return ok && !strings.Contains(host, "/")
 }
 
 // activeTokenScopes parses the `Token scopes:` line of the active account out of

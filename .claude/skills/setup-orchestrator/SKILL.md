@@ -61,6 +61,16 @@ gh auth status        # need: logged in, and Token scopes including 'repo' and '
   `! gh auth refresh -h github.com -s workflow`. Without it, any issue that
   touches `.github/workflows/` stalls at push.
 
+Once the scopes are confirmed, always run:
+
+```bash
+gh auth setup-git     # idempotent
+```
+
+It makes git push with gh's token; otherwise git keeps whatever token its own
+credential helper (e.g. the macOS keychain) cached, and a scope added above
+never reaches `git push`.
+
 ## 3. The agent CLI
 
 ```bash

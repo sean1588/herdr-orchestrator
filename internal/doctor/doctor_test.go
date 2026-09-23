@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/sean1588/herdr-orchestrator/internal/config"
+	"github.com/sean1588/herdr-orchestrator/internal/exec"
 	"github.com/sean1588/herdr-orchestrator/internal/proc"
 )
 
@@ -431,6 +433,87 @@ func TestFailed_TokenScopes(t *testing.T) {
 				t.Errorf("Failed() = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// withHerdrVersion scripts `herdr --version` over the healthy responder.
+func withHerdrVersion(f *proc.Fake, line string) {
+	healthy := f.Responder
+	f.Responder = func(c proc.Call) ([]byte, error) {
+		if c.Name == "herdr" && c.Args[0] == "--version" {
+			return []byte(line + "\n"), nil
+		}
+		return healthy(c)
+	}
+}
+
+func TestHerdrVersion(t *testing.T) {
+	tests := []struct {
+		name       string
+		line       string
+		wantStatus Status
+		wantDetail string
+		wantFix    string
+	}{
+		{"below the range fails", "herdr 0.7.9", StatusFail, "older than the oldest version this build was tested with (0.8.2)", "herdr update"},
+		{"the tested min passes", "herdr 0.8.2", StatusPass, "within the tested range 0.8.2–0.9.1", ""},
+		{"the tested max passes", "herdr 0.9.1", StatusPass, "within the tested range", ""},
+		{"above the range warns", "herdr 0.9.2", StatusWarn, "newer than the last version this build was tested with (0.9.1)", "full doctor"},
+		{"compared as integers, not strings", "herdr 0.10.0", StatusWarn, "herdr 0.10.0 is newer", "full doctor"},
+		{"unparseable warns and names the line", "herdr dev", StatusWarn, `cannot parse herdr version from "herdr dev"`, "0.8.2–0.9.1"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env, f := healthyEnv(t)
+			withHerdrVersion(f, tc.line)
+			got := byName(Run(context.Background(), env, true), "herdr-version")
+			if got.Status != tc.wantStatus {
+				t.Fatalf("herdr-version = %s (%s), want %s", got.Status, got.Detail, tc.wantStatus)
+			}
+			if !strings.Contains(got.Detail, tc.wantDetail) {
+				t.Errorf("detail = %q, want it to mention %q", got.Detail, tc.wantDetail)
+			}
+			if !strings.Contains(got.Fix, tc.wantFix) {
+				t.Errorf("fix = %q, want it to mention %q", got.Fix, tc.wantFix)
+			}
+		})
+	}
+}
+
+// A herdr newer than the tested range must not stop the daemon; one older than
+// it must.
+func TestFailed_HerdrVersion(t *testing.T) {
+	tests := []struct {
+		line string
+		want bool
+	}{
+		{"herdr 0.10.0", false},
+		{"herdr 0.7.9", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.line, func(t *testing.T) {
+			env, f := healthyEnv(t)
+			withHerdrVersion(f, tc.line)
+			if got := Failed(Run(context.Background(), env, true)); got != tc.want {
+				t.Errorf("Failed() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// The check ignores the constants' parse error, so this is what guarantees a
+// bumped constant is well-formed and the range is not inverted.
+func TestHerdrTestedRangeParsesAndIsOrdered(t *testing.T) {
+	lo, ok := parseVersion(exec.HerdrTestedMin)
+	if !ok {
+		t.Fatalf("HerdrTestedMin %q is not X.Y.Z", exec.HerdrTestedMin)
+	}
+	hi, ok := parseVersion(exec.HerdrTestedMax)
+	if !ok {
+		t.Fatalf("HerdrTestedMax %q is not X.Y.Z", exec.HerdrTestedMax)
+	}
+	if slices.Compare(lo[:], hi[:]) > 0 {
+		t.Errorf("HerdrTestedMin %s is above HerdrTestedMax %s", exec.HerdrTestedMin, exec.HerdrTestedMax)
 	}
 }
 

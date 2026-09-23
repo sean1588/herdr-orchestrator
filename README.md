@@ -17,7 +17,8 @@ Code or `curl`.
 ## Get started
 
 You need three things installed: [herdr](https://herdr.dev)
-(`curl -fsSL https://herdr.dev/install.sh | sh`), the [GitHub CLI](https://cli.github.com)
+(`curl -fsSL https://herdr.dev/install.sh | sh`; herdr 0.8.2–0.9.1 tested, and
+`doctor` warns on a newer one), the [GitHub CLI](https://cli.github.com)
 logged in, and [Claude Code](https://claude.com/claude-code). Everything else is
 set up for you.
 

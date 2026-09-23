@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/sean1588/herdr-orchestrator/internal/config"
+	"github.com/sean1588/herdr-orchestrator/internal/exec"
 	"github.com/sean1588/herdr-orchestrator/internal/store"
 )
 
@@ -59,6 +60,59 @@ func checkHerdrBinary(ctx context.Context, env Env) Result {
 			"check the herdr install; the orchestrator drives it entirely through this binary")
 	}
 	return pass(name, fmt.Sprintf("%s (%s)", path, firstLine(out)))
+}
+
+// checkHerdrVersion judges the installed herdr against the range the backend was
+// tested with. Above the range warns rather than fails: every herdr release would
+// otherwise stop every daemon until someone bumps a constant, and the full doctor
+// (the kickoff smoke test) is the real test of a new herdr.
+func checkHerdrVersion(ctx context.Context, env Env) Result {
+	const name = "herdr-version"
+	if _, err := env.LookPath(env.HerdrBin); err != nil {
+		return skip(name, "herdr is not on PATH; see herdr-binary")
+	}
+	out, err := env.Runner.Run(ctx, "", env.HerdrBin, "--version")
+	if err != nil {
+		return skip(name, "herdr --version failed; see herdr-binary")
+	}
+	line := firstLine(out)
+	_, have, _ := strings.Cut(line, " ") // "herdr X.Y.Z"
+	v, ok := parseVersion(have)
+	if !ok {
+		return warn(name, fmt.Sprintf("cannot parse herdr version from %q", line),
+			fmt.Sprintf("the tested range is %s–%s; run the full doctor (kickoff smoke test) before trusting this herdr",
+				exec.HerdrTestedMin, exec.HerdrTestedMax))
+	}
+	// The constants' validity is pinned by a test, so their parse cannot fail.
+	lo, _ := parseVersion(exec.HerdrTestedMin)
+	hi, _ := parseVersion(exec.HerdrTestedMax)
+	switch {
+	case slices.Compare(v[:], lo[:]) < 0:
+		return fail(name, fmt.Sprintf("herdr %s is older than the oldest version this build was tested with (%s)",
+			have, exec.HerdrTestedMin), "run `herdr update`")
+	case slices.Compare(v[:], hi[:]) > 0:
+		return warn(name, fmt.Sprintf("herdr %s is newer than the last version this build was tested with (%s)",
+			have, exec.HerdrTestedMax), "run the full doctor (kickoff smoke test) before trusting it")
+	}
+	return pass(name, fmt.Sprintf("herdr %s is within the tested range %s–%s",
+		have, exec.HerdrTestedMin, exec.HerdrTestedMax))
+}
+
+// parseVersion reads "X.Y.Z" as three integers, so 0.10.0 orders after 0.9.1.
+func parseVersion(s string) ([3]int, bool) {
+	var v [3]int
+	parts := strings.Split(s, ".")
+	if len(parts) != len(v) {
+		return v, false
+	}
+	for i, p := range parts {
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 0 {
+			return v, false
+		}
+		v[i] = n
+	}
+	return v, true
 }
 
 func checkHerdrServer(ctx context.Context, env Env) Result {

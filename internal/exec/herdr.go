@@ -24,6 +24,16 @@ const smokeLabel = "orchestratord-doctor"
 // ignores its own bound rather than a second, competing deadline.
 const waitBudgetSlack = 30 * time.Second
 
+// The herdr versions this backend's command surface (the subcommands it runs and
+// the JSON fields it parses) has been driven against end to end. doctor judges
+// the installed herdr against this range. A herdr release bump touches only
+// these two constants: run the full doctor (kickoff smoke test included) on the
+// new herdr, drive one issue to merged, then raise HerdrTestedMax.
+const (
+	HerdrTestedMin = "0.8.2" // oldest herdr the backend's command surface was driven against
+	HerdrTestedMax = "0.9.1" // newest; bump after a full doctor + one merged task on it
+)
+
 // Herdr is the herdr-backed ExecutionBackend. It wraps the same git + herdr CLI
 // commands proven in Spike 0, run through a proc.Runner so command construction
 // is unit-testable.

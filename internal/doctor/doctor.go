@@ -65,6 +65,7 @@ func Checks() []Check {
 	return []Check{
 		{Name: "config", Run: checkConfig},
 		{Name: "herdr-binary", Run: checkHerdrBinary},
+		{Name: "herdr-version", Run: checkHerdrVersion},
 		{Name: "herdr-server", Run: checkHerdrServer},
 		{Name: "agent-binary", Run: checkAgentBinary},
 		{Name: "gh-auth", Run: checkGHAuth},

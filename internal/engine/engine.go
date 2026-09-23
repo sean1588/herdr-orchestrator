@@ -116,7 +116,9 @@ type Config struct {
 	// pointer-to-zero to disable the bound outright (what most unit tests want,
 	// since they drive fake backends whose panes never produce bytes).
 	NoProgressTimeout *time.Duration
-	Logger            *slog.Logger
+	// Logger defaults to slog.Default(), so a handler installed on the process
+	// default (the daemon's --event-log tee) receives the engine's records.
+	Logger *slog.Logger
 	// Notifier forwards escalation/alert events out-of-band; default notify.Nop.
 	Notifier notify.Notifier
 	// PaneClassifier explains a pane the no-progress bound found static, so a
@@ -193,15 +195,18 @@ func New(c Config) *Engine {
 	if e.parseDur == nil {
 		e.parseDur = time.ParseDuration
 	}
+	// The process default, never a private handler: whatever the daemon installs
+	// there (the --event-log tee) must see the engine's records, the very ones
+	// that sink exists for. Defaulted before resolveNoProgress, which can log.
+	if e.log == nil {
+		e.log = slog.Default()
+	}
 	// Resolved from the workflow, not via DurationFunc: tests stub DurationFunc to
 	// return one fixed value for every state timeout, and letting that also govern
 	// the global bound would silently couple two unrelated knobs.
 	e.noProgress = resolveNoProgress(c.NoProgressTimeout, c.Workflow, e.log)
 	if e.now == nil {
 		e.now = time.Now
-	}
-	if e.log == nil {
-		e.log = slog.New(slog.NewTextHandler(os.Stderr, nil))
 	}
 	if e.notifier == nil {
 		e.notifier = notify.Nop{}

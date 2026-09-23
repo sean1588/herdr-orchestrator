@@ -9,7 +9,7 @@ Starting from nothing but a fresh clone and a target repo? §3.0 is your path.
 Your moment-to-moment job — what to check each pass and how to react — lives in
 the **`operate-orchestrator` skill** (`.claude/skills/operate-orchestrator/SKILL.md`).
 This runbook is the whole lifecycle *around* that loop; the skill is the loop.
-Deeper design and the full config contract are in [README.md](README.md); a
+Deeper design is in [docs/DESIGN.md](docs/DESIGN.md) and the full config contract in [docs/WORKFLOW.md](docs/WORKFLOW.md); a
 human-paced walkthrough is in [TUTORIAL.md](TUTORIAL.md).
 
 ---
@@ -480,7 +480,7 @@ boundary. Never bind a non-loopback address.
 **Where to look:**
 
 - **What to do each tick** → `.claude/skills/operate-orchestrator/SKILL.md`
-- **Design, the config contract, the 7 safety invariants** → [README.md](README.md)
+- **Design** → [docs/DESIGN.md](docs/DESIGN.md); **the config contract, the 7 safety invariants** → [docs/WORKFLOW.md](docs/WORKFLOW.md)
 - **Human getting-started walkthrough** → [TUTORIAL.md](TUTORIAL.md)
 - **What's built vs deferred, tracked debt** → [ROADMAP.md](ROADMAP.md)
 - **The workflow you're running** → its `--config` YAML (states, timeouts,

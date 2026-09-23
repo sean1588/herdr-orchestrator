@@ -1,7 +1,7 @@
 # Getting Started with Herdr Orchestrator
 
 This is a hands-on walkthrough: from a clean checkout to driving a real GitHub
-issue to a pull request. It complements the [README](README.md) (design +
+issue to a pull request. It complements [docs/DESIGN.md](docs/DESIGN.md) and [docs/WORKFLOW.md](docs/WORKFLOW.md) (design +
 reference) — read this first if you just want to *use* the tool.
 
 **What the orchestrator does:** it turns a GitHub issue into a pull request by
@@ -467,7 +467,7 @@ does the same on startup, so in practice you just restart the daemon.
 
 ## Where to go next
 
-- **[README.md](README.md)** — the design in depth: the engine, the review→merge
+- **[docs/DESIGN.md](docs/DESIGN.md)** and **[docs/WORKFLOW.md](docs/WORKFLOW.md)** — the design in depth: the engine, the review→merge
   loop, the safety invariants, and the full MCP reference.
 - **[ROADMAP.md](ROADMAP.md)** — what's built and what's deferred (e.g. cross-task
   memory), plus the tracked debt backlog.

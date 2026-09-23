@@ -42,7 +42,7 @@ a dependency without a named reason in the PR.
 - Merges are gate-evaluated (`ci_green`, `no_conflicts`), never reached from a
   decision or a bare event. Do not add a path into `merging` that skips a gate.
 - The seven safety invariants are enforced by `internal/config` and listed in
-  `README.md`. A config change that fails validation is a bug in the change,
+  `docs/WORKFLOW.md`. A config change that fails validation is a bug in the change,
   not in the validator.
 - The authoritative artifact decides (a PR on GitHub, a merge, CI), never a
   pane's status text.

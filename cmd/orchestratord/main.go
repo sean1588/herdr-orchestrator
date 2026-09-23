@@ -508,20 +508,12 @@ func cmdDaemon(args []string) int {
 	// stream it can tail without scraping a TUI. Installed before anything else
 	// logs so the event log captures the whole run, startup included.
 	if *eventLog != "" {
-		jh, closer, lerr := eventlog.Open(*eventLog)
+		closer, lerr := installEventLog(*eventLog)
 		if lerr != nil {
 			fmt.Fprintf(os.Stderr, "daemon: %v\n", lerr)
 			return 2
 		}
 		defer closer.Close()
-		// Tee an EXPLICIT console handler, never slog.Default().Handler(). The
-		// built-in default handler writes through the log package, and
-		// slog.SetDefault points the log package's output back at the new default
-		// handler — so teeing it would route tee -> default -> log -> tee. That
-		// re-entry deadlocks on the tee's mutex: the daemon starts, opens its
-		// store, and then logs nothing at all, forever.
-		console := slog.NewTextHandler(os.Stderr, nil)
-		slog.SetDefault(slog.New(eventlog.Tee(console, jh)))
 	}
 
 	w, err := cf.wire(ctx)
@@ -652,6 +644,25 @@ func cmdDaemon(args []string) int {
 	}
 	slog.Info("daemon stopped")
 	return 0
+}
+
+// installEventLog tees a JSON Lines sink at path onto the process default logger.
+// Every component logs through slog.Default() (the engine by fallback, the rest
+// by wiring), so this one install is what puts the whole run in the file.
+func installEventLog(path string) (io.Closer, error) {
+	jh, closer, err := eventlog.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	// Tee an EXPLICIT console handler, never slog.Default().Handler(). The
+	// built-in default handler writes through the log package, and
+	// slog.SetDefault points the log package's output back at the new default
+	// handler — so teeing it would route tee -> default -> log -> tee. That
+	// re-entry deadlocks on the tee's mutex: the daemon starts, opens its
+	// store, and then logs nothing at all, forever.
+	console := slog.NewTextHandler(os.Stderr, nil)
+	slog.SetDefault(slog.New(eventlog.Tee(console, jh)))
+	return closer, nil
 }
 
 // sourceLabel returns the label of the first github_issues source, or an error

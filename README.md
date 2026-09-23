@@ -18,6 +18,36 @@ A control-plane daemon that turns GitHub issues into pull requests by driving
 > ([below](#mcp-control-surface)). **Cross-task memory** remains deferred —
 > tracked in [ROADMAP.md](ROADMAP.md).
 
+## Install
+
+Download a prebuilt binary for macOS or Linux (amd64 / arm64) from the
+[releases page](https://github.com/sean1588/herdr-orchestrator/releases), e.g.
+macOS on Apple silicon into `~/.local/bin` (any directory on your `PATH` works):
+
+```sh
+VERSION=v0.1.0   # pick the latest from the releases page
+mkdir -p ~/.local/bin
+curl -fsSL "https://github.com/sean1588/herdr-orchestrator/releases/download/${VERSION}/orchestratord_${VERSION}_darwin_arm64.tar.gz" \
+  | tar -xz -C ~/.local/bin orchestratord
+orchestratord version
+```
+
+The binaries are unsigned. `curl` does not quarantine what it downloads, but if
+you fetched the tarball in a browser, macOS Gatekeeper will block the binary
+until you clear the flag: `xattr -d com.apple.quarantine ~/.local/bin/orchestratord`.
+Each release also carries a `checksums.txt` (sha256) for the four tarballs.
+
+Or, with a Go toolchain:
+
+```sh
+go install github.com/sean1588/herdr-orchestrator/cmd/orchestratord@latest
+```
+
+`go install` builds without a version stamp, so `orchestratord version` prints
+`dev`. That is expected, not a bug; only release binaries carry their tag.
+
+Building from a clone is the contributor path — see [Build, test](#build-test).
+
 ## Quick start: let Claude operate it against your repo
 
 You don't drive the orchestrator by hand — you hand it to a coding agent. The
@@ -142,6 +172,13 @@ go build -o orchestratord ./cmd/orchestratord
 
 The commands below assume `./orchestratord` is on your `PATH`; otherwise run them
 through the toolchain, e.g. `go run ./cmd/orchestratord validate <config>`.
+
+Releases are cut by pushing a tag; [`release.yml`](.github/workflows/release.yml)
+builds the four binaries, stamps them with the tag, and publishes the release:
+
+```sh
+git tag v0.1.0 && git push origin v0.1.0
+```
 
 ## Usage
 

@@ -1,0 +1,54 @@
+name: Release
+
+# Tagging is manual: `git tag v0.1.0 && git push origin v0.1.0`.
+# workflow_dispatch runs the same build by hand; if the tag does not exist yet,
+# `gh release create` creates it at the commit the workflow was dispatched on.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, e.g. v0.1.0
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: build · package · publish
+    runs-on: ubuntu-latest
+    env:
+      # Passed through env, never interpolated into the scripts.
+      TAG: ${{ inputs.tag || github.ref_name }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # Track the module's go directive, matching ci.yml.
+          go-version-file: go.mod
+          cache: true
+
+      # The matrix is four GOOS/GOARCH pairs cross-compiled on one runner: the
+      # SQLite driver is pure Go, so CGO_ENABLED=0 needs no per-OS toolchain and
+      # yields the static single binary.
+      - name: build and package
+        run: |
+          mkdir -p dist
+          for target in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64; do
+            os=${target%/*}
+            arch=${target#*/}
+            out="build/${os}_${arch}"
+            CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath \
+              -ldflags "-s -w -X main.version=${TAG}" \
+              -o "$out/orchestratord" ./cmd/orchestratord
+            tar -czf "dist/orchestratord_${TAG}_${os}_${arch}.tar.gz" -C "$out" orchestratord
+          done
+          (cd dist && sha256sum *.tar.gz > checksums.txt)
+          cat dist/checksums.txt
+
+      - name: publish
+        run: gh release create "$TAG" --target "$GITHUB_SHA" --generate-notes dist/*

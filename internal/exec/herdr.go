@@ -380,9 +380,10 @@ func (h *Herdr) Close(ctx context.Context, hd Handle) error {
 }
 
 // Cleanup removes a settled task's isolated git worktree and closes its herdr
-// workspace, keyed by the durable taskID label. It runs when a task halts at a
-// no-PR terminal state (a triage reject -> closed, or a needs_human / failed-drive
-// escalation -> escalated), so a settled issue leaves nothing registered.
+// workspace, keyed by the durable taskID label. The engine calls it when a task
+// halts at a non-alerting terminal state (a merge -> merged, or a triage reject ->
+// closed), so a settled issue leaves nothing registered. Alerting terminals
+// (escalated) are preserved for a human and never reach here.
 //
 // The worktree path is resolved deterministically (the same convention Spawn uses),
 // so cleanup works even after the agent pane has exited — the exact state a

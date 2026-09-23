@@ -24,11 +24,12 @@ assumes you know what the daemon, states, gates, and the merge loop are.
 ## Cardinal rule: don't fight the daemon
 
 The daemon already self-heals. It times work out to `escalated` — a stuck agent
-at 45m in `implementing`, and a merge gate that never clears at 30m in
-`blocked_on_gate` — re-drives every non-settled task on each poll, runs the retry
-cap, and removes the source label when a task settles. On restart it re-seeds and
-resumes every non-settled task on its own. **Do not babysit what it already
-handles.** Your value is the meta-layer it structurally cannot do:
+at whatever `implementing`'s `timeout:` is in the run's `pipeline.yaml`, and a
+merge gate that never clears at whatever `blocked_on_gate`'s `timeout:` is
+(shipped defaults 45m and 30m) — re-drives every non-settled task on each poll,
+runs the retry cap, and removes the source label when a task settles. On restart
+it re-seeds and resumes every non-settled task on its own. **Do not babysit what
+it already handles.** Your value is the meta-layer it structurally cannot do:
 
 - It **cannot restart itself** if the process dies — you can (and its own restart
   then resumes all in-flight work).
@@ -43,7 +44,7 @@ If a task is legitimately in progress or in a gate wait the daemon re-checks,
 
 ## Your three surfaces
 
-1. **MCP tools** (native, if the daemon is registered — see Setup):
+1. **MCP tools** (native, if the daemon is registered — see Find the run):
    - `list_tasks` — all tasks + current states. Your primary observe call.
    - `get_task {issue}` — one task by issue number.
    - `get_audit {issue}` — a task's full transition history. Your primary
@@ -66,34 +67,31 @@ If a task is legitimately in progress or in a gate wait the daemon re-checks,
    repo checkout: `orchestratord recover|daemon|validate|plan`.
 
 3. **herdr** — manage the daemon's own pane (read its log, restart the process).
-   See the `herdr` skill. Requires `HERDR_ENV=1`.
+   See the `herdr` skill. Requires a herdr server reachable from this session
+   (`herdr status`).
 
-## Setup (once, before supervising)
+## Find the run
 
-The daemon must be running with its MCP control server on, in a pane you can see:
+`setup-orchestrator` starts the daemon and records where the run lives in
+`~/orchestrator-<name>/run.env`. Read it (ask for `<name>` only if more than one
+`~/orchestrator-*/run.env` exists):
 
-```bash
-# In a dedicated herdr pane, from the repo checkout:
-orchestratord daemon --config <config.yaml> --repo <repo-dir> \
-  --db <db-path> --task-dir <task-dir> --worktrees-dir <wt-dir> \
-  --mcp-listen 127.0.0.1:7777
-```
+- `PORT` — the MCP endpoint, `http://127.0.0.1:<PORT>/mcp`.
+- `PANE` — the daemon's herdr pane: its log, and where you restart it.
+- `REPO_DIR` — the local checkout; `REPO` — the `<owner>/<name>` slug.
 
-Register that endpoint as an MCP server **once** so its tools are native:
+No `run.env` means the daemon is not set up: say so and point at
+`setup-orchestrator`. Do not start a daemon from this skill.
 
-```bash
-claude mcp add --transport http orchestrator http://127.0.0.1:7777/mcp
-claude mcp list   # confirm: "orchestrator: ... ✔ Connected"
-```
+Then read the run's `~/orchestrator-<name>/pipeline.yaml` so you know its
+**state timeouts** and **source label** — you need them to diagnose. The daemon
+also needs a herdr server reachable from this session (`herdr status`), an
+authenticated `gh`, and (for unattended agent runs) the permission setup
+`setup-orchestrator` step 8 describes.
 
-Then read the daemon's `--config` so you know its **state timeouts** and
-**source label** — you need them to diagnose. Prerequisites the daemon needs:
-`HERDR_ENV=1`, an authenticated `gh`, a local repo checkout, and (for unattended
-agent runs) the pre-armed permission setup described in `TUTORIAL.md`.
-
-If MCP tools aren't available in this session (e.g. the daemon was registered
-after the session started), fall back to `curl`:
-`curl -s 127.0.0.1:7777/mcp -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_tasks","arguments":{}}}'`.
+If the MCP tools aren't available in this session (setup registers them for the
+*next* session), fall back to `curl`:
+`curl -s 127.0.0.1:<PORT>/mcp -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_tasks","arguments":{}}}'`.
 
 ## The supervision tick
 
@@ -125,10 +123,26 @@ Run this each pass. Keep it cheap — most ticks do nothing but observe.
 
 | Situation | Action |
 |---|---|
-| **Daemon down / unreachable** | Restart it in its pane (same `daemon …` command). On startup it re-seeds and resumes every non-settled task itself — do **not** also run `orchestratord recover` against a live daemon (two engines on one DB/repo). Use `recover` only for a one-shot when no daemon is running. |
+| **Daemon down / unreachable** | Restart it in `PANE` with the same `daemon …` command `setup-orchestrator` step 9 ran. On startup it re-seeds and resumes every non-settled task itself — do **not** also run `orchestratord recover` against a live daemon (two engines on one DB/repo). Use `recover` only for a one-shot when no daemon is running. |
 | **A runaway you must stop** — pathological retry churn, its PR closed/merged externally, an agent looping and burning resources | `cancel_task {issue}` to stop the running drive. This is **one-way** — it settles to `cancelled` and cannot be re-driven — so then **surface**: a human decides whether to re-open the issue or fix the root cause. |
 | **A non-settled task the daemon isn't driving** (idle, e.g. freshly labeled and not yet picked up) | `enqueue_task {issue}` to nudge it. (Refused for any settled task.) |
+| **A driven task whose agent sits idle at its prompt** with the state's work unfinished | Nudge the agent — see below. |
 | **Task legitimately working, or in a gate wait the daemon re-checks** | Leave it. Do nothing. |
+
+**Nudging an idle agent.** Until `message_task` exists, the sanctioned way is to
+type one turn into the agent's pane (not `PANE` — find it by its `issue-<N>`
+workspace label in `herdr workspace list`):
+
+```bash
+herdr pane send-text <pane> "<one full instruction>"
+herdr pane send-keys <pane> Enter
+```
+
+Only at an **idle prompt** — `herdr pane read <pane>` first — and **never into a
+permission dialog**: a dialog is fixed in the allow-list, not answered. Send one
+complete instruction the agent can finish by doing the state's work; in
+`changes_requested`, a turn that pushes no commit fails `head_moved` and
+escalates terminally.
 
 Cancel is destructive **and one-way** — it kills in-flight agent work and the task
 cannot be restarted through these tools (settled means settled; the engine is the
@@ -213,7 +227,7 @@ transition's `from → to (trigger/result)`:
   reviewer and implementer disagree. If it's burning retries with no progress,
   `cancel_task` and surface with the pattern.
 
-Read the daemon's config for the actual timeout values and the source label; use
+Read the run's `pipeline.yaml` for the actual timeout values and the source label; use
 them, don't guess.
 
 ## Running the loop

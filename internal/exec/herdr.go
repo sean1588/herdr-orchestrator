@@ -253,13 +253,16 @@ func (h *Herdr) detectionRule(ctx context.Context, pane string) string {
 // herdrErrorCode extracts error.code from a failed herdr command. herdr writes
 // its {"error":{"code":...}} envelope to stderr and exits non-zero, and
 // proc.Runner carries stderr in the error text, so the envelope is decoded from
-// there. Returns "" for a nil error or one that carries no envelope.
+// there. The text before stderr is the argv, which can hold operator free text
+// (a message), so the search is for the last envelope: proc.Runner always
+// appends stderr last. Returns "" for a nil error or one that carries no
+// envelope.
 func herdrErrorCode(err error) string {
 	if err == nil {
 		return ""
 	}
 	msg := err.Error()
-	i := strings.Index(msg, `{"error"`)
+	i := strings.LastIndex(msg, `{"error"`)
 	if i < 0 {
 		return ""
 	}

@@ -472,10 +472,11 @@ type herdrScript struct {
 	prompts []string
 }
 
-// herdrErr mimics a failed herdr call as proc.Runner reports it: herdr's JSON
-// error envelope (written to stderr) carried in the error text.
-func herdrErr(sub, code string) error {
-	return fmt.Errorf("herdr agent %s: exit status 1: {\"error\":{\"code\":%q,\"message\":\"synthetic\"},\"id\":\"cli:agent:%s\"}", sub, code, sub)
+// herdrErr mimics a failed herdr call as proc.Runner reports it: the full argv
+// (prompt text included), then herdr's JSON error envelope from stderr.
+func herdrErr(args []string, code string) error {
+	return fmt.Errorf("herdr %s: exit status 1: {\"error\":{\"code\":%q,\"message\":\"synthetic\"},\"id\":\"cli:%s:%s\"}",
+		strings.Join(args, " "), code, args[0], args[1])
 }
 
 // explainBlocked is a hand-written `agent explain --json` body for an agent held
@@ -503,7 +504,7 @@ func (s herdrScript) responder() func(proc.Call) ([]byte, error) {
 			return []byte(`{"result":{"panes":[{"pane_id":"` + pane + `",` + agent + `"agent_status":"idle","workspace_id":"w7"}]}}`), nil
 		case "agent prompt":
 			if i := int(prompts.Add(1)) - 1; i < len(s.prompts) && s.prompts[i] != "" {
-				return nil, herdrErr("prompt", s.prompts[i])
+				return nil, herdrErr(c.Args, s.prompts[i])
 			}
 		case "agent explain":
 			return []byte(explainBlocked), nil
@@ -611,7 +612,11 @@ func TestHerdrErrorCode(t *testing.T) {
 		want string
 	}{
 		{"nil", nil, ""},
-		{"envelope in error text", herdrErr("prompt", "agent_blocked"), "agent_blocked"},
+		{"envelope in error text", herdrErr([]string{"agent", "prompt", "w1:p1", "push the branch", "--wait"}, "agent_blocked"), "agent_blocked"},
+		{"envelope-looking fragment in the prompt text",
+			herdrErr([]string{"agent", "prompt", "w1:p1", `see {"error" here`, "--wait"}, "agent_blocked"), "agent_blocked"},
+		{"whole envelope quoted in the prompt text",
+			herdrErr([]string{"agent", "prompt", "w1:p1", `quoting {"error":{"code":"timeout"}}`, "--wait"}, "agent_blocked"), "agent_blocked"},
 		{"no envelope", fmt.Errorf("herdr agent prompt: exit status 1: connection refused"), ""},
 		{"malformed envelope", fmt.Errorf(`herdr: exit status 1: {"error":{"code":`), ""},
 	}

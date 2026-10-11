@@ -347,7 +347,7 @@ Streamable HTTP transport) on a single `/mcp` endpoint. Five tools:
 | `get_task` | `issue` | one task by issue number |
 | `get_audit` | `issue` | a task's full transition history |
 | `cancel_task` | `issue` | cancel the running drive; it settles to `cancelled` |
-| `enqueue_task` | `issue` | (re-)drive an issue; idempotent if already running |
+| `enqueue_task` | `issue` | (re-)drive an issue: a cancelled or escalated task starts over; idempotent if running; refused if merged or closed |
 | `message_task` | `issue`, `text` | submit one line at a running agent's idle prompt (verified like the kickoff; never into a dialog) |
 
 Smoke-test it with `curl`:

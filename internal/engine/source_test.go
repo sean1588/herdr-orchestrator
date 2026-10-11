@@ -50,11 +50,13 @@ func sourceEngine(t *testing.T, st *store.Store, b exec.ExecutionBackend, gh git
 }
 
 func TestSourceTriageAndResume(t *testing.T) {
+	// spawns counts agents across both runs: an escalated task is stopped, not
+	// finished, so running it again starts it over and re-triages.
 	for _, tc := range []struct {
 		verdict, goal, want string
-		ack                 int
+		ack, spawns         int
 	}{
-		{"accept", "queued", "queued", 0}, {"reject", "merged", "closed", 1}, {"needs_human", "merged", "escalated", 1},
+		{"accept", "queued", "queued", 0, 1}, {"reject", "merged", "closed", 1, 1}, {"needs_human", "merged", "escalated", 1, 2},
 	} {
 		t.Run(tc.verdict, func(t *testing.T) {
 			ctx := context.Background()
@@ -99,8 +101,8 @@ func TestSourceTriageAndResume(t *testing.T) {
 			if err != nil || len(tasks) != 1 {
 				t.Fatalf("tasks=%v err=%v", tasks, err)
 			}
-			if b.spawns != 1 {
-				t.Fatalf("resume spawned %d agents", b.spawns)
+			if b.spawns != tc.spawns {
+				t.Fatalf("spawned %d agents across both runs, want %d", b.spawns, tc.spawns)
 			}
 		})
 	}

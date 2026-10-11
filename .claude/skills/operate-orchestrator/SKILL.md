@@ -50,14 +50,14 @@ If a task is legitimately in progress or in a gate wait the daemon re-checks,
    - `get_audit {issue}` — a task's full transition history. Your primary
      diagnosis call.
    - `cancel_task {issue}` — stop an **actively-running** drive; it settles to the
-     terminal `cancelled`. **One-way:** a cancelled task is settled and **cannot
-     be re-driven** through these tools. Only works while the drive is in flight —
-     a task suspended in `blocked_on_gate` between polls returns "not currently
-     running."
-   - `enqueue_task {issue}` — drive a **non-settled** issue that isn't already in
-     flight (a freshly-labeled issue, or a nudge for an idle one). It **refuses
-     any settled task** ("already settled; not re-driven"), so it is NOT a
-     restart-after-cancel or restart-after-escalate mechanism.
+     terminal `cancelled`, and the poller never re-drives it on its own. Only
+     works while the drive is in flight — a task suspended in `blocked_on_gate`
+     between polls returns "not currently running."
+   - `enqueue_task {issue}` — drive an issue that isn't already in flight (a
+     freshly-labeled issue, or a nudge for an idle one). On a **cancelled or
+     escalated** task it starts the task over from the entry state; that restart
+     is a human's decision, made after fixing the cause — never yours. It
+     **refuses a merged or closed task** ("already settled; not re-driven").
    - `message_task {issue, text}` — submit one line at a running task's agent
      prompt, delivered and verified the same way as its kickoff. Refused for an
      unknown issue, a settled task, or a task with no pane. See "Nudging an idle
@@ -128,8 +128,8 @@ Run this each pass. Keep it cheap — most ticks do nothing but observe.
 | Situation | Action |
 |---|---|
 | **Daemon down / unreachable** | Restart it in `PANE` with the same `daemon …` command `setup-orchestrator` step 9 ran. On startup it re-seeds and resumes every non-settled task itself — do **not** also run `orchestratord recover` against a live daemon (two engines on one DB/repo). Use `recover` only for a one-shot when no daemon is running. |
-| **A runaway you must stop** — pathological retry churn, its PR closed/merged externally, an agent looping and burning resources | `cancel_task {issue}` to stop the running drive. This is **one-way** — it settles to `cancelled` and cannot be re-driven — so then **surface**: a human decides whether to re-open the issue or fix the root cause. |
-| **A non-settled task the daemon isn't driving** (idle, e.g. freshly labeled and not yet picked up) | `enqueue_task {issue}` to nudge it. (Refused for any settled task.) |
+| **A runaway you must stop** — pathological retry churn, its PR closed/merged externally, an agent looping and burning resources | `cancel_task {issue}` to stop the running drive. It settles to `cancelled` and the daemon will not restart it — so then **surface**: a human decides whether to fix the root cause and re-drive it (`enqueue_task`). |
+| **A non-settled task the daemon isn't driving** (idle, e.g. freshly labeled and not yet picked up) | `enqueue_task {issue}` to nudge it. (Never on a cancelled or escalated task — that restarts it, which is a human's call.) |
 | **A driven task whose agent sits idle at its prompt** with the state's work unfinished | Nudge the agent — see below. |
 | **Task legitimately working, or in a gate wait the daemon re-checks** | Leave it. Do nothing. |
 
@@ -195,12 +195,12 @@ transition's `from → to (trigger/result)`:
     `permissions.allow` pops an interactive prompt the agent can't answer, and the
     daemon keeps reading the pane as "working" until the timeout fires. Read the
     pane read-only (`herdr pane read <pane>`) to tell them apart; a prompt means fix
-    the allow-list, then open a fresh issue to retry — never type into the pane, and
-    a settled task can't be re-driven).
+    the allow-list, then a human re-drives it with `enqueue_task` — never type into
+    the pane).
   - from `implementing` on `blocked_timeout` → the agent sat continuously blocked
     past `policies.blocked_timeout`. Distinct from `timeout` on purpose: this one
     means "parked on a prompt", not "legitimately slow". Read the pane read-only to
-    see *which* prompt, fix the environment that caused it, and open a fresh issue.
+    see *which* prompt, fix the environment that caused it, and re-drive it.
   - from *any* state on `no_progress` → the task produced no observable signal for a
     whole `policies.no_progress_timeout` window, confirmed against the pane's own
     bytes. "Nothing happened at all", rather than "this took too long". Read the
@@ -259,8 +259,8 @@ get_audit 29 → … implementing → escalated (trigger=timeout)
   Cause: implementer ran past its deadline without opening a PR
   Audit: implementing→escalated (timeout); queued→implementing (scheduled)
   Recommended: inspect the agent's worktree / issue scope, or raise the
-  state's timeout, then open a fresh issue to retry — a settled task
-  cannot be re-driven (enqueue_task 29 → "already settled; not re-driven").
+  state's timeout, then re-drive it (enqueue_task 29 starts it over from
+  the entry state).
 ```
 
 ## Safety

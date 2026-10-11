@@ -136,7 +136,7 @@ non-loopback address.
 | `get_task` | `issue` | one task's current view |
 | `get_audit` | `issue` | a task's state-transition history |
 | `cancel_task` | `issue` | cancel the running drive; it settles to `cancelled` |
-| `enqueue_task` | `issue` | (re-)drive an issue by number (idempotent) |
+| `enqueue_task` | `issue` | (re-)drive an issue by number: a cancelled or escalated task starts over; idempotent if running; refused if merged or closed |
 | `message_task` | `issue`, `text` | submit one line at a running agent's idle prompt (verified like the kickoff; never into a dialog) |
 
 **Liveness.** State says *where* a task is; it cannot say whether it is *moving* —
@@ -153,8 +153,8 @@ escalated: the `Cause` (`timeout`, `blocked_timeout`, `retry_exhausted`,
 `no_progress`, `blocked_on_prompt`, `agent_crashed`, `drive_deadline`, or a
 gate/decision result), the last few transitions, the tail of the agent's pane,
 and a concrete recommended action.
-Since a settled task can never be re-driven, the recommendation is always "fix
-the cause and open a fresh issue", never "retry it".
+An escalated task is stopped, not finished, so the recommendation is always "fix
+the cause, then re-drive it with `enqueue_task`", never "retry it" unchanged.
 
 **Event log.** `--event-log <path>` appends every event as JSON Lines —
 transitions, spawns, gate evaluations, decisions, agent status changes,
@@ -167,7 +167,12 @@ command reached the scheduler and was actionable, then returns. Observe the
 result — a `cancelled` state, a new PR — via `get_task` / `get_audit`. A
 cancelled task **settles to the reserved `cancelled` terminal** (its worktree is
 left in place for inspection, not torn down) and is neither re-driven nor
-re-listed. `cancel_task` on an issue with no active drive is a tool error.
+re-listed by the poller. `cancel_task` on an issue with no active drive is a tool
+error. An explicit `enqueue_task` on a **cancelled or escalated** task starts it
+over from the entry state (audited as `operator.redrive`): pane, PR number, and
+retry counts are cleared and the branch is recreated from base. A PR the earlier
+attempt opened stays open and follows the branch's new commits. A merged or
+closed task is refused ("already settled; not re-driven").
 
 Smoke-test the endpoint with `curl`:
 

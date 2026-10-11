@@ -32,7 +32,7 @@ func toolDefs() []toolDef {
 		{"get_task", "Get one task by its GitHub issue number.", issueSchema},
 		{"get_audit", "Get a task's audit trail (state transitions) by issue number.", issueSchema},
 		{"cancel_task", "Cancel the running drive for an issue; it settles to 'cancelled'.", issueSchema},
-		{"enqueue_task", "Re-drive an issue by number (idempotent if already running).", issueSchema},
+		{"enqueue_task", "Re-drive an issue by number. A cancelled or escalated task starts over from the entry state; a running one is left alone; a merged or closed one is refused.", issueSchema},
 		{"message_task", "Send one line to a running task's agent, delivered and verified like its kickoff. Use only when the agent's pane shows an idle prompt, never a dialog.", messageSchema},
 	}
 }

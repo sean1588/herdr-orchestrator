@@ -19,9 +19,9 @@ var errTestDeadline = errors.New("test drive deadline")
 func TestReaperCancelsAWedgedDrive(t *testing.T) {
 	causes := make(chan error, 1)
 	s := &Scheduler{
-		List: func(context.Context) ([]int, error) { return []int{1}, nil },
-		Done: func(context.Context, int) (bool, error) { return false, nil },
-		Log:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		List:        func(context.Context) ([]int, error) { return []int{1}, nil },
+		Disposition: func(context.Context, int) (Disposition, error) { return Open, nil },
+		Log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
 		RunTask: func(ctx context.Context, issue int) error {
 			<-ctx.Done() // a drive that will never end on its own
 			causes <- context.Cause(ctx)
@@ -56,9 +56,9 @@ func TestReaperLeavesAHealthyDriveAlone(t *testing.T) {
 	done := make(chan struct{}, 1)
 
 	s := &Scheduler{
-		List: func(context.Context) ([]int, error) { return []int{1}, nil },
-		Done: func(context.Context, int) (bool, error) { return false, nil },
-		Log:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		List:        func(context.Context) ([]int, error) { return []int{1}, nil },
+		Disposition: func(context.Context, int) (Disposition, error) { return Open, nil },
+		Log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
 		RunTask: func(ctx context.Context, issue int) error {
 			time.Sleep(30 * time.Millisecond)
 			mu.Lock()
@@ -119,12 +119,12 @@ func TestReapSkipsClaimedButUnarmedIssues(t *testing.T) {
 // cleanly rather than block forever waiting on a goroutine that never started.
 func TestReaperDisabledStillShutsDownCleanly(t *testing.T) {
 	s := &Scheduler{
-		List:     func(context.Context) ([]int, error) { return nil, nil },
-		Done:     func(context.Context, int) (bool, error) { return false, nil },
-		RunTask:  func(context.Context, int) error { return nil },
-		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Interval: 10 * time.Millisecond,
-		Workers:  1,
+		List:        func(context.Context) ([]int, error) { return nil, nil },
+		Disposition: func(context.Context, int) (Disposition, error) { return Open, nil },
+		RunTask:     func(context.Context, int) error { return nil },
+		Log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Interval:    10 * time.Millisecond,
+		Workers:     1,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	served := make(chan error, 1)

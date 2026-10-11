@@ -51,6 +51,44 @@ func TestDeleteRemoteBranch_RunnerErrorIsWrapped(t *testing.T) {
 	}
 }
 
+func TestRemoteBranchExists(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		out  string
+		want bool
+	}{
+		{name: "exact ref", out: `[{"ref":"refs/heads/agent/issue-5"}]`, want: true},
+		{name: "no match", out: `[]`, want: false},
+		// matching-refs is a prefix match: a sibling branch is not this one.
+		{name: "prefix sibling only", out: `[{"ref":"refs/heads/agent/issue-50"}]`, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &proc.Fake{Responder: func(c proc.Call) ([]byte, error) { return []byte(tc.out), nil }}
+			got, err := New(fake).RemoteBranchExists(context.Background(), "/repo", "agent/issue-5")
+			if err != nil {
+				t.Fatalf("RemoteBranchExists: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("exists = %v, want %v", got, tc.want)
+			}
+			call := fake.Calls[0]
+			wantArgv := []string{"api", "repos/{owner}/{repo}/git/matching-refs/heads/agent/issue-5"}
+			if call.Name != "gh" || call.Dir != "/repo" || !reflect.DeepEqual(call.Args, wantArgv) {
+				t.Errorf("call = {%q %q %v}, want {gh /repo %v}", call.Name, call.Dir, call.Args, wantArgv)
+			}
+		})
+	}
+}
+
+func TestRemoteBranchExists_RunnerErrorIsWrapped(t *testing.T) {
+	sentinel := errors.New("gh api failed")
+	fake := &proc.Fake{Responder: func(c proc.Call) ([]byte, error) { return nil, sentinel }}
+	_, err := New(fake).RemoteBranchExists(context.Background(), "/repo", "agent/issue-5")
+	if err == nil || !errors.Is(err, sentinel) {
+		t.Fatalf("want wrapped sentinel, got %v", err)
+	}
+}
+
 func TestCloseIssue_Argv(t *testing.T) {
 	for _, tc := range []struct {
 		name    string

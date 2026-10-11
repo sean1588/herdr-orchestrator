@@ -2,6 +2,7 @@ package github
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 )
@@ -31,6 +32,32 @@ func (g *GH) DeleteRemoteBranch(ctx context.Context, repoDir, branch string) err
 		return fmt.Errorf("gh api DELETE %s: %w", ref, err)
 	}
 	return nil
+}
+
+// RemoteBranchExists lists the remote refs under refs/heads/<branch> via the refs
+// API. matching-refs is a prefix match that answers an empty array (not a 404)
+// when nothing matches, so a missing branch is a clean false, and a failed call
+// stays an error; only an exact ref name counts, so agent/issue-9 is not found
+// by agent/issue-90. Refs come back sorted by name, so the exact ref leads its
+// prefix siblings on the first page and one unpaginated call is enough.
+func (g *GH) RemoteBranchExists(ctx context.Context, repoDir, branch string) (bool, error) {
+	path := "repos/{owner}/{repo}/git/matching-refs/heads/" + branch
+	out, err := g.run.Run(ctx, repoDir, "gh", "api", path)
+	if err != nil {
+		return false, fmt.Errorf("gh api %s: %w", path, err)
+	}
+	var refs []struct {
+		Ref string `json:"ref"`
+	}
+	if err := json.Unmarshal(out, &refs); err != nil {
+		return false, fmt.Errorf("parse gh api %s output: %w", path, err)
+	}
+	for _, r := range refs {
+		if r.Ref == "refs/heads/"+branch {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // CloseIssue closes an issue with an explanatory comment. The orchestrator merges

@@ -57,7 +57,9 @@ If a task is legitimately in progress or in a gate wait the daemon re-checks,
      freshly-labeled issue, or a nudge for an idle one). On a **cancelled or
      escalated** task it starts the task over from the entry state; that restart
      is a human's decision, made after fixing the cause — never yours. It
-     **refuses a merged or closed task** ("already settled; not re-driven").
+     **refuses a merged or closed task** ("already settled; not re-driven"), and
+     a stopped task whose branch is still on the remote (the human closes any PR
+     and deletes the branch first).
    - `message_task {issue, text}` — submit one line at a running task's agent
      prompt, delivered and verified the same way as its kickoff. Refused for an
      unknown issue, a settled task, or a task with no pane. See "Nudging an idle

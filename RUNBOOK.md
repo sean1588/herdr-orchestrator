@@ -393,7 +393,8 @@ approaching `blocked_timeout` is about to escalate. Read its pane read-only
   stop-and-restart. Restarting cancelled or escalated work is a human decision:
   once the cause is fixed, `enqueue_task` starts it over from the entry state.
   It **refuses a merged or closed task**, and leaves a stopped task alone while
-  its branch still has an open PR (close or merge the PR first).
+  its branch still exists on the remote (close any open PR and delete the
+  branch first; the orchestrator never deletes it for you).
 
 **Cardinal rule: don't fight the daemon.** It already times work out to
 `escalated`, re-drives every non-settled task each poll, runs the retry cap,

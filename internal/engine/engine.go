@@ -377,24 +377,40 @@ func IsStopped(wf *config.Workflow, state string) bool {
 	return ok && st.Terminal != "" && st.Alert
 }
 
-// redrive starts a stopped task over from the start state and drives it. Every
-// field that tied the task to its previous attempt is cleared, so the implementer
-// spawns fresh and, with no PR recorded, recreates the branch from base. The
-// snapshot is kept, like any other drive of an existing task, so a workflow edit
-// (a timeout, dry_run, the graph) does not reach a redrive — that needs a new issue.
+// redrive starts a stopped task over from its workflow's entry state and drives
+// it. Every field that tied the task to its previous attempt is cleared, so the
+// implementer spawns fresh and, with no PR recorded, recreates the branch from
+// base. The snapshot is kept, like any other drive of an existing task, so a
+// workflow edit (a timeout, dry_run, the graph) does not reach a redrive — that
+// needs a new issue. The entry state comes from that snapshot too, never the
+// daemon's live startState, which may name a state the snapshot graph lacks.
 //
-// A task whose branch still has an open PR is refused and left untouched: that PR
-// would read as the new attempt's artifact before the new attempt pushed anything.
-// With no open PR, the fresh-task path (push, gh pr create, pr_exists) is correct
-// as it stands, so the operator closes or merges the PR and enqueues again.
+// A task whose branch still exists on the remote is refused and left untouched.
+// An open PR there would read as the new attempt's artifact before the new
+// attempt pushed anything, and a head left by a closed PR or a push with no PR
+// rejects the fresh branch's push as non-fast-forward. The operator closes any PR
+// and deletes the branch, then enqueues again; nothing here deletes it for them.
+// A branch that never reached the remote (a triage escalation) redrives.
 func (e *Engine) redrive(ctx context.Context, task *store.Task) (string, error) {
 	pr, err := e.gh.FindPR(ctx, e.repoDir, task.Branch)
 	if err != nil {
 		return task.CurrentState, fmt.Errorf("redrive %s: find open PR: %w", task.ID, err)
 	}
 	if pr != nil {
-		return task.CurrentState, fmt.Errorf("issue %d has open PR #%d on %s; close or merge it, then enqueue again",
-			task.Issue, pr.Number, task.Branch)
+		return task.CurrentState, fmt.Errorf("issue %d has open PR #%d on %s; close it and delete the remote branch %s, then enqueue again",
+			task.Issue, pr.Number, task.Branch, task.Branch)
+	}
+	exists, err := e.gh.RemoteBranchExists(ctx, e.repoDir, task.Branch)
+	if err != nil {
+		return task.CurrentState, fmt.Errorf("redrive %s: look up remote branch: %w", task.ID, err)
+	}
+	if exists {
+		return task.CurrentState, fmt.Errorf("issue %d still has remote branch %s from its earlier attempt; delete it, then enqueue again",
+			task.Issue, task.Branch)
+	}
+	entry := e.startState
+	if e.wf.EntryState != nil {
+		entry = *e.wf.EntryState
 	}
 	task.PaneID = ""
 	task.PaneSpawnState = ""
@@ -402,7 +418,7 @@ func (e *Engine) redrive(ctx context.Context, task *store.Task) (string, error) 
 	task.RetryCounts = nil
 	task.AgentStatus = ""
 	task.AgentStatusAt = time.Time{}
-	if err := e.advance(ctx, task, e.startState, "operator.redrive", ""); err != nil {
+	if err := e.advance(ctx, task, entry, "operator.redrive", ""); err != nil {
 		return task.CurrentState, fmt.Errorf("redrive %s: %w", task.ID, err)
 	}
 	return e.drive(ctx, task)

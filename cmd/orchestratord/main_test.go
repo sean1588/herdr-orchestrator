@@ -55,6 +55,9 @@ func (f *fakeGH) Merge(ctx context.Context, repoDir string, pr int) error { retu
 func (f *fakeGH) DeleteRemoteBranch(ctx context.Context, repoDir, branch string) error {
 	return nil
 }
+func (f *fakeGH) RemoteBranchExists(ctx context.Context, repoDir, branch string) (bool, error) {
+	return false, nil
+}
 func (f *fakeGH) CloseIssue(ctx context.Context, repoDir string, number int, comment string) error {
 	return nil
 }

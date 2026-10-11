@@ -19,8 +19,9 @@ Code or `curl`.
 You need three things installed: [herdr](https://herdr.dev)
 (`curl -fsSL https://herdr.dev/install.sh | sh`; herdr 0.8.2–0.9.1 tested, and
 `doctor` warns on a newer one), the [GitHub CLI](https://cli.github.com)
-logged in, and [Claude Code](https://claude.com/claude-code). Everything else is
-set up for you.
+logged in, and a coding agent CLI herdr can drive: Claude Code, Codex CLI, or
+Grok CLI ([Which agent](#which-agent)). Everything else is set up for you.
+`/start` itself runs in [Claude Code](https://claude.com/claude-code).
 
 Open herdr, and from a pane inside it:
 
@@ -44,10 +45,26 @@ you, records which depend on which, and feeds them in; or **run issues you
 already have**, and it labels the ones you name. After that it supervises
 until the queue drains and only speaks up when something needs you.
 
-Prefer to drive it yourself, or use a different agent? Every step is plain
+Prefer to drive it yourself? Every step is plain
 markdown and plain commands: [TUTORIAL.md](TUTORIAL.md) walks through it by
 hand, and [RUNBOOK.md](RUNBOOK.md) is the reference the agent operates from
 (written for it, readable by you).
+
+### Which agent
+
+Each role runs its `roles.*.launch` argv verbatim. For unattended runs:
+
+| Agent | `launch` | Trusts the repo via |
+|---|---|---|
+| Claude Code | `["claude"]` (permissions come from the allow-list the setup skill writes to `~/.claude/settings.json`) | its folder-trust prompt, once per repo; `~/.claude.json` |
+| Codex CLI | `["codex", "-a", "never", "--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true"]` (network on so `git push` and `gh` work inside the sandbox) | its folder-trust prompt, once per repo; `[projects."<repo>"] trust_level = "trusted"` in `~/.codex/config.toml` |
+| Grok CLI | `["grok", "--always-approve"]` | `~/.grok/trusted_folders.toml`; no prompt was observed |
+
+End-to-end runs, issue to merged PR, have been dogfooded with Claude Code only.
+Codex and Grok were verified on herdr 0.9.1 through launch, detection, and
+prompt acceptance. Claude Code is the default; name another agent to `/start`
+(for example `/start owner/repo with codex`) and setup writes its line into
+every role.
 
 ## Install
 

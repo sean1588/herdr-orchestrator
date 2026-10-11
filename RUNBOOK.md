@@ -236,7 +236,7 @@ diagnosing by hand when `doctor` is not available:
 | A **herdr server** reachable from this session | `herdr status` | the backend shells out to `herdr`; without a running server it can't reach the session |
 | **`gh` authenticated** for the target repo, token scopes include `repo` and `workflow`, and **git pushes with gh's credential** | `gh auth status` → `Token scopes:` line; `git config --get-urlmatch credential.helper https://github.com/` names `gh auth git-credential` | issue reads, PR detection, reviews, merge; without `workflow` an issue that touches `.github/workflows/` stalls at push (fix: `gh auth refresh -h github.com -s workflow`); git sends its own credential helper's token, not gh's, so a scope added with `gh auth refresh` reaches `git push` only after `gh auth setup-git` |
 | A **local checkout** of the target repo | `ls <repo-dir>` | the engine makes per-task worktrees inside it, under `.orchestrator/worktrees` (`--repo`, absolute path) |
-| The **agent CLI** on `PATH` | `which claude` (or whatever `roles.*.launch` names) | the daemon launches it per task |
+| The **agent CLI** on `PATH` | `which claude` (or whatever `roles.*.launch` names; see "Agents other than Claude Code" below) | the daemon launches it per task |
 | A **valid config** + its `prompts/` rubrics | `orchestratord validate <config>` → exit 0 | run/daemon refuse to start on any error; rubric paths resolve beside the config |
 | **Unattended permissions armed** (for hands-off runs) | see below | a coding agent otherwise stalls on per-command permission prompts |
 
@@ -262,6 +262,30 @@ you registered them — `mcp__orchestrator` if agents ever call `get_task`).
 
 Treat this as temporary global state and **revert it after the run**. Full recipe
 in [TUTORIAL.md](TUTORIAL.md) §11.
+
+#### Agents other than Claude Code
+
+`roles.*.launch` runs verbatim, so any agent herdr detects can fill a role. The
+verified lines for unattended runs (end-to-end runs have been dogfooded with
+Claude Code; Codex and Grok were verified on herdr 0.9.1 through launch,
+detection, and prompt acceptance):
+
+| Agent | `launch` | Trusts the repo via |
+|---|---|---|
+| Claude Code | `["claude"]` (permissions come from the allow-list above in `~/.claude/settings.json`) | its folder-trust prompt, once per repo; `~/.claude.json` |
+| Codex CLI | `["codex", "-a", "never", "--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true"]` (network on so `git push` and `gh` work inside the sandbox) | its folder-trust prompt, once per repo; `[projects."<repo>"] trust_level = "trusted"` in `~/.codex/config.toml` |
+| Grok CLI | `["grok", "--always-approve"]` | `~/.grok/trusted_folders.toml`; no prompt was observed |
+
+Trust granted to the checkout covers the worktrees under
+`<repo>/.orchestrator/worktrees/`, so one answer per repo is enough. A spawn
+failure that names a herdr detection rule (for example `trust_directory`) means
+the agent opened a dialog the pipeline cannot answer, and the task escalates.
+Fix it with the trust step: open the agent once in the checkout, accept its
+trust prompt, exit (or write the trust file from the table); then handle the
+escalation as in §6.
+
+`herdr integration install <kind>` is optional. It lets herdr resume the agent's
+session after a herdr restart; herdr detects the agent's state without it.
 
 ### 3.2 Start the daemon (in its own pane, with the MCP surface on)
 

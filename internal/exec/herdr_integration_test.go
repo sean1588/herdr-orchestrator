@@ -66,3 +66,27 @@ func TestHerdr_Resolve_AgainstFakeBinary(t *testing.T) {
 		t.Errorf("Resolve(absent) = ok:%v err:%v, want ok:false err:nil", ok, err)
 	}
 }
+
+// TestHerdr_Message_AgentBlockedAgainstFakeBinary pins the error contract the
+// delivery path depends on: herdr writes its {"error":{"code":...}} envelope to
+// stderr and exits non-zero, and the code must survive the real proc.Runner to
+// be decoded. A blocked prompt must come back naming the explain rule.
+func TestHerdr_Message_AgentBlockedAgainstFakeBinary(t *testing.T) {
+	explain := fixtureAbs(t, "testdata/agent_explain_blocked.json")
+	dir := t.TempDir()
+	body := "#!/bin/sh\n" +
+		"if [ \"$1\" = agent ] && [ \"$2\" = prompt ]; then " +
+		"echo '{\"error\":{\"code\":\"agent_blocked\",\"message\":\"synthetic\"},\"id\":\"cli:agent:prompt\"}' >&2; exit 1; fi\n" +
+		"if [ \"$1\" = agent ] && [ \"$2\" = explain ]; then cat " + explain + "; exit 0; fi\n" +
+		"exit 9\n"
+	writeExec(t, filepath.Join(dir, "herdr"), body)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	err := exec.NewHerdr(proc.New()).Message(context.Background(), exec.Handle{PaneID: "wB:p1"}, "hello")
+	if err == nil {
+		t.Fatal("Message succeeded against an agent herdr reports blocked")
+	}
+	if want := "agent blocked before kickoff on wB:p1: trust_directory"; err.Error() != want {
+		t.Errorf("Message error = %q, want %q", err, want)
+	}
+}

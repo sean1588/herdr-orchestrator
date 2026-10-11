@@ -31,24 +31,12 @@ func formatCalls(calls []proc.Call) string {
 	return b.String()
 }
 
-func paneRunCalls(calls []proc.Call) []proc.Call {
-	var out []proc.Call
-	for _, c := range calls {
-		if c.Name == "herdr" && len(c.Args) >= 2 && c.Args[0] == "pane" && c.Args[1] == "run" {
-			out = append(out, c)
-		}
+func formatArgs(argvs [][]string) string {
+	var b strings.Builder
+	for _, a := range argvs {
+		fmt.Fprintf(&b, "  herdr %s\n", strings.Join(a, " "))
 	}
-	return out
-}
-
-// idxOfArg returns the index of the first call whose args contain arg, or -1.
-func idxOfArg(calls []proc.Call, arg string) int {
-	for i, c := range calls {
-		if slices.Contains(c.Args, arg) {
-			return i
-		}
-	}
-	return -1
+	return b.String()
 }
 
 func testSpawn() Spawn {
@@ -65,15 +53,9 @@ func testSpawn() Spawn {
 }
 
 func TestSpawn_ConstructsCommandsAndParsesPane(t *testing.T) {
-	f := &proc.Fake{Responder: func(c proc.Call) ([]byte, error) {
-		if c.Name == "herdr" && len(c.Args) >= 2 && c.Args[0] == "workspace" && c.Args[1] == "create" {
-			return []byte(`{"result":{"root_pane":{"pane_id":"w7:p1"}}}`), nil
-		}
-		return nil, nil
-	}}
-	h := NewHerdr(f)
-	h.SubmitDelay = 0       // no real sleep in tests
-	h.KickoffAckTimeout = 0 // kickoff-ack verification has its own tests below
+	// herdr detects the agent on the second pane list, so readiness must poll.
+	f := herdrScript{undetected: 1}.fake()
+	h := testHerdr(f)
 	s := testSpawn()
 
 	hd, err := h.Spawn(context.Background(), s)
@@ -96,23 +78,27 @@ func TestSpawn_ConstructsCommandsAndParsesPane(t *testing.T) {
 	// bare `git push` under push.default=upstream pushes the agent's work straight
 	// to the base branch (this happened — a commit landed on main).
 	hasExactCall(t, calls, "git", "-C", "/home/u/repo", "worktree", "add", "-b", "agent/issue-5", "--no-track", "/home/u/repo/.orchestrator/worktrees/wt-issue-5", "origin/main")
-	// herdr workspace labeled with the durable task id.
-	hasExactCall(t, calls, "herdr", "workspace", "create", "--cwd", "/home/u/repo/.orchestrator/worktrees/wt-issue-5", "--label", "issue-5", "--no-focus")
 
-	// One pane-run launches the agent verbatim; the kickoff is delivered as a
-	// separate send-text + send-keys Enter — a single text+Enter raced Claude
-	// Code's Ink TUI and left the kickoff unsent (dogfood finding).
-	runs := paneRunCalls(calls)
-	if len(runs) != 1 {
-		t.Fatalf("want 1 pane run call (launch only), got %d:\n%s", len(runs), formatCalls(runs))
+	// From the workspace onward the herdr sequence is exactly: create, launch the
+	// agent verbatim, poll until herdr detects it, wait for it to take input, and
+	// submit the kickoff through herdr's agent prompt. Nothing types into the pane
+	// directly.
+	herdr := herdrCalls(calls)
+	start := slices.IndexFunc(herdr, func(c proc.Call) bool { return slices.Equal(c.Args[:2], []string{"workspace", "create"}) })
+	if start < 0 {
+		t.Fatalf("no workspace create:\n%s", formatCalls(calls))
 	}
-	if last := runs[0].Args[len(runs[0].Args)-1]; last != "claude" {
-		t.Errorf("pane run should launch the agent verbatim, got %q", last)
+	want := [][]string{
+		{"workspace", "create", "--cwd", "/home/u/repo/.orchestrator/worktrees/wt-issue-5", "--label", "issue-5", "--no-focus"},
+		{"pane", "run", "w7:p1", "claude"},
+		{"pane", "list"},
+		{"pane", "list"},
+		{"agent", "wait", "w7:p1", "--until", "idle", "--until", "blocked", "--timeout", "20000"},
+		{"agent", "prompt", "w7:p1", s.Kickoff, "--wait", "--until", "working", "--until", "blocked", "--timeout", "25000"},
 	}
-	hasExactCall(t, calls, "herdr", "pane", "send-text", "w7:p1", s.Kickoff)
-	hasExactCall(t, calls, "herdr", "pane", "send-keys", "w7:p1", "Enter")
-	if st, sk := idxOfArg(calls, "send-text"), idxOfArg(calls, "send-keys"); st < 0 || sk < 0 || st > sk {
-		t.Errorf("kickoff text (send-text @%d) must precede the submitting Enter (send-keys @%d)", st, sk)
+	got := herdr[start:]
+	if !slices.EqualFunc(got, want, func(c proc.Call, w []string) bool { return slices.Equal(c.Args, w) }) {
+		t.Errorf("herdr command sequence mismatch\ngot:\n%swant:\n%s", formatCalls(got), formatArgs(want))
 	}
 	// Kickoff is a single line referencing the task file (never the inline body).
 	if strings.Contains(s.Kickoff, "\n") || !strings.Contains(s.Kickoff, s.TaskFile) {
@@ -131,20 +117,15 @@ func TestSpawn_ConstructsCommandsAndParsesPane(t *testing.T) {
 // mirroring the git worktree/branch cleanup; otherwise duplicate-label
 // workspaces accumulate and break Resolve (which matches by label).
 func TestSpawn_ClosesPreexistingSameLabelWorkspace(t *testing.T) {
+	base := herdrScript{pane: "wNew:p1"}.responder()
 	f := &proc.Fake{Responder: func(c proc.Call) ([]byte, error) {
 		if c.Name == "herdr" && len(c.Args) >= 2 && c.Args[0] == "workspace" && c.Args[1] == "list" {
 			return []byte(`{"result":{"workspaces":[{"workspace_id":"wOld","label":"issue-5"}]}}`), nil
 		}
-		if c.Name == "herdr" && len(c.Args) >= 2 && c.Args[0] == "workspace" && c.Args[1] == "create" {
-			return []byte(`{"result":{"root_pane":{"pane_id":"wNew:p1"}}}`), nil
-		}
-		return nil, nil
+		return base(c)
 	}}
-	h := NewHerdr(f)
-	h.SubmitDelay = 0
-	h.KickoffAckTimeout = 0
 
-	hd, err := h.Spawn(context.Background(), testSpawn()) // TaskID == "issue-5"
+	hd, err := testHerdr(f).Spawn(context.Background(), testSpawn()) // TaskID == "issue-5"
 	if err != nil {
 		t.Fatalf("spawn: %v", err)
 	}
@@ -159,19 +140,11 @@ func TestSpawn_ClosesPreexistingSameLabelWorkspace(t *testing.T) {
 // existing branch into a fresh worktree, so a reviewer/resume agent works on the
 // PR's state, not an empty branch off base.
 func TestSpawn_PreserveBranch_KeepsExistingBranch(t *testing.T) {
-	f := &proc.Fake{Responder: func(c proc.Call) ([]byte, error) {
-		if c.Name == "herdr" && len(c.Args) >= 2 && c.Args[0] == "workspace" && c.Args[1] == "create" {
-			return []byte(`{"result":{"root_pane":{"pane_id":"w9:p1"}}}`), nil
-		}
-		return nil, nil
-	}}
-	h := NewHerdr(f)
-	h.SubmitDelay = 0
-	h.KickoffAckTimeout = 0
+	f := herdrScript{pane: "w9:p1"}.fake()
 	s := testSpawn()
 	s.PreserveBranch = true
 
-	if _, err := h.Spawn(context.Background(), s); err != nil {
+	if _, err := testHerdr(f).Spawn(context.Background(), s); err != nil {
 		t.Fatalf("spawn: %v", err)
 	}
 	calls := f.Snapshot()
@@ -481,185 +454,191 @@ func TestParseRootPaneID(t *testing.T) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Kickoff delivery                                                            */
+/* Readiness and kickoff delivery                                              */
 /*                                                                             */
-/* Both delivery methods have failed in production against different Claude    */
-/* Code builds, and a dropped kickoff is silent: the agent sits at an empty    */
-/* prompt while the engine waits out the whole blocked_timeout. These pin that */
-/* Spawn verifies delivery, falls back to the other method, and fails loudly   */
-/* when neither takes.                                                         */
+/* Both go through herdr's agent detection: the pane must be detected as an   */
+/* agent, then `agent prompt` submits and reports whether the text took. These */
+/* pin how herdr's JSON error codes map onto a spawn or message outcome.       */
 /* -------------------------------------------------------------------------- */
 
-// kickoffFake builds a runner whose `pane list` reports `baseline` until the
-// kickoff is delivered by `lands` ("send-text", "run", or "" for neither), after
-// which it reports `landed` ("working" when the agent took it). Also records
-// every call for assertions.
-func kickoffFake(baseline, lands, landed string) *proc.Fake {
-	var delivered atomic.Bool
-	return &proc.Fake{Responder: func(c proc.Call) ([]byte, error) {
+// herdrScript models the herdr surface launch -> readiness -> delivery drives.
+type herdrScript struct {
+	pane string // root pane `workspace create` answers with; "" => "w7:p1"
+	// undetected is how many `pane list` calls show the launched pane before herdr
+	// detects its agent; negative means never.
+	undetected int
+	// prompts are the successive `agent prompt` answers: "" exits 0, anything else
+	// is the error code in herdr's stderr envelope. Calls past the end succeed.
+	prompts []string
+}
+
+// herdrErr mimics a failed herdr call as proc.Runner reports it: herdr's JSON
+// error envelope (written to stderr) carried in the error text.
+func herdrErr(sub, code string) error {
+	return fmt.Errorf("herdr agent %s: exit status 1: {\"error\":{\"code\":%q,\"message\":\"synthetic\"},\"id\":\"cli:agent:%s\"}", sub, code, sub)
+}
+
+// explainBlocked is a hand-written `agent explain --json` body for an agent held
+// at a folder-trust dialog; only matched_rule.id matters to the backend.
+const explainBlocked = `{"agent":"some-agent","state":"blocked","matched_rule":{"id":"trust_directory","priority":900,"region":"screen","state":"blocked"},"evaluated_rules":[]}`
+
+func (s herdrScript) responder() func(proc.Call) ([]byte, error) {
+	pane := s.pane
+	if pane == "" {
+		pane = "w7:p1"
+	}
+	var lists, prompts atomic.Int32
+	return func(c proc.Call) ([]byte, error) {
 		if c.Name != "herdr" || len(c.Args) < 2 {
 			return nil, nil
 		}
-		switch {
-		case c.Args[0] == "workspace" && c.Args[1] == "create":
-			return []byte(`{"result":{"root_pane":{"pane_id":"w7:p1"}}}`), nil
-		case c.Args[0] == "pane" && c.Args[1] == "send-text":
-			if lands == "send-text" {
-				delivered.Store(true)
+		switch c.Args[0] + " " + c.Args[1] {
+		case "workspace create":
+			return []byte(`{"result":{"root_pane":{"pane_id":"` + pane + `"}}}`), nil
+		case "pane list":
+			agent := ""
+			if n := int(lists.Add(1)); s.undetected >= 0 && n > s.undetected {
+				agent = `"agent":"some-agent",`
 			}
-		case c.Args[0] == "pane" && c.Args[1] == "run" && len(c.Args) > 2 && c.Args[2] == "w7:p1" &&
-			len(c.Args) > 3 && strings.HasPrefix(c.Args[3], "Read the task"):
-			if lands == "run" {
-				delivered.Store(true)
+			return []byte(`{"result":{"panes":[{"pane_id":"` + pane + `",` + agent + `"agent_status":"idle","workspace_id":"w7"}]}}`), nil
+		case "agent prompt":
+			if i := int(prompts.Add(1)) - 1; i < len(s.prompts) && s.prompts[i] != "" {
+				return nil, herdrErr("prompt", s.prompts[i])
 			}
-		case c.Args[0] == "pane" && c.Args[1] == "list":
-			status := baseline
-			if delivered.Load() {
-				status = landed
-			}
-			return []byte(`{"result":{"panes":[{"pane_id":"w7:p1","agent_status":"` + status + `","workspace_id":"w7"}]}}`), nil
+		case "agent explain":
+			return []byte(explainBlocked), nil
 		}
 		return nil, nil
-	}}
+	}
 }
 
-func kickoffHerdr(f *proc.Fake) *Herdr {
-	h := NewHerdr(f)
-	h.SubmitDelay = 0
-	h.KickoffAckTimeout = 50 * time.Millisecond
-	h.KickoffAckPoll = time.Millisecond
+func (s herdrScript) fake() *proc.Fake { return &proc.Fake{Responder: s.responder()} }
+
+// testHerdr is a backend with sub-second readiness pacing so detection polling
+// does not sleep through tests.
+func testHerdr(r proc.Runner) *Herdr {
+	h := NewHerdr(r)
+	h.PollInterval = time.Millisecond
 	return h
 }
 
-// kickoffRunCalls returns the `pane run` calls that carried the kickoff text —
-// not the one that launched the agent binary.
-func kickoffRunCalls(calls []proc.Call) []proc.Call {
+// herdrCalls returns the herdr calls whose first two args are sub, e.g.
+// ("agent", "prompt").
+func herdrCalls(calls []proc.Call, sub ...string) []proc.Call {
 	var out []proc.Call
-	for _, c := range paneRunCalls(calls) {
-		if len(c.Args) > 3 && strings.HasPrefix(c.Args[3], "Read the task") {
+	for _, c := range calls {
+		if c.Name == "herdr" && len(c.Args) >= len(sub) && slices.Equal(c.Args[:len(sub)], sub) {
 			out = append(out, c)
 		}
 	}
 	return out
 }
 
-func TestSpawn_KickoffAccepted_DoesNotFallBack(t *testing.T) {
-	f := kickoffFake("idle", "send-text", "working")
-	if _, err := kickoffHerdr(f).Spawn(context.Background(), testSpawn()); err != nil {
-		t.Fatalf("Spawn: %v", err)
+func TestSpawn_AgentBlocked_NamesTheRule(t *testing.T) {
+	f := herdrScript{prompts: []string{"agent_blocked"}}.fake()
+	_, err := testHerdr(f).Spawn(context.Background(), testSpawn())
+	if err == nil || !strings.Contains(err.Error(), "trust_directory") {
+		t.Fatalf("Spawn error = %v, want one naming the trust_directory rule", err)
 	}
 	calls := f.Snapshot()
-	hasExactCall(t, calls, "herdr", "pane", "send-text", "w7:p1", testSpawn().Kickoff)
-	// The agent started working, so the one-shot fallback must never fire —
-	// re-sending would submit the kickoff a second time to a busy agent.
-	if n := len(kickoffRunCalls(calls)); n != 0 {
-		t.Errorf("kickoff re-sent via `pane run` %d time(s) after it was already accepted", n)
+	// agent_blocked means herdr refused to type into a dialog; re-sending cannot help.
+	if n := len(herdrCalls(calls, "agent", "prompt")); n != 1 {
+		t.Errorf("agent prompt calls = %d, want exactly 1", n)
 	}
+	hasExactCall(t, calls, "herdr", "agent", "explain", "w7:p1", "--json")
 }
 
-func TestSpawn_KickoffDropped_FallsBackToPaneRun(t *testing.T) {
-	// send-text silently fails to land (Claude Code v2.1.236): the agent stays
-	// idle at an empty prompt. `pane run` gets through.
-	f := kickoffFake("idle", "run", "working")
-	if _, err := kickoffHerdr(f).Spawn(context.Background(), testSpawn()); err != nil {
+func TestSpawn_PromptStalledOnce_RetriesAndSucceeds(t *testing.T) {
+	f := herdrScript{prompts: []string{"agent_prompt_stalled", ""}}.fake()
+	if _, err := testHerdr(f).Spawn(context.Background(), testSpawn()); err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
-	calls := f.Snapshot()
-	hasExactCall(t, calls, "herdr", "pane", "send-text", "w7:p1", testSpawn().Kickoff)
-	hasExactCall(t, calls, "herdr", "pane", "run", "w7:p1", testSpawn().Kickoff)
-}
-
-func TestSpawn_KickoffNeverAccepted_FailsLoudly(t *testing.T) {
-	// Neither method lands. The spawn must error rather than return a handle to a
-	// mute agent — that silence previously cost a task its whole blocked_timeout.
-	f := kickoffFake("idle", "", "working")
-	_, err := kickoffHerdr(f).Spawn(context.Background(), testSpawn())
-	if err == nil {
-		t.Fatal("Spawn succeeded despite the kickoff never being accepted")
-	}
-	if !strings.Contains(err.Error(), "kickoff") {
-		t.Errorf("error should name the kickoff, got: %v", err)
-	}
-	if n := len(kickoffRunCalls(f.Snapshot())); n != 1 {
-		t.Errorf("expected exactly one `pane run` fallback attempt, got %d", n)
+	if n := len(herdrCalls(f.Snapshot(), "agent", "prompt")); n != 2 {
+		t.Errorf("agent prompt calls = %d, want exactly 2 (one stall, one retry)", n)
 	}
 }
 
-// unknownBaselineFake models the third delivery regression: before the kickoff,
-// herdr's classifier has not settled and `pane list` reports "unknown". After
-// send-text (which drops the kickoff), the status settles to "idle" — the
-// signature of a launched agent with no instruction. Only a `pane run` kickoff
-// lands and flips it to "working".
-func unknownBaselineFake() *proc.Fake {
-	var sentText, delivered atomic.Bool
-	return &proc.Fake{Responder: func(c proc.Call) ([]byte, error) {
-		if c.Name != "herdr" || len(c.Args) < 2 {
-			return nil, nil
-		}
-		switch {
-		case c.Args[0] == "workspace" && c.Args[1] == "create":
-			return []byte(`{"result":{"root_pane":{"pane_id":"w7:p1"}}}`), nil
-		case c.Args[0] == "pane" && c.Args[1] == "send-text":
-			sentText.Store(true)
-		case c.Args[0] == "pane" && c.Args[1] == "run" && len(c.Args) > 3 && strings.HasPrefix(c.Args[3], "Read the task"):
-			delivered.Store(true)
-		case c.Args[0] == "pane" && c.Args[1] == "list":
-			status := "unknown"
-			if sentText.Load() {
-				status = "idle"
-			}
-			if delivered.Load() {
-				status = "working"
-			}
-			return []byte(`{"result":{"panes":[{"pane_id":"w7:p1","agent_status":"` + status + `","workspace_id":"w7"}]}}`), nil
-		}
-		return nil, nil
-	}}
+func TestSpawn_PromptStalledTwice_FailsWithRule(t *testing.T) {
+	f := herdrScript{prompts: []string{"agent_prompt_stalled", "agent_prompt_stalled"}}.fake()
+	_, err := testHerdr(f).Spawn(context.Background(), testSpawn())
+	if err == nil || !strings.Contains(err.Error(), "stalled") || !strings.Contains(err.Error(), "trust_directory") {
+		t.Fatalf("Spawn error = %v, want a stall naming the detection rule", err)
+	}
+	if n := len(herdrCalls(f.Snapshot(), "agent", "prompt")); n != 2 {
+		t.Errorf("agent prompt calls = %d, want exactly 2 (retried once, no more)", n)
+	}
 }
 
-func TestSpawn_ClassifierSettlingIsNotAcceptance(t *testing.T) {
-	// unknown -> idle is herdr's classifier settling on its first real status,
-	// not evidence the kickoff landed. Treating it as acceptance skipped the
-	// fallback and left a mute agent that looked delivered (strata bring-up,
-	// 2026-09-08). The settle must rebaseline, the fallback must fire, and the
-	// spawn must succeed off the fallback's real "working" signal.
-	f := unknownBaselineFake()
-	if _, err := kickoffHerdr(f).Spawn(context.Background(), testSpawn()); err != nil {
-		t.Fatalf("Spawn: %v", err)
+func TestSpawn_PromptOtherError_IsWrapped(t *testing.T) {
+	// A code that is neither blocked nor stalled (here herdr's own timeout) is not
+	// retried and is surfaced as-is, without an explain call.
+	f := herdrScript{prompts: []string{"timeout"}}.fake()
+	_, err := testHerdr(f).Spawn(context.Background(), testSpawn())
+	if err == nil || !strings.Contains(err.Error(), "deliver kickoff on w7:p1") {
+		t.Fatalf("Spawn error = %v, want a wrapped delivery error", err)
 	}
 	calls := f.Snapshot()
-	hasExactCall(t, calls, "herdr", "pane", "send-text", "w7:p1", testSpawn().Kickoff)
-	if n := len(kickoffRunCalls(calls)); n != 1 {
-		t.Errorf("expected exactly one `pane run` fallback after the false settle, got %d", n)
+	if n := len(herdrCalls(calls, "agent", "prompt")); n != 1 {
+		t.Errorf("agent prompt calls = %d, want exactly 1", n)
+	}
+	if n := len(herdrCalls(calls, "agent", "explain")); n != 0 {
+		t.Errorf("agent explain calls = %d, want 0", n)
 	}
 }
 
-func TestMessage_UsesVerifiedKickoffDelivery(t *testing.T) {
-	// Message is the kickoff path pointed at a live pane: the same send-text,
-	// the same pane-run fallback, the same "status must move" proof.
-	const text = "the token scope is fixed; push the branch now"
-	hd := Handle{PaneID: "w7:p1", Workdir: "/wt"}
-	// A live agent parked at its prompt after a turn usually reads "done", so a
-	// done baseline must not count as acceptance on its own. Nor does done -> idle:
-	// herdr reads text left unsent in the prompt box as idle, which is exactly
-	// what a swallowed Enter looks like.
+func TestSpawn_AgentNeverDetected_FailsWithinReadyTimeout(t *testing.T) {
+	f := herdrScript{undetected: -1}.fake()
+	h := testHerdr(f)
+	h.ReadyTimeout = 50 * time.Millisecond
+	start := time.Now()
+	_, err := h.Spawn(context.Background(), testSpawn())
+	if err == nil || !strings.Contains(err.Error(), "no agent detected") || !strings.Contains(err.Error(), `"claude"`) {
+		t.Fatalf("Spawn error = %v, want one naming the undetected launch argv", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("Spawn took %s, want it bounded by ReadyTimeout (50ms)", elapsed)
+	}
+	calls := f.Snapshot()
+	if n := len(herdrCalls(calls, "agent")); n != 0 {
+		t.Errorf("no agent command may run on an undetected pane, got:\n%s", formatCalls(herdrCalls(calls, "agent")))
+	}
+}
+
+func TestHerdrErrorCode(t *testing.T) {
 	cases := []struct {
-		name     string
-		baseline string
-		lands    string
-		landed   string
-		wantErr  string
+		name string
+		err  error
+		want string
 	}{
-		{"idle: status moves to working", "idle", "send-text", "working", ""},
-		{"idle: status never leaves baseline", "idle", "", "working", "kickoff not accepted"},
-		{"done: status moves to working", "done", "send-text", "working", ""},
-		{"done: status never leaves baseline", "done", "", "working", "kickoff not accepted"},
-		{"done: text sits unsent in the prompt box", "done", "send-text", "idle", "kickoff not accepted"},
+		{"nil", nil, ""},
+		{"envelope in error text", herdrErr("prompt", "agent_blocked"), "agent_blocked"},
+		{"no envelope", fmt.Errorf("herdr agent prompt: exit status 1: connection refused"), ""},
+		{"malformed envelope", fmt.Errorf(`herdr: exit status 1: {"error":{"code":`), ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			f := kickoffFake(tc.baseline, tc.lands, tc.landed)
-			err := kickoffHerdr(f).Message(context.Background(), hd, text)
+			if got := herdrErrorCode(tc.err); got != tc.want {
+				t.Errorf("herdrErrorCode = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMessage_DeliversThroughAgentPrompt(t *testing.T) {
+	const text = "the token scope is fixed; push the branch now"
+	hd := Handle{PaneID: "w7:p1", Workdir: "/wt"}
+	cases := []struct {
+		name    string
+		prompts []string
+		wantErr string
+	}{
+		{"accepted", nil, ""},
+		{"blocked at a dialog", []string{"agent_blocked"}, "trust_directory"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := herdrScript{prompts: tc.prompts}.fake()
+			err := testHerdr(f).Message(context.Background(), hd, text)
 			if tc.wantErr == "" {
 				if err != nil {
 					t.Fatalf("Message: %v", err)
@@ -667,7 +646,11 @@ func TestMessage_UsesVerifiedKickoffDelivery(t *testing.T) {
 			} else if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("Message error = %v, want one containing %q", err, tc.wantErr)
 			}
-			hasExactCall(t, f.Snapshot(), "herdr", "pane", "send-text", "w7:p1", text)
+			calls := f.Snapshot()
+			if n := len(herdrCalls(calls, "agent", "prompt")); n != 1 {
+				t.Errorf("agent prompt calls = %d, want exactly 1", n)
+			}
+			hasExactCall(t, calls, "herdr", "agent", "prompt", "w7:p1", text, "--wait", "--until", "working", "--until", "blocked", "--timeout", "25000")
 		})
 	}
 }

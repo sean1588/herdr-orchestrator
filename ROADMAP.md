@@ -12,9 +12,9 @@ get lost. Update it as phases land.
 - **Phase 2a** — the review → auto-merge loop: `pr_open → (review) → approved →
   (merge gate) → merging → merged`; default goal `merged`; the real merge gated on
   `policies.dry_run` (default-on, halts at `merging`).
-- **Phase 2b** — hardening: per-task `workflow_snapshot` recovery, per-role
-  `allowed_tools` tool-scoping at spawn, fixture-based CLI-contract integration tests,
-  the `Notifier` seam, the `plan` subcommand (graph + invariant render), doc honesty.
+- **Phase 2b** — hardening: per-task `workflow_snapshot` recovery, fixture-based
+  CLI-contract integration tests, the `Notifier` seam, the `plan` subcommand (graph +
+  invariant render), doc honesty.
 - **R2** — scheduler daemon + executable triage: `orchestratord daemon` polls a
   labeled source and drives up to `max_concurrent_tasks` concurrently (1 poller / N
   workers / single-writer store, tasks row-partitioned by `issue-<n>`); `intake`
@@ -59,8 +59,6 @@ first). Listed in rough priority.
   fan-out layer a push source would reuse (swap the ticker for a socket reader,
   subscribers untouched). **Verify the socket API exists first**; if push doesn't
   exist, polling is the correct call — don't build it.
-- **Per-provider tool-flag table:** generalize Phase 2b's claude-only `--allowedTools`
-  translation into a provider → flag map when a second launcher is added. YAGNI until then.
 - **Full live e2e harness:** a live herdr+`gh` smoke test behind a build tag (opt-in,
   not default CI) to catch real end-to-end drift. The fixture tests pin the CLI JSON
   contract; a live run has exercised the real path a handful of times (issue 208/PR #227,
@@ -78,10 +76,6 @@ so they aren't rediscovered from scratch.
   in-store tasks every poll by reading all tasks and filtering in Go. Bounded fix: a
   state-filtered store query (`... WHERE current_state NOT IN (settled)`), if it ever
   matters.
-- **Arg-scoped tool specs** (Phase 2b): `allowed_tools` entries with spaces/globs/parens
-  (e.g. `Bash(gh pr view:*)`) aren't deliverable — the launch argv is space-joined into
-  the pane shell unquoted, so validation rejects shell-unsafe tokens. Needs quoting at
-  delivery to support arg-scoping.
 - **README "out of scope" drift:** addressed by PR #24 for the README prose. The
   residual drift is in *code* comments a maintainer reads — tracked under
   "Phase-stamped comment drift" in the assessment backlog below.

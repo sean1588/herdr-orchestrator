@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -294,6 +295,36 @@ func TestRun_DoneWithPR_ReachesPROpen(t *testing.T) {
 	}
 	if !hasAudit(rows, "implementing", "pr_open", "agent.done", "pass") {
 		t.Errorf("missing implementing->pr_open(pass) audit: %+v", rows)
+	}
+}
+
+// The role's launch argv reaches the backend verbatim: agent-native flags live
+// there, and the engine neither appends to nor rewrites it.
+func TestRun_SpawnLaunchIsRoleLaunchVerbatim(t *testing.T) {
+	st := newStore(t)
+	b := &fakeBackend{pane: "w1:p1", events: []exec.Event{
+		{PaneID: "w1:p1", State: exec.StateWorking},
+		{PaneID: "w1:p1", State: exec.StateDone},
+	}}
+	e := newEngine(t, st, b, &fakeGH{pr: &github.PR{Number: 42, State: "OPEN"}}, 5*time.Second)
+	e.goal = "pr_open"
+	want := []string{"codex", "-a", "never", "--sandbox", "workspace-write"}
+	r := e.wf.Roles["implementer"]
+	r.Launch = want
+	e.wf.Roles["implementer"] = r
+
+	if _, err := e.Run(context.Background(), 7); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(b.spawnLog) != 1 {
+		t.Fatalf("want 1 spawn, got %d", len(b.spawnLog))
+	}
+	sp := b.spawnLog[0]
+	if sp.Role != "implementer" {
+		t.Fatalf("spawned role = %q, want implementer", sp.Role)
+	}
+	if !reflect.DeepEqual(sp.Launch, want) {
+		t.Errorf("Spawn.Launch = %q, want %q", sp.Launch, want)
 	}
 }
 

@@ -172,9 +172,10 @@ left in place for inspection, not torn down) and is neither re-driven nor
 re-listed by the poller. `cancel_task` on an issue with no active drive is a tool
 error. An explicit `enqueue_task` on a **cancelled or escalated** task starts it
 over from the entry state (audited as `operator.redrive`): pane, PR number, and
-retry counts are cleared and the branch is recreated from base. A PR the earlier
-attempt opened stays open: the implementer finds it on GitHub and force-pushes its
-new commits onto it instead of opening another. The workflow snapshot is kept,
+retry counts are cleared and the branch is recreated from base. If the branch
+still has an open PR, the re-drive is refused and the task is left as it was:
+the daemon logs `run task failed` with "issue N has open PR #M on agent/issue-N;
+close or merge it, then enqueue again". The workflow snapshot is kept,
 so a workflow edit since the task started does not apply. A merged or
 closed task is refused ("already settled; not re-driven").
 

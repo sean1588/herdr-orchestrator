@@ -392,7 +392,8 @@ approaching `blocked_timeout` is about to escalate. Read its pane read-only
   currently running"). So a runaway is **stop-and-escalate**, not
   stop-and-restart. Restarting cancelled or escalated work is a human decision:
   once the cause is fixed, `enqueue_task` starts it over from the entry state.
-  It **refuses a merged or closed task**.
+  It **refuses a merged or closed task**, and leaves a stopped task alone while
+  its branch still has an open PR (close or merge the PR first).
 
 **Cardinal rule: don't fight the daemon.** It already times work out to
 `escalated`, re-drives every non-settled task each poll, runs the retry cap,

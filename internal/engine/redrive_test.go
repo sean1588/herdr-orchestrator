@@ -93,64 +93,43 @@ func TestRun_FinishedTaskIsNotRedriven(t *testing.T) {
 	}
 }
 
-// A redrive clears PRNumber, but the earlier attempt's PR can still be open on the
-// branch. The implementer must then push onto that PR (a force push, since the
-// branch was recreated from base) rather than run the fresh-task kickoff, whose
-// plain push is rejected and whose `gh pr create` fails on the existing PR. With
-// no open PR, the fresh-task kickoff is unchanged.
-func TestRun_RedriveKickoffFollowsOpenPR(t *testing.T) {
-	tests := []struct {
-		name        string
-		pr          *github.PR
-		wantContain []string
-		wantAbsent  []string
-	}{
-		{
-			name:        "open PR on the branch",
-			pr:          &github.PR{Number: 42, State: "OPEN"},
-			wantContain: []string{"PR #42", "git push --force -u origin agent/issue-9", "Do not open another PR"},
-			wantAbsent:  []string{"gh pr create", "Stop when the PR is open"},
-		},
-		{
-			name:        "no open PR",
-			wantContain: []string{"git push -u origin agent/issue-9", "gh pr create", "Stop when the PR is open"},
-			wantAbsent:  []string{"--force"},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+// A stopped task whose branch still has an open PR is refused: that PR would read
+// as the new attempt's artifact (pr_exists, reconcile) before the new attempt
+// pushed anything. Run names the PR and changes nothing — no reset, no audit, no
+// spawn — so the operator closes or merges it and enqueues again.
+func TestRun_RedriveRefusedWhileBranchHasOpenPR(t *testing.T) {
+	for _, from := range []string{CancelState, "escalated"} {
+		t.Run(from, func(t *testing.T) {
 			st := newStore(t)
-			b := &fakeBackend{pane: "w0:p9", spawnErr: errors.New("spawn halted by test")}
-			e := newEngine(t, st, b, &fakeGH{pr: tt.pr}, 5*time.Second)
+			b := &fakeBackend{pane: "w0:p9", resolve: true}
+			e := newEngine(t, st, b, &fakeGH{pr: &github.PR{Number: 42, State: "OPEN"}}, 5*time.Second)
 			ctx := context.Background()
 
 			pr := 42
 			if err := st.CreateTask(ctx, &store.Task{
 				ID: "issue-9", Issue: 9, Repo: "owner/repo", Branch: "agent/issue-9",
-				CurrentState: CancelState, PRNumber: &pr,
+				CurrentState: from, PaneID: "w0:p9", PaneSpawnState: "implementing",
+				PRNumber: &pr, RetryCounts: map[string]int{"changes_requested": 2},
 			}); err != nil {
 				t.Fatal(err)
 			}
 
-			if _, err := e.Run(ctx, 9); err == nil {
-				t.Fatal("run: want the test's spawn error, got nil")
+			_, err := e.Run(ctx, 9)
+			if err == nil || !strings.Contains(err.Error(), "#42") {
+				t.Fatalf("run: want an error naming PR #42, got %v", err)
 			}
-			if len(b.spawnLog) != 1 {
-				t.Fatalf("want 1 spawn, got %d", len(b.spawnLog))
+
+			got, _ := st.GetTask(ctx, "issue-9")
+			if got.CurrentState != from || got.PaneID != "w0:p9" || got.PaneSpawnState != "implementing" ||
+				got.PRNumber == nil || *got.PRNumber != 42 || got.RetryCounts["changes_requested"] != 2 {
+				t.Errorf("row changed: state=%q PaneID=%q PaneSpawnState=%q PRNumber=%v RetryCounts=%v",
+					got.CurrentState, got.PaneID, got.PaneSpawnState, got.PRNumber, got.RetryCounts)
 			}
-			sp := b.spawnLog[0]
-			if sp.PreserveBranch {
-				t.Errorf("PreserveBranch = true, want the branch recreated from base")
+			if rows := auditFor(t, st, "issue-9"); len(rows) != 0 {
+				t.Errorf("a refused redrive must not audit, got %+v", rows)
 			}
-			for _, s := range tt.wantContain {
-				if !strings.Contains(sp.Kickoff, s) {
-					t.Errorf("kickoff missing %q: %s", s, sp.Kickoff)
-				}
-			}
-			for _, s := range tt.wantAbsent {
-				if strings.Contains(sp.Kickoff, s) {
-					t.Errorf("kickoff must not contain %q: %s", s, sp.Kickoff)
-				}
+			if b.spawns != 0 {
+				t.Errorf("a refused redrive must not spawn, got %d", b.spawns)
 			}
 		})
 	}

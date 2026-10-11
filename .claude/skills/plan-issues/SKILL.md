@@ -82,7 +82,15 @@ reasons an edge exists:
   adds).
 - **They touch the same files.** Two agents editing one package concurrently
   produce a conflict the daemon cannot resolve; the second one to finish stalls
-  and a human rebases. Serialize them.
+  and a human rebases. Serialize them. Docs count: two issues that each change
+  one line of `README.md` conflict exactly like two that change one Go file.
+
+An issue that waits on others is written against a `main` that will have
+changed by the time it runs. Either make its file:line evidence and acceptance
+criteria independent of what its blockers change, or re-read it against `main`
+when they merge, before it is picked up. A triager that answers `needs_human`
+because two criteria contradict each other is doing its job; the fix is the
+issue text, not the triager.
 
 Record each edge on GitHub, never in the body text:
 

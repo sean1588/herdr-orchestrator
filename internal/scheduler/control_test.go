@@ -3,6 +3,8 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -107,23 +109,68 @@ func TestControlEnqueue(t *testing.T) {
 }
 
 // enqueue_task reports the truth when the issue was not actually queued (here:
-// already settled), rather than a false "enqueued".
-func TestControlEnqueueAlreadySettled(t *testing.T) {
+// finished), rather than a false "enqueued".
+func TestControlEnqueueFinishedRefused(t *testing.T) {
+	var ran int32
 	s := &Scheduler{
-		Workers:  1,
-		Interval: time.Hour,
-		List:     func(ctx context.Context) ([]int, error) { return nil, nil },
-		SeedFrom: func(ctx context.Context) ([]int, error) { return nil, nil },
-		Done:     func(ctx context.Context, issue int) (bool, error) { return true, nil }, // settled
-		RunTask:  func(ctx context.Context, issue int) error { return nil },
+		Workers:     1,
+		Interval:    time.Hour,
+		List:        func(ctx context.Context) ([]int, error) { return nil, nil },
+		SeedFrom:    func(ctx context.Context) ([]int, error) { return nil, nil },
+		Disposition: func(ctx context.Context, issue int) (Disposition, error) { return Finished, nil },
+		RunTask:     func(ctx context.Context, issue int) error { atomic.AddInt32(&ran, 1); return nil },
 	}
 	s.EnableControl(errTestCause)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() { _ = s.Serve(ctx) }()
 
-	if err := s.Enqueue(ctx, 7); err == nil {
-		t.Fatal("enqueue of an already-settled issue should error, not report success")
+	err := s.Enqueue(ctx, 7)
+	if err == nil || !strings.Contains(err.Error(), "already settled") {
+		t.Fatalf(`enqueue of a finished issue: err = %v, want an "already settled" error`, err)
+	}
+	if n := atomic.LoadInt32(&ran); n != 0 {
+		t.Errorf("finished issue ran %d times, want 0", n)
+	}
+}
+
+// A stopped issue (cancelled or escalated) is skipped by the poller, so a cancel
+// sticks, but an operator's explicit enqueue re-drives it.
+func TestControlEnqueueStoppedRedrives(t *testing.T) {
+	ran := make(chan int, 4)
+	s := &Scheduler{
+		Workers:     1,
+		Interval:    5 * time.Millisecond, // poll repeatedly: the poller must still skip it
+		List:        func(ctx context.Context) ([]int, error) { return []int{7}, nil },
+		SeedFrom:    func(ctx context.Context) ([]int, error) { return []int{7}, nil },
+		Disposition: func(ctx context.Context, issue int) (Disposition, error) { return Stopped, nil },
+		RunTask: func(ctx context.Context, issue int) error {
+			ran <- issue
+			return nil
+		},
+		Log: testLog(),
+	}
+	s.EnableControl(errTestCause)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = s.Serve(ctx) }()
+
+	select {
+	case got := <-ran:
+		t.Fatalf("poller drove stopped issue %d; a cancel must stick", got)
+	case <-time.After(60 * time.Millisecond):
+	}
+
+	if err := s.Enqueue(ctx, 7); err != nil {
+		t.Fatalf("enqueue of a stopped issue: %v", err)
+	}
+	select {
+	case got := <-ran:
+		if got != 7 {
+			t.Fatalf("ran issue %d, want 7", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("operator-enqueued stopped issue never ran")
 	}
 }
 

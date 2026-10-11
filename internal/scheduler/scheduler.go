@@ -32,13 +32,13 @@ type Scheduler = SchedulerOf[int]
 // A scheduler serves one source collection; use source-qualified keys when
 // multiplexing collections to avoid sharing claims between unrelated items.
 type SchedulerOf[K ~int | ~string] struct {
-	List     func(ctx context.Context) ([]K, error)           // discover candidate issues
-	Done     func(ctx context.Context, issue K) (bool, error) // true iff a SETTLED task exists (terminal or cancelled)
-	RunTask  func(ctx context.Context, issue K) error         // drive one issue to completion
-	SeedFrom func(ctx context.Context) ([]K, error)           // non-settled issues to resume at startup
-	Interval time.Duration
-	Workers  int
-	Log      *slog.Logger
+	List        func(ctx context.Context) ([]K, error)                  // discover candidate issues
+	Disposition func(ctx context.Context, issue K) (Disposition, error) // whether the issue's task is open, stopped, or finished
+	RunTask     func(ctx context.Context, issue K) error                // drive one issue to completion
+	SeedFrom    func(ctx context.Context) ([]K, error)                  // non-settled issues to resume at startup
+	Interval    time.Duration
+	Workers     int
+	Log         *slog.Logger
 
 	// DriveDeadline is the wall-clock ceiling on a single drive, enforced by a
 	// reaper goroutine that runs OUTSIDE the drive it watches. Zero disables it.
@@ -64,6 +64,24 @@ type SchedulerOf[K ~int | ~string] struct {
 	commands    chan command[K]
 	cancelCause error
 }
+
+// Disposition is where an issue's task stands, as far as driving it again goes.
+// The poller and the operator read the same answer differently: the poller
+// drives only Open work, so a cancel sticks against the next poll; the operator's
+// explicit enqueue also re-drives Stopped work, because a human asking for it is
+// the one thing that should bring a stopped task back.
+type Disposition int
+
+const (
+	// Open: no task yet, or one still in flight. Both paths drive it.
+	Open Disposition = iota
+	// Stopped: settled because a human stopped it or was called to it (an
+	// operator cancel, an alerting terminal). The poller skips it; an operator
+	// enqueue re-drives it.
+	Stopped
+	// Finished: settled for good (merged, closed). Both paths refuse it.
+	Finished
+)
 
 type cmdKind int
 
@@ -240,8 +258,9 @@ func (s *SchedulerOf[K]) startReaper(ctx context.Context, inflight *inflightSet[
 
 // seed re-enqueues the non-settled in-flight tasks reported by SeedFrom. It runs
 // at startup and on every poll so a task that yielded its worker mid-drive (a
-// suspended blocked_on_gate wait) is resumed; enqueue's inflight and Done checks
-// keep it from racing a task already being driven or one that has since settled.
+// suspended blocked_on_gate wait) is resumed; enqueue's inflight and Disposition
+// checks keep it from racing a task already being driven or one that has since
+// settled.
 func (s *SchedulerOf[K]) seed(ctx context.Context, work chan K, inflight *inflightSet[K]) {
 	if s.SeedFrom == nil {
 		return
@@ -254,20 +273,21 @@ func (s *SchedulerOf[K]) seed(ctx context.Context, work chan K, inflight *inflig
 	s.enqueue(ctx, work, inflight, issues)
 }
 
-// enqueue adds issues that are neither in-flight nor already done. It never
-// blocks: a full channel means the issue is skipped and re-discovered next poll.
+// enqueue adds issues that are neither in-flight nor settled (Stopped or
+// Finished). It never blocks: a full channel means the issue is skipped and
+// re-discovered next poll.
 func (s *SchedulerOf[K]) enqueue(ctx context.Context, work chan K, inflight *inflightSet[K], issues []K) {
 	for _, issue := range issues {
 		if inflight.has(issue) {
 			continue
 		}
-		if s.Done != nil {
-			done, err := s.Done(ctx, issue)
+		if s.Disposition != nil {
+			d, err := s.Disposition(ctx, issue)
 			if err != nil {
-				s.Log.Warn("done check failed", "issue", issue, "err", err)
+				s.Log.Warn("disposition check failed", "issue", issue, "err", err)
 				continue
 			}
-			if done {
+			if d != Open {
 				continue
 			}
 		}
@@ -306,17 +326,18 @@ func (s *SchedulerOf[K]) handleCommand(ctx context.Context, c command[K], work c
 // caller is never told an issue was enqueued when it was skipped. Unlike the
 // poller's batch enqueue (fire-and-forget: a labelled issue is re-discovered next
 // poll), a manual enqueue has no such backstop, so its disposition must be honest.
-// An already-in-flight issue is a benign success (it is being driven).
+// An already-in-flight issue is a benign success (it is being driven). A Stopped
+// issue is queued like an Open one; only a Finished one is refused.
 func (s *SchedulerOf[K]) enqueueOne(ctx context.Context, work chan K, inflight *inflightSet[K], issue K) error {
 	if inflight.has(issue) {
 		return nil // already being driven
 	}
-	if s.Done != nil {
-		done, err := s.Done(ctx, issue)
+	if s.Disposition != nil {
+		d, err := s.Disposition(ctx, issue)
 		if err != nil {
 			return fmt.Errorf("issue %v: readiness check failed: %w", issue, err)
 		}
-		if done {
+		if d == Finished {
 			return fmt.Errorf("issue %v has already settled; not re-driven", issue)
 		}
 	}

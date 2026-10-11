@@ -190,9 +190,10 @@ started *after* the restart; tasks already parked in `merging` still honor the
 `dry_run: true` they began with. This is deliberate — a flag whose job is to
 withhold a side effect would be worthless if editing a file silently retracted
 it mid-drive. To move an in-flight task onto new rules, let it settle, or cancel
-it and open a fresh issue. A snapshot that no longer parses fails closed: the
-daemon refuses to drive that task and says so, rather than quietly falling back
-to the current config.
+it and open a fresh issue — `enqueue_task` on a cancelled or escalated task
+restarts it under the same snapshot, not the edited config. A snapshot that no
+longer parses fails closed: the daemon refuses to drive that task and says so,
+rather than quietly falling back to the current config.
 
 > **Non-Claude agents (Codex, etc.):** nothing here depends on Claude Code.
 > The per-tick supervision procedure in
@@ -353,7 +354,7 @@ tools are your surface:
 | `list_tasks` | — | primary observe: every task + state, branch, PR, retries, **and liveness** (see below). |
 | `get_task` | `issue` | one task's current view |
 | `get_audit` | `issue` | primary diagnosis: a task's full transition history |
-| `enqueue_task` | `issue` | nudge a **non-settled** idle issue (refused if settled) |
+| `enqueue_task` | `issue` | nudge an idle issue, or start a **cancelled or escalated** one over (refused if merged or closed) |
 | `cancel_task` | `issue` | stop an actively-running drive; settles it to `cancelled` |
 | `message_task` | `issue`, `text` | tell a parked agent something, one line (see below) |
 
@@ -385,11 +386,15 @@ never "just now".
 A task showing `agent_status: blocked` with `agent_status_for_seconds`
 approaching `blocked_timeout` is about to escalate. Read its pane read-only
 (`herdr pane read <pane>`) to see which prompt; never type into it.
-- `cancel_task` is **one-way**: a cancelled task is settled and **cannot be
-  re-driven** through the tools, and it only acts on an *actively-running* drive
-  (a suspended `blocked_on_gate` task returns "not currently running"). So a
-  runaway is **stop-and-escalate**, not stop-and-restart. `enqueue_task` likewise
-  **refuses any settled issue**. Re-opening settled work is a human decision.
+- `cancel_task` stops a task for good as far as the poller is concerned: a
+  cancelled task is settled and is never re-driven on its own. It only acts on an
+  *actively-running* drive (a suspended `blocked_on_gate` task returns "not
+  currently running"). So a runaway is **stop-and-escalate**, not
+  stop-and-restart. Restarting cancelled or escalated work is a human decision:
+  once the cause is fixed, `enqueue_task` starts it over from the entry state.
+  It **refuses a merged or closed task**, and leaves a stopped task alone while
+  its branch still exists on the remote (close any open PR and delete the
+  branch first; the orchestrator never deletes it for you).
 
 **Cardinal rule: don't fight the daemon.** It already times work out to
 `escalated`, re-drives every non-settled task each poll, runs the retry cap,
@@ -438,8 +443,8 @@ the trigger tells you why:
   the state simply taking too long. Read the pane read-only to see where it died.
 - *any state* `→ escalated` on `blocked_on_prompt` → with `--pane-classifier`, the
   static pane was classified as a permission or question prompt. Read the pane
-  read-only to see which one, add the tool to `permissions.allow`, then open a
-  fresh issue — never send keystrokes into the pane.
+  read-only to see which one, add the tool to `permissions.allow`, then re-drive
+  it with `enqueue_task` — never send keystrokes into the pane.
 - *any state* `→ escalated` on `agent_crashed` → with a Jev `--pane-classifier`, the
   static pane shows an error or a bare shell with no agent running. Read the pane
   for the error and check herdr.
@@ -451,7 +456,7 @@ the trigger tells you why:
 - `implementing → escalated` on `blocked_timeout` → the agent sat *continuously*
   blocked on an interactive prompt past `policies.blocked_timeout`. Distinct from
   `timeout` on purpose: parked, not slow. Read the pane read-only to see which
-  prompt, fix the environment that caused it, retry via a fresh issue.
+  prompt, fix the environment that caused it, then re-drive it with `enqueue_task`.
 - `pr_open → escalated` → the reviewer returned `escalate`.
 - `changes_requested → escalated` on `retry_exhausted` → the change cap was hit.
 - `changes_requested → escalated` on `agent.done` (`fail`) → the resumed

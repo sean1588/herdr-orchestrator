@@ -64,6 +64,10 @@ type PullRequests interface {
 	// engine calls it best-effort after a confirmed merge, so a branch that
 	// cannot be deleted never fails the merge.
 	DeleteRemoteBranch(ctx context.Context, repoDir, branch string) error
+	// RemoteBranchExists reports whether `branch` exists on the remote, PR or no
+	// PR: closing a PR leaves its head branch behind, and a push can happen
+	// before any PR is opened.
+	RemoteBranchExists(ctx context.Context, repoDir, branch string) (bool, error)
 }
 
 // ListedIssue is a labeled open issue and the numbers of the issues it is

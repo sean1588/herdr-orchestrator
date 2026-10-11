@@ -82,8 +82,9 @@ const settleTimeout = 15 * time.Second
 // CancelState is the reserved terminal a task lands in when an operator cancels
 // it. It is never a workflow state (never in the YAML or workflow.schema.json);
 // the store accepts it as an opaque current_state, and isHalt plus the daemon's
-// settledStates recognize it as terminal so the task is neither re-driven nor
-// re-listed. A workflow that declares a non-terminal state named "cancelled"
+// settledStates recognize it as terminal so the poller neither re-drives nor
+// re-lists the task; only an operator's enqueue starts it over (see IsStopped).
+// A workflow that declares a non-terminal state named "cancelled"
 // would see it force-halted; the default pipeline does not.
 const CancelState = "cancelled"
 
@@ -237,6 +238,11 @@ func (e *Engine) Run(ctx context.Context, issue int) (string, error) {
 		if err != nil {
 			return "", err
 		}
+		// The scheduler only hands a stopped task back on an operator's explicit
+		// enqueue, so reaching one here is a request to start it over.
+		if IsStopped(eng.wf, task.CurrentState) {
+			return eng.redrive(ctx, task)
+		}
 		if err := eng.reconcile(ctx, task); err != nil {
 			return eng.reclassifyCancel(ctx, task, task.CurrentState, err)
 		}
@@ -355,6 +361,67 @@ func (e *Engine) ensureTask(ctx context.Context, issue int) (*store.Task, bool, 
 	}
 	e.log.Info("task created", "task", id, "state", e.startState, "branch", task.Branch)
 	return task, true, nil
+}
+
+// IsStopped reports whether a state is one a human stopped, or was called to: the
+// operator cancel terminal, or a terminal the workflow flags alert (escalated).
+// Such a task is settled, so nothing re-drives it on its own, but an operator who
+// has dealt with the cause can start it over (see redrive). A terminal without an
+// alert (merged, closed) is finished for good. Derived from the workflow, never
+// from state names, so the daemon's poll check and the engine agree.
+func IsStopped(wf *config.Workflow, state string) bool {
+	if state == CancelState {
+		return true
+	}
+	st, ok := wf.States[state]
+	return ok && st.Terminal != "" && st.Alert
+}
+
+// redrive starts a stopped task over from its workflow's entry state and drives
+// it. Every field that tied the task to its previous attempt is cleared, so the
+// implementer spawns fresh and, with no PR recorded, recreates the branch from
+// base. The snapshot is kept, like any other drive of an existing task, so a
+// workflow edit (a timeout, dry_run, the graph) does not reach a redrive — that
+// needs a new issue. The entry state comes from that snapshot too, never the
+// daemon's live startState, which may name a state the snapshot graph lacks.
+//
+// A task whose branch still exists on the remote is refused and left untouched.
+// An open PR there would read as the new attempt's artifact before the new
+// attempt pushed anything, and a head left by a closed PR or a push with no PR
+// rejects the fresh branch's push as non-fast-forward. The operator closes any PR
+// and deletes the branch, then enqueues again; nothing here deletes it for them.
+// A branch that never reached the remote (a triage escalation) redrives.
+func (e *Engine) redrive(ctx context.Context, task *store.Task) (string, error) {
+	pr, err := e.gh.FindPR(ctx, e.repoDir, task.Branch)
+	if err != nil {
+		return task.CurrentState, fmt.Errorf("redrive %s: find open PR: %w", task.ID, err)
+	}
+	if pr != nil {
+		return task.CurrentState, fmt.Errorf("issue %d has open PR #%d on %s; close it and delete the remote branch %s, then enqueue again",
+			task.Issue, pr.Number, task.Branch, task.Branch)
+	}
+	exists, err := e.gh.RemoteBranchExists(ctx, e.repoDir, task.Branch)
+	if err != nil {
+		return task.CurrentState, fmt.Errorf("redrive %s: look up remote branch: %w", task.ID, err)
+	}
+	if exists {
+		return task.CurrentState, fmt.Errorf("issue %d still has remote branch %s from its earlier attempt; delete it, then enqueue again",
+			task.Issue, task.Branch)
+	}
+	entry := e.startState
+	if e.wf.EntryState != nil {
+		entry = *e.wf.EntryState
+	}
+	task.PaneID = ""
+	task.PaneSpawnState = ""
+	task.PRNumber = nil
+	task.RetryCounts = nil
+	task.AgentStatus = ""
+	task.AgentStatusAt = time.Time{}
+	if err := e.advance(ctx, task, entry, "operator.redrive", ""); err != nil {
+		return task.CurrentState, fmt.Errorf("redrive %s: %w", task.ID, err)
+	}
+	return e.drive(ctx, task)
 }
 
 // drive runs the interpreter loop until a halt state, then reclassifies an
@@ -1409,23 +1476,23 @@ func (e *Engine) explain(ctx context.Context, task *store.Task, ev *notify.Event
 // wording matches the diagnosis table in the operate-orchestrator skill, so the
 // alert and the runbook cannot drift into saying different things.
 //
-// A settled task can never be re-driven, so no recommendation here is ever
-// "retry it" — the honest advice is always to fix the cause and open a fresh
-// issue.
+// An escalated task is stopped, not finished: once the cause is fixed, an
+// operator's enqueue_task starts it over from the entry state. So the advice is
+// to fix the cause and then re-drive, never to retry without fixing it.
 func recommendFor(cause string) string {
 	switch {
 	case strings.HasPrefix(cause, "blocked_timeout"):
-		return "The agent sat blocked on an interactive prompt. Read its pane (read-only) to see which one, add the tool to permissions.allow, then open a fresh issue — a settled task cannot be re-driven."
+		return "The agent sat blocked on an interactive prompt. Read its pane (read-only) to see which one, add the tool to permissions.allow, then re-drive it with enqueue_task."
 	case strings.HasPrefix(cause, "blocked_on_prompt"):
-		return "The agent is parked on an interactive prompt. Read its pane (read-only) to see which one, add the tool to permissions.allow, then open a fresh issue — never send keystrokes into the pane."
+		return "The agent is parked on an interactive prompt. Read its pane (read-only) to see which one, add the tool to permissions.allow, then re-drive it with enqueue_task — never send keystrokes into the pane."
 	case strings.HasPrefix(cause, "agent_crashed"):
-		return "The agent's pane shows an error or a bare shell with no agent running. Read its pane (read-only) for the error and check herdr, then open a fresh issue."
+		return "The agent's pane shows an error or a bare shell with no agent running. Read its pane (read-only) for the error and check herdr, then re-drive it with enqueue_task."
 	case strings.HasPrefix(cause, "no_progress"):
-		return "The agent produced no observable output for the no_progress window. Read its pane (read-only): a prompt means fix the allow-list; a dead pane means check herdr. Then open a fresh issue."
+		return "The agent produced no observable output for the no_progress window. Read its pane (read-only): a prompt means fix the allow-list; a dead pane means check herdr. Then re-drive it with enqueue_task."
 	case strings.HasPrefix(cause, "drive_deadline"):
-		return "The drive outlived its wall-clock ceiling, so it was reaped from outside. Check for a wedged subprocess or an over-scoped task, then open a fresh issue."
+		return "The drive outlived its wall-clock ceiling, so it was reaped from outside. Check for a wedged subprocess or an over-scoped task, then re-drive it with enqueue_task."
 	case strings.HasPrefix(cause, "timeout"):
-		return "The agent ran past its state timeout. Read its pane (read-only) to tell a slow task from a permission wedge, then either raise the state's timeout or narrow the issue, and open a fresh one."
+		return "The agent ran past its state timeout. Read its pane (read-only) to tell a slow task from a permission wedge, then either narrow the issue and re-drive it with enqueue_task, or raise the state's timeout and open a new issue — a re-drive keeps the workflow the task started under."
 	case strings.HasPrefix(cause, "retry_exhausted"):
 		return "The reviewer and implementer disagreed until the retry cap ran out. Read the PR's review history; this usually needs a human to settle the disagreement or clarify the issue."
 	case strings.HasPrefix(cause, "agent.done:fail"), strings.HasPrefix(cause, "agent.done"):

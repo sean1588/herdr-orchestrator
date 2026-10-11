@@ -124,6 +124,11 @@ type fakeGH struct {
 	closeErr        error
 	deletedBranches []string
 	deleteErr       error
+
+	// remoteBranch is what RemoteBranchExists reports; remoteBranchErr makes the
+	// lookup fail.
+	remoteBranch    bool
+	remoteBranchErr error
 }
 
 func (g *fakeGH) FindPR(ctx context.Context, repoDir, branch string) (*github.PR, error) {
@@ -175,6 +180,9 @@ func (g *fakeGH) PRStatus(ctx context.Context, repoDir string, pr int) (*github.
 func (g *fakeGH) DeleteRemoteBranch(ctx context.Context, repoDir, branch string) error {
 	g.deletedBranches = append(g.deletedBranches, branch)
 	return g.deleteErr
+}
+func (g *fakeGH) RemoteBranchExists(ctx context.Context, repoDir, branch string) (bool, error) {
+	return g.remoteBranch, g.remoteBranchErr
 }
 func (g *fakeGH) CloseIssue(ctx context.Context, repoDir string, number int, comment string) error {
 	g.closedIssues = append(g.closedIssues, number)

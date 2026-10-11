@@ -553,7 +553,7 @@ func cmdDaemon(args []string) int {
 		}
 	}
 
-	dc := doneChecker{source: w.source, store: w.store, settled: settled, label: label, log: slog.Default()}
+	dc := doneChecker{source: w.source, store: w.store, wf: w.wf, settled: settled, label: label, log: slog.Default()}
 
 	// The per-drive ceiling is enforced by the scheduler's reaper, outside the
 	// drive goroutine — the only place that can still act when a drive is wedged.
@@ -592,7 +592,7 @@ func cmdDaemon(args []string) int {
 			}
 			return numbers, nil
 		},
-		Done: dc.done,
+		Disposition: dc.disposition,
 		RunTask: func(ctx context.Context, issue int) error {
 			_, err := w.eng.Run(ctx, issue)
 			return err
@@ -705,40 +705,46 @@ func settledStates(wf *config.Workflow) map[string]bool {
 	return out
 }
 
-// doneChecker implements the scheduler's Done seam: it reports whether a polled
-// issue's task has settled and, on the settled path, drains the source label so
-// the poller stops re-listing it. It groups the poll-time dependencies so the
-// scheduler callback stays a plain (ctx, issue) func.
+// doneChecker implements the scheduler's Disposition seam: it reports whether a
+// polled issue's task is open, stopped, or finished and, on either settled path,
+// drains the source label so the poller stops re-listing it. It groups the
+// poll-time dependencies so the scheduler callback stays a plain (ctx, issue) func.
 type doneChecker struct {
 	source  source.Source
 	store   *store.Store
+	wf      *config.Workflow
 	settled map[string]bool
 	label   string
 	log     *slog.Logger
 }
 
-// done reports whether the issue's task is settled. A missing task is not
-// settled (it has never been driven). When settled, the issue still carries the
-// source label (it was just returned by ListIssues), so removing it drains the
-// backlog: subsequent polls no longer list it. Removal is best-effort — a
-// failure is logged and the issue reports done anyway, so the worker pool is
-// never wedged; the still-labelled issue is simply retried next poll, and
+// disposition reports where the issue's task stands. A missing task is Open (it
+// has never been driven). A settled task is Stopped when a human stopped it or was
+// called to it (see engine.IsStopped), which an operator may re-drive, and
+// Finished otherwise. Either way the issue still carries the source label (it was
+// just returned by ListIssues), so removing it drains the backlog: subsequent
+// polls no longer list it, and a cancelled task cannot auto-restart. Removal is
+// best-effort — a failure is logged and the disposition stands, so the worker
+// pool is never wedged; the still-labelled issue is simply retried next poll, and
 // RemoveLabel is idempotent.
-func (d doneChecker) done(ctx context.Context, issue int) (bool, error) {
+func (d doneChecker) disposition(ctx context.Context, issue int) (scheduler.Disposition, error) {
 	tk, err := d.store.GetTask(ctx, engine.TaskID(issue))
 	if errors.Is(err, store.ErrNotFound) {
-		return false, nil
+		return scheduler.Open, nil
 	}
 	if err != nil {
-		return false, err
+		return scheduler.Open, err
 	}
 	if !d.settled[tk.CurrentState] {
-		return false, nil
+		return scheduler.Open, nil
 	}
 	if err := d.source.Acknowledge(ctx, strconv.Itoa(issue), source.Selector{"label": d.label}); err != nil {
 		d.log.Warn("remove source label failed", "issue", issue, "label", d.label, "err", err)
 	}
-	return true, nil
+	if engine.IsStopped(d.wf, tk.CurrentState) {
+		return scheduler.Stopped, nil
+	}
+	return scheduler.Finished, nil
 }
 
 // reportConfigErr prints a config validation failure (refusing to run) or a

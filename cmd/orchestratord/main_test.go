@@ -18,6 +18,7 @@ import (
 	"github.com/sean1588/herdr-orchestrator/internal/doctor"
 	"github.com/sean1588/herdr-orchestrator/internal/engine"
 	"github.com/sean1588/herdr-orchestrator/internal/github"
+	"github.com/sean1588/herdr-orchestrator/internal/scheduler"
 	"github.com/sean1588/herdr-orchestrator/internal/store"
 )
 
@@ -53,6 +54,9 @@ func (f *fakeGH) PRStatus(ctx context.Context, repoDir string, pr int) (*github.
 func (f *fakeGH) Merge(ctx context.Context, repoDir string, pr int) error { return nil }
 func (f *fakeGH) DeleteRemoteBranch(ctx context.Context, repoDir, branch string) error {
 	return nil
+}
+func (f *fakeGH) RemoteBranchExists(ctx context.Context, repoDir, branch string) (bool, error) {
+	return false, nil
 }
 func (f *fakeGH) CloseIssue(ctx context.Context, repoDir string, number int, comment string) error {
 	return nil
@@ -256,18 +260,26 @@ func TestSettledStates(t *testing.T) {
 
 func TestDoneChecker_DrainsLabelOnSettled(t *testing.T) {
 	ctx := context.Background()
-	settled := map[string]bool{"merged": true, "merging": true, "escalated": true, "closed": true}
+	wf, _, err := config.Load(goodFixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settled := settledStates(wf)
 
+	// Both settled dispositions drain the label: a stopped task must not
+	// auto-restart on the next poll any more than a finished one may.
 	cases := []struct {
 		name        string
 		state       string // task's CurrentState; "" => no task in the store (missing)
-		wantDone    bool
+		want        scheduler.Disposition
 		wantRemoved bool
 	}{
-		{"dry-run merge halt drains label", "merging", true, true},
-		{"terminal escalated drains label", "escalated", true, true},
-		{"in-flight task keeps its label", "implementing", false, false},
-		{"missing task removes nothing", "", false, false},
+		{"dry-run merge halt is finished", "merging", scheduler.Finished, true},
+		{"merged is finished", "merged", scheduler.Finished, true},
+		{"escalated is stopped", "escalated", scheduler.Stopped, true},
+		{"operator cancel is stopped", engine.CancelState, scheduler.Stopped, true},
+		{"in-flight task keeps its label", "implementing", scheduler.Open, false},
+		{"missing task removes nothing", "", scheduler.Open, false},
 	}
 
 	for _, tc := range cases {
@@ -283,14 +295,14 @@ func TestDoneChecker_DrainsLabelOnSettled(t *testing.T) {
 				}
 			}
 			gh := &fakeGH{}
-			dc := doneChecker{source: github.IssueSource{Client: gh, RepoDir: "/repo"}, store: st, settled: settled, label: "agent-ready", log: discardLogger()}
+			dc := doneChecker{source: github.IssueSource{Client: gh, RepoDir: "/repo"}, store: st, wf: wf, settled: settled, label: "agent-ready", log: discardLogger()}
 
-			done, err := dc.done(ctx, issue)
+			got, err := dc.disposition(ctx, issue)
 			if err != nil {
-				t.Fatalf("done: unexpected error: %v", err)
+				t.Fatalf("disposition: unexpected error: %v", err)
 			}
-			if done != tc.wantDone {
-				t.Errorf("done = %v, want %v", done, tc.wantDone)
+			if got != tc.want {
+				t.Errorf("disposition = %d, want %d", got, tc.want)
 			}
 			if gotRemoved := len(gh.removed) > 0; gotRemoved != tc.wantRemoved {
 				t.Errorf("label removed = %v, want %v (calls=%+v)", gotRemoved, tc.wantRemoved, gh.removed)
@@ -309,7 +321,7 @@ func TestDoneChecker_DrainsLabelOnSettled(t *testing.T) {
 }
 
 // Label removal must never fail or block the poll: a gh error is logged and the
-// issue is still reported settled (done), so the worker pool is not wedged.
+// issue is still reported settled, so the worker pool is not wedged.
 func TestDoneChecker_LabelRemovalFailureDoesNotBlock(t *testing.T) {
 	ctx := context.Background()
 	st := newStore(t)
@@ -321,14 +333,18 @@ func TestDoneChecker_LabelRemovalFailureDoesNotBlock(t *testing.T) {
 		t.Fatalf("CreateTask: %v", err)
 	}
 	gh := &fakeGH{removeErr: errors.New("gh offline")}
-	dc := doneChecker{source: github.IssueSource{Client: gh, RepoDir: "/repo"}, store: st, settled: map[string]bool{"merging": true}, label: "agent-ready", log: discardLogger()}
-
-	done, err := dc.done(ctx, issue)
+	wf, _, err := config.Load(goodFixture)
 	if err != nil {
-		t.Fatalf("done must swallow label-removal errors, got: %v", err)
+		t.Fatal(err)
 	}
-	if !done {
-		t.Error("settled issue must still report done even when label removal fails")
+	dc := doneChecker{source: github.IssueSource{Client: gh, RepoDir: "/repo"}, store: st, wf: wf, settled: map[string]bool{"merging": true}, label: "agent-ready", log: discardLogger()}
+
+	got, err := dc.disposition(ctx, issue)
+	if err != nil {
+		t.Fatalf("disposition must swallow label-removal errors, got: %v", err)
+	}
+	if got != scheduler.Finished {
+		t.Errorf("settled issue must still report Finished even when label removal fails, got %d", got)
 	}
 	if len(gh.removed) != 1 {
 		t.Errorf("want RemoveLabel attempted once, got %d", len(gh.removed))

@@ -12,7 +12,7 @@ import (
 
 func testLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
-// Discovered issues are each driven exactly once; a completed issue (Done=true)
+// Discovered issues are each driven exactly once; a completed issue (Finished)
 // is not re-run on the next poll.
 func TestServe_DispatchesEachIssueOnce(t *testing.T) {
 	var mu sync.Mutex
@@ -22,10 +22,13 @@ func TestServe_DispatchesEachIssueOnce(t *testing.T) {
 
 	s := &Scheduler{
 		List: func(ctx context.Context) ([]int, error) { return []int{1, 2, 3}, nil },
-		Done: func(ctx context.Context, issue int) (bool, error) {
+		Disposition: func(ctx context.Context, issue int) (Disposition, error) {
 			mu.Lock()
 			defer mu.Unlock()
-			return done[issue], nil
+			if done[issue] {
+				return Finished, nil
+			}
+			return Open, nil
 		},
 		RunTask: func(ctx context.Context, issue int) error {
 			mu.Lock()
@@ -66,23 +69,26 @@ func TestServe_DispatchesEachIssueOnce(t *testing.T) {
 	}
 }
 
-// An issue whose task is already terminal is never run.
-func TestServe_SkipsTerminalIssues(t *testing.T) {
-	var ran int32
-	s := &Scheduler{
-		List:     func(ctx context.Context) ([]int, error) { return []int{7}, nil },
-		Done:     func(ctx context.Context, issue int) (bool, error) { return true, nil },
-		RunTask:  func(ctx context.Context, issue int) error { atomic.AddInt32(&ran, 1); return nil },
-		SeedFrom: func(ctx context.Context) ([]int, error) { return nil, nil },
-		Interval: 5 * time.Millisecond,
-		Workers:  2,
-		Log:      testLog(),
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
-	defer cancel()
-	_ = s.Serve(ctx)
-	if n := atomic.LoadInt32(&ran); n != 0 {
-		t.Errorf("terminal issue ran %d times, want 0", n)
+// The poller never runs a settled issue, whether it was stopped (a cancel must
+// stick against the next poll) or finished.
+func TestServe_SkipsSettledIssues(t *testing.T) {
+	for _, d := range []Disposition{Stopped, Finished} {
+		var ran int32
+		s := &Scheduler{
+			List:        func(ctx context.Context) ([]int, error) { return []int{7}, nil },
+			Disposition: func(ctx context.Context, issue int) (Disposition, error) { return d, nil },
+			RunTask:     func(ctx context.Context, issue int) error { atomic.AddInt32(&ran, 1); return nil },
+			SeedFrom:    func(ctx context.Context) ([]int, error) { return []int{7}, nil },
+			Interval:    5 * time.Millisecond,
+			Workers:     2,
+			Log:         testLog(),
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+		_ = s.Serve(ctx)
+		cancel()
+		if n := atomic.LoadInt32(&ran); n != 0 {
+			t.Errorf("disposition %d: settled issue ran %d times, want 0", d, n)
+		}
 	}
 }
 
@@ -91,8 +97,8 @@ func TestServe_RespectsWorkerCap(t *testing.T) {
 	release := make(chan struct{})
 	var cur, max int32
 	s := &Scheduler{
-		List: func(ctx context.Context) ([]int, error) { return []int{1, 2, 3, 4, 5, 6}, nil },
-		Done: func(ctx context.Context, issue int) (bool, error) { return false, nil },
+		List:        func(ctx context.Context) ([]int, error) { return []int{1, 2, 3, 4, 5, 6}, nil },
+		Disposition: func(ctx context.Context, issue int) (Disposition, error) { return Open, nil },
 		RunTask: func(ctx context.Context, issue int) error {
 			n := atomic.AddInt32(&cur, 1)
 			for {
@@ -123,13 +129,13 @@ func TestServe_RespectsWorkerCap(t *testing.T) {
 func TestServe_SeedsInFlightOnStartup(t *testing.T) {
 	ran := make(chan int, 1)
 	s := &Scheduler{
-		List:     func(ctx context.Context) ([]int, error) { return nil, nil },
-		Done:     func(ctx context.Context, issue int) (bool, error) { return false, nil },
-		RunTask:  func(ctx context.Context, issue int) error { ran <- issue; return nil },
-		SeedFrom: func(ctx context.Context) ([]int, error) { return []int{9}, nil },
-		Interval: time.Hour, // no polling; only the seed drives
-		Workers:  1,
-		Log:      testLog(),
+		List:        func(ctx context.Context) ([]int, error) { return nil, nil },
+		Disposition: func(ctx context.Context, issue int) (Disposition, error) { return Open, nil },
+		RunTask:     func(ctx context.Context, issue int) error { ran <- issue; return nil },
+		SeedFrom:    func(ctx context.Context) ([]int, error) { return []int{9}, nil },
+		Interval:    time.Hour, // no polling; only the seed drives
+		Workers:     1,
+		Log:         testLog(),
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -150,13 +156,13 @@ func TestServe_SeedsInFlightOnStartup(t *testing.T) {
 func TestServe_ResumesSuspendedTaskEachPoll(t *testing.T) {
 	var runs int32
 	s := &Scheduler{
-		List:     func(ctx context.Context) ([]int, error) { return nil, nil },
-		Done:     func(ctx context.Context, issue int) (bool, error) { return false, nil },             // never settles
-		RunTask:  func(ctx context.Context, issue int) error { atomic.AddInt32(&runs, 1); return nil }, // returns at once (suspend)
-		SeedFrom: func(ctx context.Context) ([]int, error) { return []int{9}, nil },
-		Interval: 5 * time.Millisecond,
-		Workers:  1,
-		Log:      testLog(),
+		List:        func(ctx context.Context) ([]int, error) { return nil, nil },
+		Disposition: func(ctx context.Context, issue int) (Disposition, error) { return Open, nil },       // never settles
+		RunTask:     func(ctx context.Context, issue int) error { atomic.AddInt32(&runs, 1); return nil }, // returns at once (suspend)
+		SeedFrom:    func(ctx context.Context) ([]int, error) { return []int{9}, nil },
+		Interval:    5 * time.Millisecond,
+		Workers:     1,
+		Log:         testLog(),
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { _ = s.Serve(ctx) }()
@@ -170,12 +176,12 @@ func TestServe_ResumesSuspendedTaskEachPoll(t *testing.T) {
 // Serve returns promptly when the context is cancelled.
 func TestServe_ReturnsOnCancel(t *testing.T) {
 	s := &Scheduler{
-		List:     func(ctx context.Context) ([]int, error) { return nil, nil },
-		Done:     func(ctx context.Context, issue int) (bool, error) { return false, nil },
-		RunTask:  func(ctx context.Context, issue int) error { return nil },
-		Interval: 5 * time.Millisecond,
-		Workers:  2,
-		Log:      testLog(),
+		List:        func(ctx context.Context) ([]int, error) { return nil, nil },
+		Disposition: func(ctx context.Context, issue int) (Disposition, error) { return Open, nil },
+		RunTask:     func(ctx context.Context, issue int) error { return nil },
+		Interval:    5 * time.Millisecond,
+		Workers:     2,
+		Log:         testLog(),
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})

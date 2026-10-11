@@ -347,7 +347,7 @@ Streamable HTTP transport) on a single `/mcp` endpoint. Five tools:
 | `get_task` | `issue` | one task by issue number |
 | `get_audit` | `issue` | a task's full transition history |
 | `cancel_task` | `issue` | cancel the running drive; it settles to `cancelled` |
-| `enqueue_task` | `issue` | (re-)drive an issue; idempotent if already running |
+| `enqueue_task` | `issue` | (re-)drive an issue: a cancelled or escalated task starts over; idempotent if running; refused if merged or closed |
 | `message_task` | `issue`, `text` | submit one line at a running agent's idle prompt (verified like the kickoff; never into a dialog) |
 
 Smoke-test it with `curl`:
@@ -404,8 +404,8 @@ Each tick it observes `list_tasks` and:
   resumes every in-flight task itself, so this is the one recovery lever the
   daemon can't pull for itself;
 - **a runaway task** (retry churn, an externally-closed PR, a dead pane) →
-  `cancel_task` to stop it, then surfaces it — `cancel` is one-way (it settles to
-  `cancelled`), so restarting settled work is a human call;
+  `cancel_task` to stop it, then surfaces it — `cancel` settles it to `cancelled`,
+  and only a human's `enqueue_task` starts it over;
 - **a healthy, in-flight task** → leaves it alone (a quiet pipeline is a working
   one);
 - **an escalation** (`escalated`, or a `needs_human` triage verdict) or a broken

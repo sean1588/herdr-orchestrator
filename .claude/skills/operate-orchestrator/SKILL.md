@@ -37,7 +37,7 @@ it already handles.** Your value is the meta-layer it structurally cannot do:
   trail, diagnose the cause, and surface a recommended action.
 - It runs its cap blindly; it can't judge a **pathological pattern** (retry
   churn, an externally-closed PR, a genuinely dead pane) — you can, and **stop**
-  it (cancel is one-way — see below).
+  it (only a human's `enqueue_task` starts it again — see below).
 
 If a task is legitimately in progress or in a gate wait the daemon re-checks,
 **leave it alone.**
@@ -50,14 +50,16 @@ If a task is legitimately in progress or in a gate wait the daemon re-checks,
    - `get_audit {issue}` — a task's full transition history. Your primary
      diagnosis call.
    - `cancel_task {issue}` — stop an **actively-running** drive; it settles to the
-     terminal `cancelled`. **One-way:** a cancelled task is settled and **cannot
-     be re-driven** through these tools. Only works while the drive is in flight —
-     a task suspended in `blocked_on_gate` between polls returns "not currently
-     running."
-   - `enqueue_task {issue}` — drive a **non-settled** issue that isn't already in
-     flight (a freshly-labeled issue, or a nudge for an idle one). It **refuses
-     any settled task** ("already settled; not re-driven"), so it is NOT a
-     restart-after-cancel or restart-after-escalate mechanism.
+     terminal `cancelled`, and the poller never re-drives it on its own. Only
+     works while the drive is in flight — a task suspended in `blocked_on_gate`
+     between polls returns "not currently running."
+   - `enqueue_task {issue}` — drive an issue that isn't already in flight (a
+     freshly-labeled issue, or a nudge for an idle one). On a **cancelled or
+     escalated** task it starts the task over from the entry state; that restart
+     is a human's decision, made after fixing the cause — never yours. It
+     **refuses a merged or closed task** ("already settled; not re-driven"), and
+     a stopped task whose branch is still on the remote (the human closes any PR
+     and deletes the branch first).
    - `message_task {issue, text}` — submit one line at a running task's agent
      prompt, delivered and verified the same way as its kickoff. Refused for an
      unknown issue, a settled task, or a task with no pane. See "Nudging an idle
@@ -128,8 +130,8 @@ Run this each pass. Keep it cheap — most ticks do nothing but observe.
 | Situation | Action |
 |---|---|
 | **Daemon down / unreachable** | Restart it in `PANE` with the same `daemon …` command `setup-orchestrator` step 9 ran. On startup it re-seeds and resumes every non-settled task itself — do **not** also run `orchestratord recover` against a live daemon (two engines on one DB/repo). Use `recover` only for a one-shot when no daemon is running. |
-| **A runaway you must stop** — pathological retry churn, its PR closed/merged externally, an agent looping and burning resources | `cancel_task {issue}` to stop the running drive. This is **one-way** — it settles to `cancelled` and cannot be re-driven — so then **surface**: a human decides whether to re-open the issue or fix the root cause. |
-| **A non-settled task the daemon isn't driving** (idle, e.g. freshly labeled and not yet picked up) | `enqueue_task {issue}` to nudge it. (Refused for any settled task.) |
+| **A runaway you must stop** — pathological retry churn, its PR closed/merged externally, an agent looping and burning resources | `cancel_task {issue}` to stop the running drive. It settles to `cancelled` and the daemon will not restart it — so then **surface**: a human decides whether to fix the root cause and re-drive it (`enqueue_task`). |
+| **A non-settled task the daemon isn't driving** (idle, e.g. freshly labeled and not yet picked up) | `enqueue_task {issue}` to nudge it. (Never on a cancelled or escalated task — that restarts it, which is a human's call.) |
 | **A driven task whose agent sits idle at its prompt** with the state's work unfinished | Nudge the agent — see below. |
 | **Task legitimately working, or in a gate wait the daemon re-checks** | Leave it. Do nothing. |
 
@@ -145,10 +147,17 @@ message (its status moved); the audit records a `message_task` row with the
 text's length. The engine then decides from the artifact as for any other agent
 activity — there is nothing else to trigger.
 
-Cancel is destructive **and one-way** — it kills in-flight agent work and the task
-cannot be restarted through these tools (settled means settled; the engine is the
-single writer). Use it only for a runaway you have diagnosed, never as a first
-resort, and always **surface afterward** so a human can decide the follow-up.
+Cancel is destructive — it kills in-flight agent work, and nothing restarts the
+task on its own: the poller never re-drives a cancelled task. The one way back is
+`enqueue_task`, which starts it over from the entry state, and that is a human's
+call, not yours. Use cancel only for a runaway you have diagnosed, never as a
+first resort, and always **surface afterward** so a human can decide the
+follow-up.
+
+A re-drive restarts the task under the **same workflow snapshot** it started
+with. A fix outside the workflow reaches it — the issue text, the agent's
+`permissions.allow`, the environment (herdr, `gh` auth). A workflow edit — a
+state's timeout, `dry_run`, the graph — does not; that needs a new issue.
 
 ### 3. Escalate (surface to a human)
 
@@ -195,20 +204,22 @@ transition's `from → to (trigger/result)`:
     `permissions.allow` pops an interactive prompt the agent can't answer, and the
     daemon keeps reading the pane as "working" until the timeout fires. Read the
     pane read-only (`herdr pane read <pane>`) to tell them apart; a prompt means fix
-    the allow-list, then open a fresh issue to retry — never type into the pane, and
-    a settled task can't be re-driven).
+    the allow-list, then a human re-drives it with `enqueue_task` — never type into
+    the pane. A too-large task is fixed by narrowing the issue, then re-driving; a
+    longer timeout is a workflow edit, which a re-drive does not pick up, so it
+    needs a new issue).
   - from `implementing` on `blocked_timeout` → the agent sat continuously blocked
     past `policies.blocked_timeout`. Distinct from `timeout` on purpose: this one
     means "parked on a prompt", not "legitimately slow". Read the pane read-only to
-    see *which* prompt, fix the environment that caused it, and open a fresh issue.
+    see *which* prompt, fix the environment that caused it, and re-drive it.
   - from *any* state on `no_progress` → the task produced no observable signal for a
     whole `policies.no_progress_timeout` window, confirmed against the pane's own
     bytes. "Nothing happened at all", rather than "this took too long". Read the
     pane read-only to see where it died.
   - from *any* state on `blocked_on_prompt` → (daemon run with `--pane-classifier`)
     the static pane was classified as parked on an interactive prompt. Read the pane
-    read-only to see which one, add the tool to the allow-list, then open a fresh
-    issue — never send keystrokes into the pane.
+    read-only to see which one, add the tool to the allow-list, then a human
+    re-drives it with `enqueue_task` — never send keystrokes into the pane.
   - from *any* state on `agent_crashed` → (daemon run with a Jev `--pane-classifier`) the
     static pane shows an error or a bare shell with no agent running. Read the pane
     read-only for the error and check herdr.
@@ -258,9 +269,10 @@ get_audit 29 → … implementing → escalated (trigger=timeout)
   ⚠️ ESCALATION — issue #29 (escalated)
   Cause: implementer ran past its deadline without opening a PR
   Audit: implementing→escalated (timeout); queued→implementing (scheduled)
-  Recommended: inspect the agent's worktree / issue scope, or raise the
-  state's timeout, then open a fresh issue to retry — a settled task
-  cannot be re-driven (enqueue_task 29 → "already settled; not re-driven").
+  Recommended: inspect the agent's worktree / issue scope; narrow the issue
+  and re-drive it (enqueue_task 29 starts it over from the entry state), or
+  raise the state's timeout and open a new issue (a re-drive keeps the
+  workflow it started under).
 ```
 
 ## Safety

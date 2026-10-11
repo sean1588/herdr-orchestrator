@@ -221,7 +221,7 @@ launch. The daemon runs the cheap subset itself at startup and refuses to start
 on a failure; `--skip-preflight` overrides that.
 
 **The herdr version** is judged against the range this build was tested with,
-`HerdrTestedMin`–`HerdrTestedMax` in `internal/exec/herdr.go` (today 0.8.2–0.9.1).
+`HerdrTestedMin`–`HerdrTestedMax` in `internal/exec/herdr.go` (today 0.8.2–0.9.3).
 Older fails (`herdr update`); newer only warns, because the full `doctor` — the
 kickoff smoke test — is the real test of a new herdr. To bump the range after a
 herdr release: run the full `doctor` (without `--quick`) on the new herdr, drive

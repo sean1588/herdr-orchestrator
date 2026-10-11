@@ -31,7 +31,7 @@ const waitBudgetSlack = 30 * time.Second
 // new herdr, drive one issue to merged, then raise HerdrTestedMax.
 const (
 	HerdrTestedMin = "0.8.2" // oldest herdr the backend's command surface was driven against
-	HerdrTestedMax = "0.9.1" // newest; bump after a full doctor + one merged task on it
+	HerdrTestedMax = "0.9.3" // newest; bump after a full doctor + one merged task on it
 )
 
 // Herdr is the herdr-backed ExecutionBackend. It wraps the same git + herdr CLI

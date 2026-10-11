@@ -2,6 +2,8 @@ package config
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -493,46 +495,30 @@ states:
 	}
 }
 
-// A role's allowed_tools must pass the schema (additionalProperties:false) and
-// decode onto Role.AllowedTools.
-func TestParse_RoleAllowedTools_Decodes(t *testing.T) {
-	wf, _, err := mustParse(t, `
+// allowed_tools is not a role field: agent-native flags live in the launch argv.
+// A config that still sets it is rejected by the schema, naming the field, rather
+// than silently dropped for non-claude agents.
+func TestLoad_RoleAllowedTools_Rejected(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "workflow.yaml")
+	if err := os.WriteFile(path, []byte(`
 version: 0
 name: t
 entry_state: s
 roles:
   reviewer:
     launch: [claude]
-    allowed_tools: [Read, Write]
+    allowed_tools: ["Read"]
 states:
   s: { terminal: success }
-`)
-	if err != nil {
-		t.Fatalf("parse: %v", err)
+`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
 	}
-	if got := strings.Join(wf.Roles["reviewer"].AllowedTools, ","); got != "Read,Write" {
-		t.Errorf("AllowedTools joined = %q, want %q", got, "Read,Write")
+	_, _, err := Load(path)
+	if err == nil {
+		t.Fatal("Load accepted a role with allowed_tools, want a validation error")
 	}
-}
-
-// allowed_tools entries must be shell-safe tokens: the launch argv is delivered
-// space-joined into the pane shell, so an arg-scoped spec (spaces/globs/parens)
-// would fail at spawn. Reject it at validation (fail-closed), not at runtime.
-func TestParse_RoleAllowedTools_RejectsShellUnsafe(t *testing.T) {
-	_, _, err := mustParse(t, `
-version: 0
-name: t
-entry_state: s
-roles:
-  reviewer:
-    launch: [claude]
-    allowed_tools: [Read, "Bash(gh pr view:*)"]
-states:
-  s: { terminal: success }
-`)
-	errs := semErrors(t, err)
-	if !containsSubstr(errs, `allowed_tools entry "Bash(gh pr view:*)"`) {
-		t.Errorf("want a shell-unsafe allowed_tools error, got %v", errs)
+	if !strings.Contains(err.Error(), "allowed_tools") {
+		t.Errorf("error = %v, want it to name allowed_tools", err)
 	}
 }
 

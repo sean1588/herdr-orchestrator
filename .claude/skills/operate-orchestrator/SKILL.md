@@ -37,7 +37,7 @@ it already handles.** Your value is the meta-layer it structurally cannot do:
   trail, diagnose the cause, and surface a recommended action.
 - It runs its cap blindly; it can't judge a **pathological pattern** (retry
   churn, an externally-closed PR, a genuinely dead pane) — you can, and **stop**
-  it (cancel is one-way — see below).
+  it (only a human's `enqueue_task` starts it again — see below).
 
 If a task is legitimately in progress or in a gate wait the daemon re-checks,
 **leave it alone.**
@@ -145,10 +145,17 @@ message (its status moved); the audit records a `message_task` row with the
 text's length. The engine then decides from the artifact as for any other agent
 activity — there is nothing else to trigger.
 
-Cancel is destructive **and one-way** — it kills in-flight agent work and the task
-cannot be restarted through these tools (settled means settled; the engine is the
-single writer). Use it only for a runaway you have diagnosed, never as a first
-resort, and always **surface afterward** so a human can decide the follow-up.
+Cancel is destructive — it kills in-flight agent work, and nothing restarts the
+task on its own: the poller never re-drives a cancelled task. The one way back is
+`enqueue_task`, which starts it over from the entry state, and that is a human's
+call, not yours. Use cancel only for a runaway you have diagnosed, never as a
+first resort, and always **surface afterward** so a human can decide the
+follow-up.
+
+A re-drive restarts the task under the **same workflow snapshot** it started
+with. A fix outside the workflow reaches it — the issue text, the agent's
+`permissions.allow`, the environment (herdr, `gh` auth). A workflow edit — a
+state's timeout, `dry_run`, the graph — does not; that needs a new issue.
 
 ### 3. Escalate (surface to a human)
 
@@ -196,7 +203,9 @@ transition's `from → to (trigger/result)`:
     daemon keeps reading the pane as "working" until the timeout fires. Read the
     pane read-only (`herdr pane read <pane>`) to tell them apart; a prompt means fix
     the allow-list, then a human re-drives it with `enqueue_task` — never type into
-    the pane).
+    the pane. A too-large task is fixed by narrowing the issue, then re-driving; a
+    longer timeout is a workflow edit, which a re-drive does not pick up, so it
+    needs a new issue).
   - from `implementing` on `blocked_timeout` → the agent sat continuously blocked
     past `policies.blocked_timeout`. Distinct from `timeout` on purpose: this one
     means "parked on a prompt", not "legitimately slow". Read the pane read-only to
@@ -207,8 +216,8 @@ transition's `from → to (trigger/result)`:
     pane read-only to see where it died.
   - from *any* state on `blocked_on_prompt` → (daemon run with `--pane-classifier`)
     the static pane was classified as parked on an interactive prompt. Read the pane
-    read-only to see which one, add the tool to the allow-list, then open a fresh
-    issue — never send keystrokes into the pane.
+    read-only to see which one, add the tool to the allow-list, then a human
+    re-drives it with `enqueue_task` — never send keystrokes into the pane.
   - from *any* state on `agent_crashed` → (daemon run with a Jev `--pane-classifier`) the
     static pane shows an error or a bare shell with no agent running. Read the pane
     read-only for the error and check herdr.
@@ -258,9 +267,10 @@ get_audit 29 → … implementing → escalated (trigger=timeout)
   ⚠️ ESCALATION — issue #29 (escalated)
   Cause: implementer ran past its deadline without opening a PR
   Audit: implementing→escalated (timeout); queued→implementing (scheduled)
-  Recommended: inspect the agent's worktree / issue scope, or raise the
-  state's timeout, then re-drive it (enqueue_task 29 starts it over from
-  the entry state).
+  Recommended: inspect the agent's worktree / issue scope; narrow the issue
+  and re-drive it (enqueue_task 29 starts it over from the entry state), or
+  raise the state's timeout and open a new issue (a re-drive keeps the
+  workflow it started under).
 ```
 
 ## Safety

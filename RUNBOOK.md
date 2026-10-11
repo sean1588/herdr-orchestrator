@@ -190,9 +190,10 @@ started *after* the restart; tasks already parked in `merging` still honor the
 `dry_run: true` they began with. This is deliberate — a flag whose job is to
 withhold a side effect would be worthless if editing a file silently retracted
 it mid-drive. To move an in-flight task onto new rules, let it settle, or cancel
-it and open a fresh issue. A snapshot that no longer parses fails closed: the
-daemon refuses to drive that task and says so, rather than quietly falling back
-to the current config.
+it and open a fresh issue — `enqueue_task` on a cancelled or escalated task
+restarts it under the same snapshot, not the edited config. A snapshot that no
+longer parses fails closed: the daemon refuses to drive that task and says so,
+rather than quietly falling back to the current config.
 
 > **Non-Claude agents (Codex, etc.):** nothing here depends on Claude Code.
 > The per-tick supervision procedure in

@@ -154,7 +154,9 @@ escalated: the `Cause` (`timeout`, `blocked_timeout`, `retry_exhausted`,
 gate/decision result), the last few transitions, the tail of the agent's pane,
 and a concrete recommended action.
 An escalated task is stopped, not finished, so the recommendation is always "fix
-the cause, then re-drive it with `enqueue_task`", never "retry it" unchanged.
+the cause, then re-drive it with `enqueue_task`", never "retry it" unchanged. A
+re-drive keeps the workflow snapshot the task started under, so a cause fixed in
+the workflow itself (a longer timeout, `dry_run`, the graph) needs a new issue.
 
 **Event log.** `--event-log <path>` appends every event as JSON Lines —
 transitions, spawns, gate evaluations, decisions, agent status changes,
@@ -171,7 +173,9 @@ re-listed by the poller. `cancel_task` on an issue with no active drive is a too
 error. An explicit `enqueue_task` on a **cancelled or escalated** task starts it
 over from the entry state (audited as `operator.redrive`): pane, PR number, and
 retry counts are cleared and the branch is recreated from base. A PR the earlier
-attempt opened stays open and follows the branch's new commits. A merged or
+attempt opened stays open: the implementer finds it on GitHub and force-pushes its
+new commits onto it instead of opening another. The workflow snapshot is kept,
+so a workflow edit since the task started does not apply. A merged or
 closed task is refused ("already settled; not re-driven").
 
 Smoke-test the endpoint with `curl`:

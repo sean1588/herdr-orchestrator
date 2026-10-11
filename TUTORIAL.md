@@ -404,8 +404,8 @@ Each tick it observes `list_tasks` and:
   resumes every in-flight task itself, so this is the one recovery lever the
   daemon can't pull for itself;
 - **a runaway task** (retry churn, an externally-closed PR, a dead pane) →
-  `cancel_task` to stop it, then surfaces it — `cancel` is one-way (it settles to
-  `cancelled`), so restarting settled work is a human call;
+  `cancel_task` to stop it, then surfaces it — `cancel` settles it to `cancelled`,
+  and only a human's `enqueue_task` starts it over;
 - **a healthy, in-flight task** → leaves it alone (a quiet pipeline is a working
   one);
 - **an escalation** (`escalated`, or a `needs_human` triage verdict) or a broken

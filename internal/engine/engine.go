@@ -380,9 +380,10 @@ func IsStopped(wf *config.Workflow, state string) bool {
 // redrive starts a stopped task over from the start state and drives it. Every
 // field that tied the task to its previous attempt is cleared, so the implementer
 // spawns fresh and, with no PR recorded, recreates the branch from base. A PR the
-// earlier attempt opened on that branch is left alone: it follows the branch's new
-// commits, and nothing closes or reopens it. The snapshot is kept, like any other
-// drive of an existing task.
+// earlier attempt opened on that branch stays open: the implementer finds it on
+// GitHub and force-pushes its new commits onto it (see followKickoff). The
+// snapshot is kept, like any other drive of an existing task, so a workflow edit
+// (a timeout, dry_run, the graph) does not reach a redrive — that needs a new issue.
 func (e *Engine) redrive(ctx context.Context, task *store.Task) (string, error) {
 	task.PaneID = ""
 	task.PaneSpawnState = ""
@@ -1161,6 +1162,17 @@ func (e *Engine) agentTask(ctx context.Context, task *store.Task, st config.Stat
 	if err != nil {
 		return "", "", err
 	}
+	// The implementer spawns with the branch recreated from base, yet an earlier
+	// attempt's PR can still be open on it (a redrive clears the recorded number).
+	// GitHub, not the task row, says whether one is: if so, the agent's work must
+	// land on that PR, not on a second one.
+	pr, err := e.gh.FindPR(ctx, e.repoDir, task.Branch)
+	if err != nil {
+		return "", "", fmt.Errorf("find existing PR for %s: %w", task.Branch, err)
+	}
+	if pr != nil {
+		return taskFile, e.followKickoff(task, taskFile, pr.Number), nil
+	}
 	return taskFile, e.kickoff(r, task, taskFile), nil
 }
 
@@ -1187,6 +1199,17 @@ func (e *Engine) kickoff(r config.Role, task *store.Task, taskFile string) strin
 	return fmt.Sprintf(
 		"Read the task in %s and implement it on this branch (%s). Then commit, run 'git push -u origin %s', and open a PR with 'gh pr create --fill --base %s'. Stop when the PR is open.",
 		taskFile, task.Branch, task.Branch, e.base)
+}
+
+// followKickoff is the implementer kickoff when an earlier attempt's PR is still
+// open on the branch. The branch was recreated from base, so a plain push is
+// rejected as non-fast-forward; a force push moves the PR's head onto the new
+// commits and keeps it open. (Deleting the remote branch instead would close the
+// PR.) A role's custom kickoff is not used: it cannot know about the earlier PR.
+func (e *Engine) followKickoff(task *store.Task, taskFile string, pr int) string {
+	return fmt.Sprintf(
+		"Read the task in %s and implement it on this branch (%s). PR #%d is still open on this branch from an earlier attempt, and the branch was recreated from %s: commit, then run 'git push --force -u origin %s' so PR #%d carries your commits. Do not open another PR. Stop once your commits are on PR #%d.",
+		taskFile, task.Branch, pr, e.base, task.Branch, pr, pr)
 }
 
 // reconcile re-resolves a task's volatile pane and short-circuits to the goal if
@@ -1464,7 +1487,7 @@ func recommendFor(cause string) string {
 	case strings.HasPrefix(cause, "drive_deadline"):
 		return "The drive outlived its wall-clock ceiling, so it was reaped from outside. Check for a wedged subprocess or an over-scoped task, then re-drive it with enqueue_task."
 	case strings.HasPrefix(cause, "timeout"):
-		return "The agent ran past its state timeout. Read its pane (read-only) to tell a slow task from a permission wedge, then either raise the state's timeout or narrow the issue, and re-drive it with enqueue_task."
+		return "The agent ran past its state timeout. Read its pane (read-only) to tell a slow task from a permission wedge, then either narrow the issue and re-drive it with enqueue_task, or raise the state's timeout and open a new issue — a re-drive keeps the workflow the task started under."
 	case strings.HasPrefix(cause, "retry_exhausted"):
 		return "The reviewer and implementer disagreed until the retry cap ran out. Read the PR's review history; this usually needs a human to settle the disagreement or clarify the issue."
 	case strings.HasPrefix(cause, "agent.done:fail"), strings.HasPrefix(cause, "agent.done"):

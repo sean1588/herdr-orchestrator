@@ -456,11 +456,11 @@ func TestHerdrVersion(t *testing.T) {
 		wantFix    string
 	}{
 		{"below the range fails", "herdr 0.7.9", StatusFail, "older than the oldest version this build was tested with (0.8.2)", "herdr update"},
-		{"the tested min passes", "herdr 0.8.2", StatusPass, "within the tested range 0.8.2–0.9.1", ""},
-		{"the tested max passes", "herdr 0.9.1", StatusPass, "within the tested range", ""},
-		{"above the range warns", "herdr 0.9.2", StatusWarn, "newer than the last version this build was tested with (0.9.1)", "full doctor"},
+		{"the tested min passes", "herdr 0.8.2", StatusPass, "within the tested range 0.8.2–0.9.3", ""},
+		{"the tested max passes", "herdr 0.9.3", StatusPass, "within the tested range", ""},
+		{"above the range warns", "herdr 0.9.4", StatusWarn, "newer than the last version this build was tested with (0.9.3)", "full doctor"},
 		{"compared as integers, not strings", "herdr 0.10.0", StatusWarn, "herdr 0.10.0 is newer", "full doctor"},
-		{"unparseable warns and names the line", "herdr dev", StatusWarn, `cannot parse herdr version from "herdr dev"`, "0.8.2–0.9.1"},
+		{"unparseable warns and names the line", "herdr dev", StatusWarn, `cannot parse herdr version from "herdr dev"`, "0.8.2–0.9.3"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

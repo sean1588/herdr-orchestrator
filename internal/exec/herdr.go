@@ -44,24 +44,15 @@ type Herdr struct {
 	HerdrBin     string // default "herdr"
 	WorktreesDir string // parent dir for worktrees; "" => <repo>/.orchestrator/worktrees
 	RepoDir      string // main checkout; lets Cleanup resolve a task's worktree path without a live pane
-	// ReadyMatch is the readiness marker awaited before the kickoff, as a regex
-	// against pane output. Claude Code's prompt has rendered both ">" and "❯"
-	// across builds, so the default matches either; a literal ">" silently never
-	// matched on v2.1.236 and the kickoff raced the TUI's startup.
-	ReadyMatch   string
-	ReadyTimeout time.Duration // bound on the readiness wait; default 20s
+	// ReadyTimeout bounds each half of readiness: herdr detecting an agent on the
+	// launched pane, then that agent reaching a state that takes input; default 20s.
+	ReadyTimeout time.Duration
 	WaitTimeout  time.Duration // WaitState bound when ctx has no sooner deadline; default 45m
-	PollInterval time.Duration // Events poll cadence; default 2s
-	// SubmitDelay is how long to wait after typing the kickoff before sending the
-	// submitting Enter. Claude Code's Ink TUI swallows a too-early Enter, so the
-	// text + Enter must be separated; default 1s (0 in tests).
-	SubmitDelay time.Duration
+	PollInterval time.Duration // Events and agent-detection poll cadence; default 2s
 
-	// KickoffAckTimeout bounds how long Spawn waits for evidence that a delivered
-	// kickoff was actually accepted before trying the other delivery method;
-	// default 25s. KickoffAckPoll is that wait's polling cadence; default 1s.
+	// KickoffAckTimeout is the --timeout handed to `herdr agent prompt`: how long a
+	// delivered kickoff has to show the agent working (or blocked); default 25s.
 	KickoffAckTimeout time.Duration
-	KickoffAckPoll    time.Duration
 
 	// hub multiplexes one pane-list poller across all Events subscribers, reading
 	// PollInterval at poller start so a test-set interval still applies.
@@ -76,14 +67,11 @@ func NewHerdr(r proc.Runner) *Herdr {
 		r:            r,
 		GitBin:       "git",
 		HerdrBin:     "herdr",
-		ReadyMatch:   "[>❯]",
 		ReadyTimeout: 20 * time.Second,
 		WaitTimeout:  45 * time.Minute,
 		PollInterval: defaultEventPollInterval,
-		SubmitDelay:  1 * time.Second,
 
 		KickoffAckTimeout: 25 * time.Second,
-		KickoffAckPoll:    1 * time.Second,
 	}
 	h.hub = newEventHub(h.listPanes, func() time.Duration { return h.PollInterval })
 	return h
@@ -128,18 +116,7 @@ func (h *Herdr) Spawn(ctx context.Context, s Spawn) (Handle, error) {
 		return Handle{}, err
 	}
 	hd := Handle{PaneID: pane, Workdir: wt}
-
-	// Launch the agent process verbatim. We never inject --dangerously-skip-permissions
-	// (Claude Code refuses it as root; honor run_as: non_root).
-	if _, err := h.r.Run(ctx, "", h.HerdrBin, "pane", "run", pane, strings.Join(s.Launch, " ")); err != nil {
-		return hd, fmt.Errorf("launch agent on %s: %w", pane, err)
-	}
-
-	// Readiness: wait for the prompt before sending the kickoff, instead of a
-	// fixed sleep (Spike 0). A timeout here is non-fatal — proceed to the kickoff.
-	_, _ = h.r.Run(ctx, "", h.HerdrBin, "pane", "wait-output", pane, "--regex", h.ReadyMatch, "--timeout", msString(h.ReadyTimeout))
-
-	if err := h.deliverKickoff(ctx, pane, s.Kickoff); err != nil {
+	if err := h.launchAndKickoff(ctx, pane, s.Launch, s.Kickoff); err != nil {
 		return hd, err
 	}
 	return hd, nil
@@ -150,11 +127,11 @@ func (h *Herdr) Spawn(ctx context.Context, s Spawn) (Handle, error) {
 // through the SAME verified path Spawn uses, and tears the workspace down.
 //
 // It exists because kickoff delivery has broken twice from underneath us — once
-// when herdr's CLI changed, once when Claude Code stopped accepting send-text —
-// and both times the failure was discovered by a task escalating with zero work
-// done. Exercising the real delivery code (rather than a reimplementation of it)
-// is the whole point: a smoke test that takes its own path would keep passing
-// through exactly the regressions this is meant to catch.
+// when herdr's CLI changed, once when a Claude Code build stopped accepting
+// typed text — and both times the failure was discovered by a task escalating
+// with zero work done. Exercising the real delivery code (rather than a
+// reimplementation of it) is the whole point: a smoke test that takes its own
+// path would keep passing through exactly the regressions this is meant to catch.
 //
 // The workspace is closed on every exit path, including a failed launch.
 func (h *Herdr) SmokeKickoff(ctx context.Context, dir string, launch []string, kickoff string) error {
@@ -177,115 +154,127 @@ func (h *Herdr) SmokeKickoff(ctx context.Context, dir string, launch []string, k
 		}
 	}()
 
-	if _, err := h.r.Run(ctx, "", h.HerdrBin, "pane", "run", pane, strings.Join(launch, " ")); err != nil {
-		return fmt.Errorf("launch %q on %s: %w", strings.Join(launch, " "), pane, err)
+	return h.launchAndKickoff(ctx, pane, launch, kickoff)
+}
+
+// launchAndKickoff is the one launch -> readiness -> delivery path, shared by
+// Spawn and SmokeKickoff so the smoke test exercises exactly what a task does.
+//
+// Readiness and delivery both go through herdr's own agent detection rather
+// than anything this package knows about a particular agent's TUI: herdr
+// recognizes the agent kind, reports when it is ready for input, and confirms a
+// submitted prompt took. The launch argv is run verbatim; we never inject
+// --dangerously-skip-permissions (Claude Code refuses it as root; honor
+// run_as: non_root).
+func (h *Herdr) launchAndKickoff(ctx context.Context, pane string, launch []string, kickoff string) error {
+	argv := strings.Join(launch, " ")
+	if _, err := h.r.Run(ctx, "", h.HerdrBin, "pane", "run", pane, argv); err != nil {
+		return fmt.Errorf("launch %q on %s: %w", argv, pane, err)
 	}
-	_, _ = h.r.Run(ctx, "", h.HerdrBin, "pane", "wait-output", pane, "--regex", h.ReadyMatch, "--timeout", msString(h.ReadyTimeout))
+	if err := h.awaitAgent(ctx, pane, argv); err != nil {
+		return err
+	}
 	return h.deliverKickoff(ctx, pane, kickoff)
 }
 
-// deliverKickoff gets the single-line kickoff into the agent's prompt and proves
-// it was accepted.
+// awaitAgent waits for herdr to detect an agent on pane, then for that agent to
+// be ready for input (idle, or blocked on a dialog the delivery step will name).
 //
-// Neither delivery method is reliable on its own, and both have failed in
-// production against different Claude Code builds:
-//
-//   - `pane run` (text + Enter in one call) raced Claude Code's Ink renderer,
-//     which swallowed the Enter and left the kickoff sitting unsent.
-//   - `pane send-text` + a separate `pane send-keys Enter` fixed that, then
-//     stopped landing entirely on Claude Code v2.1.236: the text never reached
-//     the prompt box at all.
-//
-// A dropped kickoff used to be silent — the agent sat at an empty prompt, herdr
-// reported it blocked, and the task burned its whole blocked_timeout before
-// escalating with nothing to show. So delivery is now *verified*: send, then
-// watch the agent's status leave its pre-kickoff state. An agent that received
-// its instruction starts working; one that didn't stays put. If the first method
-// doesn't take, try the other before giving up, and if neither does, fail the
-// spawn loudly rather than handing the engine a mute agent.
-func (h *Herdr) deliverKickoff(ctx context.Context, pane, kickoff string) error {
-	before := h.currentStatus(ctx, pane)
-
-	twoStep := func() error {
-		if _, err := h.r.Run(ctx, "", h.HerdrBin, "pane", "send-text", pane, kickoff); err != nil {
-			return fmt.Errorf("send kickoff text on %s: %w", pane, err)
-		}
-		if h.SubmitDelay > 0 {
-			time.Sleep(h.SubmitDelay)
-		}
-		if _, err := h.r.Run(ctx, "", h.HerdrBin, "pane", "send-keys", pane, "Enter"); err != nil {
-			return fmt.Errorf("submit kickoff on %s: %w", pane, err)
-		}
-		return nil
-	}
-	oneShot := func() error {
-		if _, err := h.r.Run(ctx, "", h.HerdrBin, "pane", "run", pane, kickoff); err != nil {
-			return fmt.Errorf("run kickoff on %s: %w", pane, err)
-		}
-		return nil
-	}
-
-	// Verification off (KickoffAckTimeout <= 0): deliver once and trust it. Used
-	// by tests, which drive a fake runner that models no pane status.
-	if h.KickoffAckTimeout <= 0 {
-		return twoStep()
-	}
-
-	var lastErr error
-	for i, send := range []func() error{twoStep, oneShot} {
-		if err := send(); err != nil {
-			lastErr = err
-			continue // the other method may still get through
-		}
-		if h.kickoffAccepted(ctx, pane, before) {
-			return nil
-		}
-		lastErr = fmt.Errorf("kickoff not accepted on %s (agent still %s after delivery attempt %d)", pane, before, i+1)
-	}
-	return fmt.Errorf("deliver kickoff on %s: %w", pane, lastErr)
-}
-
-// kickoffAccepted polls the agent's status for evidence the kickoff landed: an
-// agent that read its instruction moves off whatever it was doing before (a
-// freshly-launched one sits idle or blocked at an empty prompt and starts
-// working). Bounded by KickoffAckTimeout; a false here means "no evidence", not
-// "definitely dropped", which is why the caller tries the other method rather
-// than escalating on the first miss.
-func (h *Herdr) kickoffAccepted(ctx context.Context, pane string, before AgentState) bool {
-	deadline := time.Now().Add(h.KickoffAckTimeout)
-	for {
-		switch st := h.currentStatus(ctx, pane); st {
-		case before, StateUnknown, StateIdle:
-			// No movement yet; an unknown reading proves nothing either way. This
-			// arm comes first so a reading equal to the baseline never counts: a
-			// live agent parked after a turn reads "done" before the message too.
-			// Idle is never proof either: a delivered instruction makes the agent
-			// work, and herdr reads text left unsent in the prompt box as idle —
-			// so done -> idle is exactly what a swallowed Enter looks like, and
-			// unknown -> idle is a fresh pane settling with no kickoff.
-		case StateWorking, StateDone:
-			return true
-		default:
-			// A change off an UNKNOWN baseline is herdr's classifier settling on
-			// its first real status for a fresh pane, not evidence the kickoff
-			// landed. Adopt it as the baseline and keep waiting for movement.
-			if before == StateUnknown {
-				before = st
-				continue
-			}
-			// Off a KNOWN baseline, any other change (e.g. idle -> blocked on a
-			// permission prompt) still proves the agent read something.
-			return true
-		}
+// A pane herdr never recognizes is a spawn error: whatever launch started is not
+// an agent herdr can drive, and no kickoff would reach it. The readiness wait
+// that follows is not fatal on timeout — the prompt is the authoritative check,
+// and it fails with the reason when the agent cannot take input.
+func (h *Herdr) awaitAgent(ctx context.Context, pane, argv string) error {
+	deadline := time.Now().Add(h.ReadyTimeout)
+	for !h.agentDetected(ctx, pane) {
 		if !time.Now().Before(deadline) {
-			return false
+			return fmt.Errorf("no agent detected on %s within %s of launching %q", pane, h.ReadyTimeout, argv)
 		}
 		select {
 		case <-ctx.Done():
-			return false
-		case <-time.After(h.KickoffAckPoll):
+			return fmt.Errorf("await agent on %s: %w", pane, ctx.Err())
+		case <-time.After(h.PollInterval):
 		}
 	}
+	_, _ = h.r.Run(ctx, "", h.HerdrBin, "agent", "wait", pane, "--until", "idle", "--until", "blocked", "--timeout", msString(h.ReadyTimeout))
+	return nil
+}
+
+// deliverKickoff submits text to the agent on pane and returns nil once herdr
+// has seen it take: the agent started working, or went blocked right after the
+// submission (the engine's blocked handling takes it from there).
+//
+// herdr answers with a JSON error code when it did not take. agent_prompt_stalled
+// (nothing moved within herdr's stall window) is retried once; agent_blocked (a
+// dialog is up, so herdr refused to type into it) is not. Either way the error
+// carries the detection rule herdr matched, so an escalation says what the agent
+// is stuck on (e.g. trust_directory) instead of a bare "not accepted".
+func (h *Herdr) deliverKickoff(ctx context.Context, pane, text string) error {
+	prompt := func() (string, error) {
+		_, err := h.r.Run(ctx, "", h.HerdrBin, "agent", "prompt", pane, text, "--wait", "--until", "working", "--until", "blocked", "--timeout", msString(h.KickoffAckTimeout))
+		return herdrErrorCode(err), err
+	}
+	code, err := prompt()
+	if code == "agent_prompt_stalled" {
+		code, err = prompt()
+	}
+	switch {
+	case err == nil:
+		return nil
+	case code == "agent_blocked":
+		return fmt.Errorf("agent blocked before kickoff on %s: %s", pane, h.detectionRule(ctx, pane))
+	case code == "agent_prompt_stalled":
+		return fmt.Errorf("kickoff stalled twice on %s: %s", pane, h.detectionRule(ctx, pane))
+	default:
+		return fmt.Errorf("deliver kickoff on %s: %w", pane, err)
+	}
+}
+
+// detectionRule names the rule herdr's agent detection matched on pane (e.g.
+// trust_directory for a folder-trust dialog), for an error message. It never
+// fails: an explain that errors or names no rule reads as "detection rule unknown".
+func (h *Herdr) detectionRule(ctx context.Context, pane string) string {
+	const unknown = "detection rule unknown"
+	out, err := h.r.Run(ctx, "", h.HerdrBin, "agent", "explain", pane, "--json")
+	if err != nil {
+		return unknown
+	}
+	var resp struct {
+		MatchedRule struct {
+			ID string `json:"id"`
+		} `json:"matched_rule"`
+	}
+	if json.Unmarshal(out, &resp) != nil || resp.MatchedRule.ID == "" {
+		return unknown
+	}
+	return resp.MatchedRule.ID
+}
+
+// herdrErrorCode extracts error.code from a failed herdr command. herdr writes
+// its {"error":{"code":...}} envelope to stderr and exits non-zero, and
+// proc.Runner carries stderr in the error text, so the envelope is decoded from
+// there. The text before stderr is the argv, which can hold operator free text
+// (a message), so the search is for the last envelope: proc.Runner always
+// appends stderr last. Returns "" for a nil error or one that carries no
+// envelope.
+func herdrErrorCode(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	i := strings.LastIndex(msg, `{"error"`)
+	if i < 0 {
+		return ""
+	}
+	var resp struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if json.NewDecoder(strings.NewReader(msg[i:])).Decode(&resp) != nil {
+		return ""
+	}
+	return resp.Error.Code
 }
 
 // addWorktree creates the isolated worktree for a spawn. A fresh task branches
@@ -338,9 +327,8 @@ func (h *Herdr) WaitState(ctx context.Context, hd Handle, target AgentState) (Ag
 	return target, nil
 }
 
-// Message delivers text to a live agent through the same verified path as the
-// spawn kickoff. A running agent's prompt is the same prompt a fresh one sits
-// at, so the same two methods and the same "status must move" proof apply.
+// Message delivers text to a live agent through the same path as the spawn
+// kickoff: nil means herdr saw the agent take it, an error means it did not.
 func (h *Herdr) Message(ctx context.Context, hd Handle, text string) error {
 	return h.deliverKickoff(ctx, hd.PaneID, text)
 }
@@ -521,6 +509,22 @@ func (h *Herdr) currentStatus(ctx context.Context, paneID string) AgentState {
 		}
 	}
 	return StateUnknown
+}
+
+// agentDetected reports whether herdr has recognized an agent on paneID: its
+// pane list entry carries a non-empty agent kind. A failed list reads as "not
+// yet", so the caller's deadline decides.
+func (h *Herdr) agentDetected(ctx context.Context, paneID string) bool {
+	panes, err := h.listPanes(ctx)
+	if err != nil {
+		return false
+	}
+	for _, p := range panes {
+		if p.PaneID == paneID {
+			return p.Agent != ""
+		}
+	}
+	return false
 }
 
 func parseRootPaneID(out []byte) (string, error) {

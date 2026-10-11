@@ -5,22 +5,21 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sean1588/herdr-orchestrator/internal/proc"
 )
 
-// smokeFake scripts the herdr calls SmokeKickoff makes.
-func smokeFake() *proc.Fake {
+// smokeFake scripts the herdr calls SmokeKickoff makes: the scratch workspace
+// exists under the doctor label, and the rest behaves as script describes.
+func smokeFake(script herdrScript) *proc.Fake {
+	script.pane = "wS:p1"
+	base := script.responder()
 	return &proc.Fake{Responder: func(c proc.Call) ([]byte, error) {
-		if len(c.Args) >= 2 && c.Args[0] == "workspace" {
-			switch c.Args[1] {
-			case "create":
-				return []byte(`{"result":{"root_pane":{"pane_id":"wS:p1"}}}`), nil
-			case "list":
-				return []byte(`{"result":{"workspaces":[{"workspace_id":"wS","label":"orchestratord-doctor"}]}}`), nil
-			}
+		if len(c.Args) >= 2 && c.Args[0] == "workspace" && c.Args[1] == "list" {
+			return []byte(`{"result":{"workspaces":[{"workspace_id":"wS","label":"orchestratord-doctor"}]}}`), nil
 		}
-		return nil, nil
+		return base(c)
 	}}
 }
 
@@ -42,57 +41,67 @@ func hasCallWith(calls []proc.Call, substr string) bool {
 }
 
 // The smoke test must launch the agent and deliver a kickoff through the same
-// path a real spawn uses, then close the scratch workspace.
+// readiness and delivery path a real spawn uses, then close the scratch workspace.
 func TestSmokeKickoff_LaunchesDeliversAndTearsDown(t *testing.T) {
-	f := smokeFake()
-	h := NewHerdr(f)
-	h.SubmitDelay = 0
-	h.KickoffAckTimeout = 0 // verification off: the fake models no pane status
+	f := smokeFake(herdrScript{})
 
-	if err := h.SmokeKickoff(context.Background(), "/scratch", []string{"claude", "--flag"}, "say OK"); err != nil {
+	if err := testHerdr(f).SmokeKickoff(context.Background(), "/scratch", []string{"claude", "--flag"}, "say OK"); err != nil {
 		t.Fatalf("SmokeKickoff: %v", err)
 	}
 	calls := f.Snapshot()
 
-	if !hasCallWith(calls, "workspace create --cwd /scratch --label orchestratord-doctor") {
-		t.Errorf("no scratch workspace created:\n%s", strings.Join(argvOf(calls), "\n"))
-	}
-	if !hasCallWith(calls, "pane run wS:p1 claude --flag") {
-		t.Errorf("agent argv not launched verbatim:\n%s", strings.Join(argvOf(calls), "\n"))
-	}
-	if !hasCallWith(calls, "say OK") {
-		t.Errorf("kickoff never delivered:\n%s", strings.Join(argvOf(calls), "\n"))
-	}
-	if !hasCallWith(calls, "workspace close wS") {
-		t.Errorf("scratch workspace not closed:\n%s", strings.Join(argvOf(calls), "\n"))
+	for _, want := range []string{
+		"workspace create --cwd /scratch --label orchestratord-doctor",
+		"pane run wS:p1 claude --flag",
+		"agent wait wS:p1 --until idle --until blocked",
+		"agent prompt wS:p1 say OK --wait --until working --until blocked",
+		"workspace close wS",
+	} {
+		if !hasCallWith(calls, want) {
+			t.Errorf("no call with %q:\n%s", want, strings.Join(argvOf(calls), "\n"))
+		}
 	}
 }
 
 // A workspace left behind would collide with the next run's label and break
-// resolve-by-label, so teardown must happen even when the launch fails.
-func TestSmokeKickoff_TearsDownAfterAFailedLaunch(t *testing.T) {
-	f := smokeFake()
-	inner := f.Responder
-	f.Responder = func(c proc.Call) ([]byte, error) {
-		if len(c.Args) >= 2 && c.Args[0] == "pane" && c.Args[1] == "run" {
-			return nil, errors.New("launch failed")
-		}
-		return inner(c)
+// resolve-by-label, so teardown must happen on every failure, not just success.
+func TestSmokeKickoff_TearsDownOnEveryFailure(t *testing.T) {
+	cases := []struct {
+		name    string
+		script  herdrScript
+		failRun bool
+	}{
+		{name: "launch fails", failRun: true},
+		{name: "agent never detected", script: herdrScript{undetected: -1}},
+		{name: "agent blocked at kickoff", script: herdrScript{prompts: []string{"agent_blocked"}}},
 	}
-	h := NewHerdr(f)
-	h.SubmitDelay = 0
-	h.KickoffAckTimeout = 0
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := smokeFake(tc.script)
+			if tc.failRun {
+				inner := f.Responder
+				f.Responder = func(c proc.Call) ([]byte, error) {
+					if len(c.Args) >= 2 && c.Args[0] == "pane" && c.Args[1] == "run" {
+						return nil, errors.New("launch failed")
+					}
+					return inner(c)
+				}
+			}
+			h := testHerdr(f)
+			h.ReadyTimeout = 20 * time.Millisecond
 
-	if err := h.SmokeKickoff(context.Background(), "/scratch", []string{"claude"}, "say OK"); err == nil {
-		t.Fatal("expected a failed launch to be reported")
-	}
-	if !hasCallWith(f.Snapshot(), "workspace close wS") {
-		t.Errorf("scratch workspace leaked after a failed launch:\n%s", strings.Join(argvOf(f.Snapshot()), "\n"))
+			if err := h.SmokeKickoff(context.Background(), "/scratch", []string{"claude"}, "say OK"); err == nil {
+				t.Fatal("expected the failure to be reported")
+			}
+			if !hasCallWith(f.Snapshot(), "workspace close wS") {
+				t.Errorf("scratch workspace leaked:\n%s", strings.Join(argvOf(f.Snapshot()), "\n"))
+			}
+		})
 	}
 }
 
 func TestSmokeKickoff_RejectsAnEmptyLaunch(t *testing.T) {
-	h := NewHerdr(smokeFake())
+	h := NewHerdr(smokeFake(herdrScript{}))
 	if err := h.SmokeKickoff(context.Background(), "/scratch", nil, "say OK"); err == nil {
 		t.Fatal("expected an error for an empty launch argv")
 	}

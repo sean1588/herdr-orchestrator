@@ -17,7 +17,7 @@ Code or `curl`.
 ## Get started
 
 You need three things installed: [herdr](https://herdr.dev)
-(`curl -fsSL https://herdr.dev/install.sh | sh`; herdr 0.8.2–0.9.1 tested, and
+(`curl -fsSL https://herdr.dev/install.sh | sh`; herdr 0.8.2–0.9.3 tested, and
 `doctor` warns on a newer one), the [GitHub CLI](https://cli.github.com)
 logged in, and a coding agent CLI herdr can drive: Claude Code, Codex CLI, or
 Grok CLI ([Which agent](#which-agent)). Everything else is set up for you.
@@ -61,7 +61,7 @@ Each role runs its `roles.*.launch` argv verbatim. For unattended runs:
 | Grok CLI | `["grok", "--always-approve"]` | `~/.grok/trusted_folders.toml`; no prompt was observed |
 
 End-to-end runs, issue to merged PR, have been dogfooded with Claude Code only.
-Codex and Grok were verified on herdr 0.9.1 through launch, detection, and
+Codex and Grok were verified on herdr 0.9.3 through launch, detection, and
 prompt acceptance. Claude Code is the default; name another agent to `/start`
 (for example `/start owner/repo with codex`) and setup writes its line into
 every role.

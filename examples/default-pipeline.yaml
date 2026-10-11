@@ -55,6 +55,11 @@ sources:
       label: agent-ready # EDIT (optional): only issues with this label are picked up
     emits_to: intake
 
+# `launch` is the agent's argv, run verbatim. The lines for unattended runs:
+#   Claude Code: launch: ["claude"]
+#   Codex CLI:   launch: ["codex", "-a", "never", "--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true"]
+#   Grok CLI:    launch: ["grok", "--always-approve"]
+# Each agent must already trust the repo checkout; see README.md "Which agent".
 roles:
   triager:
     launch: ["claude"]

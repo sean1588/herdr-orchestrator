@@ -74,13 +74,25 @@ never reaches `git push`.
 
 ## 3. The agent CLI
 
+The agent is Claude Code unless the user named another one in the `/start`
+arguments or the conversation. Only the three below are verified; their launch
+lines are the table in `<clone>/README.md` under "Which agent":
+
+| Agent | `<bin>` | `launch` |
+|---|---|---|
+| Claude Code | `claude` | `["claude"]` |
+| Codex CLI | `codex` | `["codex", "-a", "never", "--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true"]` |
+| Grok CLI | `grok` | `["grok", "--always-approve"]` |
+
+Check that agent only:
+
 ```bash
-which claude && claude --version
+which <bin> && <bin> --version
 ```
 
-The shipped workflow launches `claude`. If it is missing, install Claude Code
-(https://claude.com/claude-code) and re-check. (A different agent CLI works too;
-change `roles.*.launch` in the config in step 6 and use its name here.)
+If it is missing, tell the user and point them at the agent's install page;
+re-check once they have it. Carry `<bin>` and its `launch` line into steps 5
+and 6.
 
 ## 4. orchestratord
 
@@ -129,13 +141,21 @@ gh repo view <owner>/<name> --json name,defaultBranchRef --jq '.defaultBranchRef
   <clone-parent>/<name>`. Call it `<repo-dir>`, absolute.
 
 Trust: the agents run inside `<repo-dir>/.orchestrator/worktrees`, so whatever
-trust the user granted the checkout covers them. **If you cloned or created
-`<repo-dir>` in this step, the user has never opened `claude` there, and every
-agent would hit Claude Code's folder-trust prompt.** Handle it now, not when
-`doctor` fails on it: tell the user "Open a terminal in `<repo-dir>`, run
-`claude`, accept the trust prompt, then `/exit`, and tell me when that's done."
-Wait for them, then continue. (Nothing can accept that prompt for them; it is
-the one dialog Claude Code reserves for the human.)
+trust the user granted the checkout covers them, one answer per repo. **If you
+cloned or created `<repo-dir>` in this step, the user has never opened the
+agent there, and every spawn would hit its folder-trust prompt.** Handle it
+now, not when `doctor` fails on it. The rule is the same for every agent: tell
+the user "Open `<bin>` once in `<repo-dir>`, accept its trust prompt if it shows
+one, then exit, and tell me when that is done." Wait for them, then continue.
+
+Where each agent records the answer, if the user would rather edit the file
+than open the agent:
+
+- Claude Code: `~/.claude.json`. Nothing can accept Claude Code's prompt for
+  the user; it is the one dialog it reserves for the human.
+- Codex CLI: `[projects."<repo-dir>"]` with `trust_level = "trusted"` in
+  `~/.codex/config.toml`.
+- Grok CLI: `~/.grok/trusted_folders.toml`. Grok showed no trust prompt.
 
 ## 6. The run directory
 
@@ -147,7 +167,9 @@ gh label list -R <owner>/<name> --json name --jq '.[].name' | grep -qx agent-rea
 orchestratord validate ~/orchestrator-runs/<name>/pipeline.yaml
 ```
 
-`init` writes `pipeline.yaml` and `prompts/`. Edit nothing else yet.
+`init` writes `pipeline.yaml` and `prompts/`. If the agent from step 3 is not
+Claude Code, set every `roles.*.launch` in `pipeline.yaml` to its `launch` line
+and re-run `validate`. Edit nothing else yet.
 
 ## 7. The auto-merge question
 
@@ -177,11 +199,11 @@ orchestratord doctor --config ~/orchestrator-runs/<name>/pipeline.yaml \
 
 Every failing line comes with its fix. Apply fixes you can (create a dir, a
 label, re-sign a binary); hand the user the ones you cannot (a login, a
-folder-trust dialog: "open `claude` once in `<repo-dir>` and accept, then tell
-me"). Re-run until it reports `0 failed`. The last check launches a real agent
+folder-trust dialog: the trust step in 5). Re-run until it reports `0 failed`. The last check launches a real agent
 once to prove kickoff delivery; that is the point, let it.
 
-**Unattended permissions.** Spawned agents run without
+**Unattended permissions (Claude Code).** Codex and Grok take theirs from the
+flags in their launch line; skip this for them. Spawned Claude agents run without
 `--dangerously-skip-permissions`. If `~/.claude/settings.json` has no
 `permissions.allow` list covering `Bash, Edit, Write, Read, Glob, Grep,
 TodoWrite, BashOutput, KillShell, Task`, tell the user that without it agents

@@ -3,6 +3,7 @@ package examples
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -72,5 +73,58 @@ func TestEmbeddedExampleDefaultGateOmitsApprovals(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// The launch line each verified agent runs under, as README.md "Which agent"
+// and the comment above roles: in default-pipeline.yaml give it.
+func TestEmbeddedExampleValidatesWithEachAgentLaunch(t *testing.T) {
+	data, err := FS.ReadFile("default-pipeline.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const shipped = `launch: ["claude"]`
+	tests := []struct {
+		agent  string
+		launch string
+		want   []string
+	}{
+		{"claude", `["claude"]`, []string{"claude"}},
+		{"codex", `["codex", "-a", "never", "--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true"]`,
+			[]string{"codex", "-a", "never", "--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true"}},
+		{"grok", `["grok", "--always-approve"]`, []string{"grok", "--always-approve"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.agent, func(t *testing.T) {
+			line := "launch: " + tt.launch
+			documented := false
+			for _, l := range strings.Split(string(data), "\n") {
+				l = strings.TrimSpace(l)
+				documented = documented || (strings.HasPrefix(l, "#") && strings.HasSuffix(l, line))
+			}
+			if !documented {
+				t.Fatalf("default-pipeline.yaml has no comment carrying %q", line)
+			}
+			path := writeFS(t, t.TempDir())
+			substituted := strings.ReplaceAll(string(data), shipped, line)
+			if err := os.WriteFile(path, []byte(substituted), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			wf, _, err := config.Load(path)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if errs := engine.CheckExecutable(wf); len(errs) > 0 {
+				t.Fatalf("CheckExecutable: %v", errs)
+			}
+			if len(wf.Roles) == 0 {
+				t.Fatal("no roles")
+			}
+			for name, role := range wf.Roles {
+				if !slices.Equal(role.Launch, tt.want) {
+					t.Errorf("role %s launch = %q, want %q", name, role.Launch, tt.want)
+				}
+			}
+		})
 	}
 }

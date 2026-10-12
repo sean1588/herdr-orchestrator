@@ -50,9 +50,13 @@ type Herdr struct {
 	WaitTimeout  time.Duration // WaitState bound when ctx has no sooner deadline; default 45m
 	PollInterval time.Duration // Events and agent-detection poll cadence; default 2s
 
-	// KickoffAckTimeout is the --timeout handed to `herdr agent prompt`: how long a
-	// delivered kickoff has to show the agent working (or blocked); default 25s.
+	// KickoffAckTimeout bounds kickoff delivery, every `herdr agent prompt` retry
+	// included: how long a kickoff has to show the agent working (or blocked);
+	// default 25s.
 	KickoffAckTimeout time.Duration
+	// KickoffRetryDelay is the pause before re-sending a kickoff herdr reported
+	// stalled; default 3s.
+	KickoffRetryDelay time.Duration
 
 	// hub multiplexes one pane-list poller across all Events subscribers, reading
 	// PollInterval at poller start so a test-set interval still applies.
@@ -72,6 +76,7 @@ func NewHerdr(r proc.Runner) *Herdr {
 		PollInterval: defaultEventPollInterval,
 
 		KickoffAckTimeout: 25 * time.Second,
+		KickoffRetryDelay: 3 * time.Second,
 	}
 	h.hub = newEventHub(h.listPanes, func() time.Duration { return h.PollInterval })
 	return h
@@ -205,28 +210,39 @@ func (h *Herdr) awaitAgent(ctx context.Context, pane, argv string) error {
 // submission (the engine's blocked handling takes it from there).
 //
 // herdr answers with a JSON error code when it did not take. agent_prompt_stalled
-// (nothing moved within herdr's stall window) is retried once; agent_blocked (a
-// dialog is up, so herdr refused to type into it) is not. Either way the error
-// carries the detection rule herdr matched, so an escalation says what the agent
-// is stuck on (e.g. trust_directory) instead of a bare "not accepted".
+// (nothing moved within herdr's stall window) is retried every KickoffRetryDelay
+// until KickoffAckTimeout, measured from the first attempt, runs out; each
+// attempt's --timeout is the time left, so the loop cannot overrun it. The retry
+// covers agents whose input box renders well after herdr calls them idle (grok
+// 1.0.50 draws it ~11s later), where typed text is simply lost. The hazard it
+// accepts: an agent that took the text but needed more than herdr's stall window
+// to show working receives it twice. agent_blocked (a dialog is up, so herdr
+// refused to type into it) is not retried. Either way the error carries the
+// detection rule herdr matched, so an escalation says what the agent is stuck on
+// (e.g. trust_directory) instead of a bare "not accepted".
 func (h *Herdr) deliverKickoff(ctx context.Context, pane, text string) error {
-	prompt := func() (string, error) {
-		_, err := h.r.Run(ctx, "", h.HerdrBin, "agent", "prompt", pane, text, "--wait", "--until", "working", "--until", "blocked", "--timeout", msString(h.KickoffAckTimeout))
-		return herdrErrorCode(err), err
-	}
-	code, err := prompt()
-	if code == "agent_prompt_stalled" {
-		code, err = prompt()
-	}
-	switch {
-	case err == nil:
-		return nil
-	case code == "agent_blocked":
-		return fmt.Errorf("agent blocked before kickoff on %s: %s", pane, h.detectionRule(ctx, pane))
-	case code == "agent_prompt_stalled":
-		return fmt.Errorf("kickoff stalled twice on %s: %s", pane, h.detectionRule(ctx, pane))
-	default:
-		return fmt.Errorf("deliver kickoff on %s: %w", pane, err)
+	deadline := time.Now().Add(h.KickoffAckTimeout)
+	left := h.KickoffAckTimeout
+	for attempt := 1; ; attempt++ {
+		_, err := h.r.Run(ctx, "", h.HerdrBin, "agent", "prompt", pane, text, "--wait", "--until", "working", "--until", "blocked", "--timeout", msString(left))
+		switch code := herdrErrorCode(err); {
+		case err == nil:
+			return nil
+		case code == "agent_blocked":
+			return fmt.Errorf("agent blocked before kickoff on %s: %s", pane, h.detectionRule(ctx, pane))
+		case code != "agent_prompt_stalled":
+			return fmt.Errorf("deliver kickoff on %s: %w", pane, err)
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("deliver kickoff on %s: %w", pane, ctx.Err())
+		case <-time.After(h.KickoffRetryDelay):
+		}
+		// Whole milliseconds, as --timeout takes them: a sub-millisecond remainder
+		// would go out as "0", which is not a bound.
+		if left = time.Until(deadline).Truncate(time.Millisecond); left <= 0 {
+			return fmt.Errorf("kickoff stalled %d times on %s within %s: %s", attempt, pane, h.KickoffAckTimeout, h.detectionRule(ctx, pane))
+		}
 	}
 }
 

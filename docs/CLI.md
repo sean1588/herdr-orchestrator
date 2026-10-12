@@ -187,3 +187,5 @@ Smoke-test the endpoint with `curl`:
 curl -s 127.0.0.1:7777/mcp -d \
   '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_tasks","arguments":{}}}'
 ```
+
+Whenever `--mcp-listen` is set, the same listener serves a read-only task dashboard at `http://<mcp-listen>/ui/`. The page polls `list_tasks` and opens a row into that task's `get_audit` history. It does not cancel, enqueue, or message.

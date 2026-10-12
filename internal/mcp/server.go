@@ -17,7 +17,8 @@ const maxBody = 1 << 20 // 1 MiB
 // Server is the loopback MCP HTTP server. Serve runs the accept loop and returns
 // when its context is cancelled (graceful Shutdown); it never blocks the daemon.
 type Server struct {
-	h *handler
+	h  *handler
+	ui http.Handler
 }
 
 // New builds a Server. reader is the read surface (*store.Store), ctrl the
@@ -47,17 +48,35 @@ func (s *Server) WithMessaging(m Messenger, a Auditor, settled map[string]bool) 
 	return s
 }
 
+// WithUI mounts a read-only dashboard at /ui and /ui/ on the listener Serve
+// runs. Optional and chainable: call it before Serve. A nil handler mounts
+// nothing, so GET /ui/ falls through to the MCP handler and stays 405.
+func (s *Server) WithUI(h http.Handler) *Server {
+	s.ui = h
+	return s
+}
+
+// mux is the handler Serve runs. The dashboard is registered before the MCP
+// routes; a nil UI leaves /mcp and / as the only routes.
+func (s *Server) mux() *http.ServeMux {
+	mux := http.NewServeMux()
+	if s.ui != nil {
+		mux.Handle("/ui", s.ui)
+		mux.Handle("/ui/", s.ui)
+	}
+	mux.HandleFunc("/mcp", s.handleHTTP)
+	mux.HandleFunc("/", s.handleHTTP)
+	return mux
+}
+
 // Serve runs the HTTP server on ln until ctx is cancelled, then shuts it down
 // gracefully. It returns a non-nil error only on an unexpected serve failure.
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/mcp", s.handleHTTP)
-	mux.HandleFunc("/", s.handleHTTP)
 	// Derive request contexts from the daemon ctx so a shutdown cancels in-flight
 	// handlers — otherwise a handler blocked submitting a scheduler command (its
 	// only escape watches the request ctx) would wedge until the client hangs up.
 	srv := &http.Server{
-		Handler:     mux,
+		Handler:     s.mux(),
 		BaseContext: func(net.Listener) context.Context { return ctx },
 	}
 

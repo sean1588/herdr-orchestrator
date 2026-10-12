@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -516,10 +518,11 @@ func (s herdrScript) responder() func(proc.Call) ([]byte, error) {
 func (s herdrScript) fake() *proc.Fake { return &proc.Fake{Responder: s.responder()} }
 
 // testHerdr is a backend with sub-second readiness pacing so detection polling
-// does not sleep through tests.
+// and kickoff retries do not sleep through tests.
 func testHerdr(r proc.Runner) *Herdr {
 	h := NewHerdr(r)
 	h.PollInterval = time.Millisecond
+	h.KickoffRetryDelay = 0
 	return h
 }
 
@@ -549,24 +552,87 @@ func TestSpawn_AgentBlocked_NamesTheRule(t *testing.T) {
 	hasExactCall(t, calls, "herdr", "agent", "explain", "w7:p1", "--json")
 }
 
-func TestSpawn_PromptStalledOnce_RetriesAndSucceeds(t *testing.T) {
-	f := herdrScript{prompts: []string{"agent_prompt_stalled", ""}}.fake()
-	if _, err := testHerdr(f).Spawn(context.Background(), testSpawn()); err != nil {
-		t.Fatalf("Spawn: %v", err)
+func TestSpawn_PromptStalled_RetriesUntilAccepted(t *testing.T) {
+	cases := []struct {
+		name    string
+		prompts []string
+	}{
+		{"stalled once", []string{"agent_prompt_stalled", ""}},
+		// An agent whose input box renders well after herdr calls it idle loses
+		// several attempts before one lands.
+		{"stalled three times", []string{"agent_prompt_stalled", "agent_prompt_stalled", "agent_prompt_stalled", ""}},
 	}
-	if n := len(herdrCalls(f.Snapshot(), "agent", "prompt")); n != 2 {
-		t.Errorf("agent prompt calls = %d, want exactly 2 (one stall, one retry)", n)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := herdrScript{prompts: tc.prompts}.fake()
+			if _, err := testHerdr(f).Spawn(context.Background(), testSpawn()); err != nil {
+				t.Fatalf("Spawn: %v", err)
+			}
+			if n := len(herdrCalls(f.Snapshot(), "agent", "prompt")); n != len(tc.prompts) {
+				t.Errorf("agent prompt calls = %d, want exactly %d (each stall retried, none after success)", n, len(tc.prompts))
+			}
+		})
 	}
 }
 
-func TestSpawn_PromptStalledTwice_FailsWithRule(t *testing.T) {
-	f := herdrScript{prompts: []string{"agent_prompt_stalled", "agent_prompt_stalled"}}.fake()
-	_, err := testHerdr(f).Spawn(context.Background(), testSpawn())
-	if err == nil || !strings.Contains(err.Error(), "stalled") || !strings.Contains(err.Error(), "trust_directory") {
-		t.Fatalf("Spawn error = %v, want a stall naming the detection rule", err)
+// An agent that never takes the kickoff is retried only until KickoffAckTimeout,
+// measured from the first attempt, runs out, and no attempt's --timeout reaches
+// past that deadline.
+func TestSpawn_PromptAlwaysStalled_FailsAtDeadline(t *testing.T) {
+	const ack = 50 * time.Millisecond
+	type attempt struct {
+		at      time.Time
+		timeout time.Duration
 	}
-	if n := len(herdrCalls(f.Snapshot(), "agent", "prompt")); n != 2 {
-		t.Errorf("agent prompt calls = %d, want exactly 2 (retried once, no more)", n)
+	var (
+		mu       sync.Mutex
+		attempts []attempt
+	)
+	base := herdrScript{}.responder()
+	f := &proc.Fake{Responder: func(c proc.Call) ([]byte, error) {
+		if c.Name == "herdr" && len(c.Args) >= 2 && c.Args[0] == "agent" && c.Args[1] == "prompt" {
+			ms, err := strconv.Atoi(c.Args[len(c.Args)-1])
+			if err != nil {
+				t.Errorf("agent prompt --timeout %q is not milliseconds", c.Args[len(c.Args)-1])
+			}
+			mu.Lock()
+			attempts = append(attempts, attempt{time.Now(), time.Duration(ms) * time.Millisecond})
+			mu.Unlock()
+			time.Sleep(2 * time.Millisecond) // herdr's stall window, scaled down
+			return nil, herdrErr(c.Args, "agent_prompt_stalled")
+		}
+		return base(c)
+	}}
+	h := testHerdr(f)
+	h.KickoffAckTimeout = ack
+
+	_, err := h.Spawn(context.Background(), testSpawn())
+	mu.Lock()
+	defer mu.Unlock()
+	if len(attempts) < 2 {
+		t.Fatalf("agent prompt calls = %d, want the stall retried until the deadline", len(attempts))
+	}
+	want := fmt.Sprintf("kickoff stalled %d times on w7:p1 within %s: trust_directory", len(attempts), ack)
+	if err == nil || err.Error() != want {
+		t.Fatalf("Spawn error = %v, want %q", err, want)
+	}
+	// The deadline is set just before the first call, so it is no later than
+	// first+ack. The fake records a call a moment after the backend computed its
+	// --timeout; a millisecond covers that gap.
+	deadline := attempts[0].at.Add(ack)
+	for i, a := range attempts {
+		if !a.at.Before(deadline) {
+			t.Errorf("attempt %d ran %s after the deadline", i+1, a.at.Sub(deadline))
+		}
+		if a.timeout <= 0 {
+			t.Errorf("attempt %d --timeout = %s, want a positive bound", i+1, a.timeout)
+		}
+		if left := deadline.Sub(a.at); a.timeout > left+time.Millisecond {
+			t.Errorf("attempt %d --timeout = %s, exceeds the %s left until the deadline", i+1, a.timeout, left)
+		}
+	}
+	if attempts[0].timeout != ack {
+		t.Errorf("first attempt --timeout = %s, want the whole KickoffAckTimeout %s", attempts[0].timeout, ack)
 	}
 }
 

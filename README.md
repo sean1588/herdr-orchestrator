@@ -74,7 +74,7 @@ Linux (amd64 / arm64) from the
 any directory on your `PATH`, for example:
 
 ```sh
-VERSION=v0.1.0   # pick the latest from the releases page
+VERSION=v0.2.0   # pick the latest from the releases page
 mkdir -p ~/.local/bin
 curl -fsSL "https://github.com/sean1588/herdr-orchestrator/releases/download/${VERSION}/orchestratord_${VERSION}_darwin_arm64.tar.gz" \
   | tar -xz -C ~/.local/bin orchestratord

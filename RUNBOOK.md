@@ -314,6 +314,8 @@ config change does not erase the run's history.
 Add `--notify-webhook <url>` to POST escalations/alerts out-of-band
 (the always-on channel for when no one is watching the loop).
 
+The dashboard is at `http://<mcp-listen>/ui/` whenever `--mcp-listen` is set.
+
 **Verify it came up:** the daemon logs `daemon starting label=<…> workers=<N>`
 and `mcp control server listening addr=127.0.0.1:7777`. If the address is
 already in use or the config is invalid, it exits at startup rather than running

@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>orchestrator</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f4f5f7;
+    --text: #1b1e23;
+    --muted: #5e6874;
+    --line: #e1e4ea;
+    --accent: #1d4ed8;
+    --hover: #eef1f6;
+    --escalated-bg: #fff3e8;
+    --escalated-mark: #c2410c;
+    --banner-bg: #fde8e8;
+    --banner-fg: #9f1239;
+    --audit: #f8f9fb;
+    --sans: ui-sans-serif, system-ui, sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a;
+      --text: #e8eaee;
+      --muted: #9aa3b2;
+      --line: #2a303a;
+      --accent: #93b4ff;
+      --hover: #222833;
+      --escalated-bg: #3a291c;
+      --escalated-mark: #f0a060;
+      --banner-bg: #3f1d24;
+      --banner-fg: #fecdd3;
+      --audit: #1a1e26;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.45 var(--sans);
+  }
+  .page { max-width: 72rem; margin: 0 auto; padding: 8px 24px 48px; }
+  header {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 16px 24px;
+    padding: 20px 0 16px;
+    border-bottom: 1px solid var(--line);
+  }
+  h1 { margin: 0; font-size: 1.25rem; font-weight: 600; letter-spacing: -0.02em; }
+  h2 { margin: 22px 0 8px; font-size: 0.95rem; font-weight: 600; }
+  .hint { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+  .status {
+    display: flex;
+    gap: 16px;
+    margin: 0;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .count { color: var(--muted); font-weight: 500; }
+  summary { cursor: pointer; padding: 22px 0 8px; font-size: 0.95rem; font-weight: 600; }
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; }
+  th {
+    text-align: left;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--line);
+    white-space: nowrap;
+  }
+  td {
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--line);
+    font-family: var(--mono);
+    font-size: 13px;
+    vertical-align: top;
+    font-variant-numeric: tabular-nums;
+  }
+  tr.task { cursor: pointer; }
+  tr.task:hover { background: var(--hover); }
+  tr.task.escalated { background: var(--escalated-bg); }
+  tr.task.escalated:hover { background: var(--escalated-bg); }
+  tr.task.escalated td:first-child { box-shadow: inset 3px 0 0 var(--escalated-mark); }
+  tr.task:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .bounds { margin-top: 2px; color: var(--muted); font-size: 12px; }
+  a { color: var(--accent); }
+  tr.audit td { background: var(--audit); cursor: text; font-size: 12px; }
+  tr.audit pre { margin: 0; white-space: pre-wrap; font: inherit; }
+  .empty { margin: 8px 0 0; color: var(--muted); }
+  #banner:not(:empty) {
+    margin-top: 16px;
+    padding: 10px 12px;
+    border-radius: 6px;
+    background: var(--banner-bg);
+    color: var(--banner-fg);
+    font-weight: 600;
+  }
+  noscript { display: block; margin-top: 16px; }
+</style>
+</head>
+<body>
+<div class="page">
+  <header>
+    <div>
+      <h1>Tasks</h1>
+      <p class="hint">Click a row for its audit trail.</p>
+    </div>
+    <p class="status"><span id="daemon"></span><span id="polled"></span></p>
+  </header>
+  <p id="banner" role="status" aria-live="assertive"></p>
+  <section>
+    <h2>Active <span id="active-count" class="count"></span></h2>
+    <div id="active-wrap" class="table-wrap" hidden>
+      <table>
+        <thead>
+          <tr>
+            <th scope="col">Issue</th>
+            <th scope="col">State</th>
+            <th scope="col">In state</th>
+            <th scope="col">Agent</th>
+            <th scope="col">PR</th>
+            <th scope="col">Retries</th>
+          </tr>
+        </thead>
+        <tbody id="active-body"></tbody>
+      </table>
+    </div>
+    <p id="active-empty" class="empty">Waiting for the daemon…</p>
+  </section>
+  <details>
+    <summary>Settled <span id="settled-count" class="count"></span></summary>
+    <div id="settled-wrap" class="table-wrap" hidden>
+      <table>
+        <thead>
+          <tr>
+            <th scope="col">Issue</th>
+            <th scope="col">State</th>
+            <th scope="col">In state</th>
+            <th scope="col">Agent</th>
+            <th scope="col">PR</th>
+            <th scope="col">Retries</th>
+          </tr>
+        </thead>
+        <tbody id="settled-body"></tbody>
+      </table>
+    </div>
+    <p id="settled-empty" class="empty">Waiting for the daemon…</p>
+  </details>
+  <noscript>This dashboard needs JavaScript to poll the daemon.</noscript>
+</div>
+<script>
+"use strict";
+
+var POLL_MS = 3000;
+var COLS = 6;
+var SETTLED = new Set(["merged", "closed", "cancelled", "escalated"]);
+
+var lastTasks = [];
+var expanded = new Set();
+var audits = new Map();
+var inflight = false;
+var downSince = null;
+
+function pad(n) {
+  return String(n).padStart(2, "0");
+}
+
+function hhmmss(d) {
+  return pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds());
+}
+
+function humanize(seconds) {
+  if (seconds == null || seconds === "") return "";
+  var n = Math.floor(Number(seconds));
+  if (!isFinite(n) || n < 0) n = 0;
+  if (n < 60) return n + "s";
+  var min = Math.floor(n / 60);
+  if (min < 60) return min + "m" + pad(n % 60) + "s";
+  return Math.floor(min / 60) + "h" + pad(min % 60) + "m";
+}
+
+function el(tag, className, text) {
+  var node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text != null) node.textContent = text;
+  return node;
+}
+
+function link(href, text) {
+  var a = el("a", "", text);
+  a.href = href;
+  a.target = "_blank";
+  a.rel = "noopener noreferrer";
+  return a;
+}
+
+function github(repo, kind, n) {
+  return "https://github.com/" + repo + "/" + kind + "/" + n;
+}
+
+function callTool(name, args) {
+  return fetch("/mcp", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: name, arguments: args }
+    })
+  }).then(function (res) {
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    return res.json();
+  }).then(function (msg) {
+    var result = msg.result;
+    if (!result) {
+      var message = msg.error && msg.error.message;
+      throw new Error(message || "no result");
+    }
+    var block = result.content && result.content[0];
+    var text = block && block.text;
+    if (result.isError) throw new Error(text || "tool error");
+    if (typeof text !== "string") throw new Error("empty tool result");
+    return JSON.parse(text);
+  });
+}
+
+function byUpdatedDesc(a, b) {
+  var at = Date.parse(a.updated_at);
+  var bt = Date.parse(b.updated_at);
+  if (isNaN(at) || isNaN(bt)) {
+    return String(b.updated_at).localeCompare(String(a.updated_at));
+  }
+  return bt - at;
+}
+
+function partition(tasks) {
+  var active = [];
+  var settled = [];
+  tasks.forEach(function (t) {
+    if (SETTLED.has(t.state)) settled.push(t);
+    else active.push(t);
+  });
+  active.sort(byUpdatedDesc);
+  settled.sort(function (a, b) {
+    var ar = a.state === "escalated" ? 0 : 1;
+    var br = b.state === "escalated" ? 0 : 1;
+    return ar !== br ? ar - br : byUpdatedDesc(a, b);
+  });
+  return { active: active, settled: settled };
+}
+
+function boundsText(t) {
+  var parts = [];
+  if (t.state_timeout) parts.push("state " + t.state_timeout);
+  if (t.blocked_timeout) parts.push("blocked " + t.blocked_timeout);
+  return parts.join(" · ");
+}
+
+function retryText(counts) {
+  if (!counts) return "";
+  var keys = Object.keys(counts).sort();
+  if (!keys.length) return "";
+  return keys.map(function (k) { return k + "=" + counts[k]; }).join(", ");
+}
+
+function agentText(t) {
+  if (!t.agent_status) return "";
+  var age = humanize(t.agent_status_for_seconds);
+  return age ? t.agent_status + " · " + age : t.agent_status;
+}
+
+function issueCell(t) {
+  var label = "#" + t.issue;
+  if (!t.repo) return label;
+  return link(github(t.repo, "issues", t.issue), label);
+}
+
+function prCell(t) {
+  if (t.pr_number == null) return "";
+  var label = "#" + t.pr_number;
+  if (!t.repo) return label;
+  return link(github(t.repo, "pull", t.pr_number), label);
+}
+
+function cell(content, className) {
+  var td = el("td", className || "");
+  if (content instanceof Node) td.append(content);
+  else td.textContent = content ? String(content) : "—";
+  return td;
+}
+
+function timeCell(t) {
+  var td = el("td", "time");
+  td.append(el("div", "elapsed", humanize(t.state_for_seconds) || "—"));
+  var bounds = boundsText(t);
+  if (bounds) td.append(el("div", "bounds", bounds));
+  return td;
+}
+
+function auditLine(e) {
+  var line = e.ts + "  " + (e.from_state || "") + " → " + (e.to_state || "") + "  (" + (e.trigger || "") + ")";
+  if (e.result) line += "  " + e.result;
+  return line;
+}
+
+function auditText(issue) {
+  var got = audits.get(issue);
+  if (!got) return "loading…";
+  if (got.error && !got.entries) return got.error;
+  var entries = got.entries || [];
+  if (!entries.length) return got.error || "no transitions";
+  return entries.map(auditLine).join("\n");
+}
+
+function taskRow(t) {
+  var tr = el("tr", t.state === "escalated" ? "task escalated" : "task");
+  tr.dataset.issue = String(t.issue);
+  tr.tabIndex = 0;
+  tr.setAttribute("role", "button");
+  tr.setAttribute("aria-expanded", expanded.has(t.issue) ? "true" : "false");
+  tr.append(
+    cell(issueCell(t)),
+    cell(t.state),
+    timeCell(t),
+    cell(agentText(t)),
+    cell(prCell(t)),
+    cell(retryText(t.retry_counts))
+  );
+  tr.addEventListener("click", function (ev) {
+    if (ev.target.closest("a")) return;
+    toggle(t.issue);
+  });
+  tr.addEventListener("keydown", function (ev) {
+    if (ev.key !== "Enter" && ev.key !== " ") return;
+    ev.preventDefault();
+    toggle(t.issue);
+  });
+  return tr;
+}
+
+function auditRow(issue) {
+  var tr = el("tr", "audit");
+  var td = el("td");
+  td.colSpan = COLS;
+  td.append(el("pre", "", auditText(issue)));
+  tr.append(td);
+  return tr;
+}
+
+function fill(tbody, tasks) {
+  var rows = [];
+  tasks.forEach(function (t) {
+    rows.push(taskRow(t));
+    if (expanded.has(t.issue)) rows.push(auditRow(t.issue));
+  });
+  tbody.replaceChildren.apply(tbody, rows);
+}
+
+function setEmpty(wrapId, emptyId, n, label) {
+  document.getElementById(wrapId).hidden = n === 0;
+  var empty = document.getElementById(emptyId);
+  empty.hidden = n !== 0;
+  if (n === 0) empty.textContent = label;
+}
+
+function selectingText() {
+  var sel = document.getSelection();
+  return !!(sel && !sel.isCollapsed && document.contains(sel.anchorNode));
+}
+
+function focusedIssue() {
+  var node = document.activeElement;
+  return node && node.dataset ? node.dataset.issue || "" : "";
+}
+
+function render() {
+  if (selectingText()) return;
+  var focus = focusedIssue();
+  var parts = partition(lastTasks);
+  fill(document.getElementById("active-body"), parts.active);
+  fill(document.getElementById("settled-body"), parts.settled);
+  setEmpty("active-wrap", "active-empty", parts.active.length, "No active tasks.");
+  setEmpty("settled-wrap", "settled-empty", parts.settled.length, "No settled tasks.");
+  document.getElementById("active-count").textContent = "(" + parts.active.length + ")";
+  document.getElementById("settled-count").textContent = "(" + parts.settled.length + ")";
+  if (focus) {
+    var again = document.querySelector('tr[data-issue="' + focus + '"]');
+    if (again) again.focus();
+  }
+}
+
+function noteReachable(now) {
+  downSince = null;
+  document.getElementById("banner").textContent = "";
+  document.getElementById("polled").textContent = "last poll " + hhmmss(now);
+}
+
+function noteUnreachable() {
+  if (!downSince) downSince = new Date();
+  document.getElementById("banner").textContent = "daemon unreachable since " + hhmmss(downSince);
+}
+
+function storeAudit(issue, entries) {
+  audits.set(issue, { entries: entries });
+}
+
+function refreshAudits() {
+  var issues = Array.from(expanded);
+  return Promise.all(issues.map(function (issue) {
+    return callTool("get_audit", { issue: issue }).then(function (entries) {
+      storeAudit(issue, entries);
+    }).catch(function () {
+      var prev = audits.get(issue);
+      if (!prev || !prev.entries) audits.set(issue, { error: "audit unavailable" });
+    });
+  }));
+}
+
+function toggle(issue) {
+  if (expanded.has(issue)) {
+    expanded.delete(issue);
+    render();
+    return;
+  }
+  expanded.add(issue);
+  render();
+  callTool("get_audit", { issue: issue }).then(function (entries) {
+    storeAudit(issue, entries);
+    if (expanded.has(issue)) render();
+  }).catch(function () {
+    var prev = audits.get(issue);
+    if (!prev || !prev.entries) audits.set(issue, { error: "audit unavailable" });
+    if (expanded.has(issue)) render();
+  });
+}
+
+function poll() {
+  if (inflight) return;
+  inflight = true;
+  callTool("list_tasks", {}).then(function (tasks) {
+    if (!Array.isArray(tasks)) throw new Error("list_tasks did not return a list");
+    return refreshAudits().then(function () {
+      lastTasks = tasks;
+      noteReachable(new Date());
+      render();
+    });
+  }).catch(function () {
+    noteUnreachable();
+  }).then(function () {
+    inflight = false;
+  });
+}
+
+document.getElementById("daemon").textContent = "daemon " + location.host;
+poll();
+setInterval(poll, POLL_MS);
+</script>
+</body>
+</html>

@@ -59,6 +59,7 @@ import (
 	"github.com/sean1588/herdr-orchestrator/internal/scheduler"
 	"github.com/sean1588/herdr-orchestrator/internal/source"
 	"github.com/sean1588/herdr-orchestrator/internal/store"
+	"github.com/sean1588/herdr-orchestrator/internal/ui"
 )
 
 // version is the binary's reported version. Overridable at build time via
@@ -630,7 +631,8 @@ func cmdDaemon(args []string) int {
 		}
 		srv := mcp.New(w.store, sched, engine.TaskID, slog.Default()).
 			WithDeadlines(deadlinesFor(w.wf)).
-			WithMessaging(w.backend, w.store, settled)
+			WithMessaging(w.backend, w.store, settled).
+			WithUI(ui.Handler())
 		go func() {
 			if err := srv.Serve(ctx, ln); err != nil {
 				slog.Error("mcp server stopped", "err", err)
